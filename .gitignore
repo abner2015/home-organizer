@@ -1,0 +1,33 @@
+node_modules
+dist
+build
+.DS_Store
+*.log
+.env
+.env.local
+.vite
+coverage
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+.pytest_cache/
+# Generated evaluation reports (services/api/evaluation/reports/*)
+services/api/evaluation/reports/
+.idea/
+.vscode/
+*.swp
