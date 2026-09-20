@@ -1,0 +1,841 @@
+{
+  "version": "1.0.0",
+  "description": "AI Evaluation dataset for the home-organizer recommendation agent. Each case defines an item, the storage slots that should be recommended (expected_slots), and slots that must NOT be chosen (forbidden_slots).",
+  "categories": [
+    "kitchen_appliance", "tea", "alcohol", "medicine",
+    "kids", "toys", "cable", "charger", "book",
+    "clothes", "cleaning", "food", "tool", "camping", "fragile"
+  ],
+  "cases": [
+    {
+      "id": "kitchen_appliance_001",
+      "category": "kitchen_appliance",
+      "item": {
+        "name": "空气炸锅",
+        "category": "utensil",
+        "subcategory": "small_appliance",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet"],
+      "forbidden_slots": ["living_cabinet_glass", "kids_room_drawer", "bathroom_cabinet"],
+      "reason": "厨房电器应放在厨房，避免在客厅与走边使用产生安全隐患"
+    },
+    {
+      "id": "kitchen_appliance_002",
+      "category": "kitchen_appliance",
+      "item": {
+        "name": "电饭煲",
+        "category": "utensil",
+        "subcategory": "small_appliance",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet"],
+      "forbidden_slots": ["bedroom_wardrobe", "living_cabinet_glass"],
+      "reason": "电饭煲属于厨房电器，使用场景在厨房"
+    },
+    {
+      "id": "kitchen_appliance_003",
+      "category": "kitchen_appliance",
+      "item": {
+        "name": "咖啡机",
+        "category": "utensil",
+        "subcategory": "small_appliance",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet"],
+      "forbidden_slots": ["bedroom_drawer", "kids_room_drawer"],
+      "reason": "咖啡机属厨房电器；不能在卧室/儿童房"
+    },
+    {
+      "id": "kitchen_appliance_004",
+      "category": "kitchen_appliance",
+      "item": {
+        "name": "榨汁机",
+        "category": "utensil",
+        "subcategory": "small_appliance",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet"],
+      "forbidden_slots": ["living_cabinet_open", "bedroom_wardrobe"],
+      "reason": "小家电、厨房使用"
+    },
+    {
+      "id": "kitchen_appliance_005",
+      "category": "kitchen_appliance",
+      "item": {
+        "name": "微波炉",
+        "category": "utensil",
+        "subcategory": "large_appliance",
+        "estimated_size": "large",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_counter_or_large_slot"],
+      "forbidden_slots": ["living_cabinet_glass", "kids_room_drawer"],
+      "reason": "微波炉体积大、只能在厨房"
+    },
+
+    {
+      "id": "tea_001",
+      "category": "tea",
+      "item": {
+        "name": "龙井茶叶",
+        "category": "food",
+        "subcategory": "tea",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet"],
+      "forbidden_slots": ["bathroom_cabinet", "bedroom_wardrobe"],
+      "reason": "茶叶属厨房食品，应放在厨房吊柜"
+    },
+    {
+      "id": "tea_002",
+      "category": "tea",
+      "item": {
+        "name": "普洱茶饼",
+        "category": "food",
+        "subcategory": "tea",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open", "living_cabinet_glass"],
+      "forbidden_slots": ["bathroom_cabinet", "bedroom_drawer"],
+      "reason": "茶饼在客厅展示收纳"
+    },
+    {
+      "id": "tea_003",
+      "category": "tea",
+      "item": {
+        "name": "铁观音",
+        "category": "food",
+        "subcategory": "tea",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet"],
+      "forbidden_slots": ["bedroom_wardrobe", "kids_room_drawer"],
+      "reason": "茶叶应放在厨房"
+    },
+    {
+      "id": "tea_004",
+      "category": "tea",
+      "item": {
+        "name": "茶具套装",
+        "category": "utensil",
+        "subcategory": "tea_set",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_glass", "living_cabinet_open"],
+      "forbidden_slots": ["bedroom_drawer", "kids_room_drawer"],
+      "reason": "茶具展示/收纳在客厅"
+    },
+
+    {
+      "id": "alcohol_001",
+      "category": "alcohol",
+      "item": {
+        "name": "茅台酒",
+        "category": "food",
+        "subcategory": "liquor",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_glass", "living_cabinet_open"],
+      "forbidden_slots": ["bedroom_wardrobe", "kids_room_drawer"],
+      "reason": "酒类不适合放卧室/儿童房；客厅展示柜更合适"
+    },
+    {
+      "id": "alcohol_002",
+      "category": "alcohol",
+      "item": {
+        "name": "红酒",
+        "category": "food",
+        "subcategory": "wine",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet", "living_cabinet_glass"],
+      "forbidden_slots": ["kids_room_drawer", "bathroom_cabinet"],
+      "reason": "红酒可放厨房/客厅展示柜；不适合卧室/儿童房"
+    },
+    {
+      "id": "alcohol_003",
+      "category": "alcohol",
+      "item": {
+        "name": "啤酒",
+        "category": "food",
+        "subcategory": "beer",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet"],
+      "forbidden_slots": ["bedroom_wardrobe", "kids_room_drawer"],
+      "reason": "啤酒应放在厨房"
+    },
+    {
+      "id": "alcohol_004",
+      "category": "alcohol",
+      "item": {
+        "name": "威士忌",
+        "category": "food",
+        "subcategory": "liquor",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_glass"],
+      "forbidden_slots": ["bedroom_wardrobe", "kids_room_drawer"],
+      "reason": "威士忌展示在客厅玻璃柜"
+    },
+
+    {
+      "id": "medicine_001",
+      "category": "medicine",
+      "item": {
+        "name": "处方药",
+        "category": "medicine",
+        "subcategory": "prescription",
+        "estimated_size": "small",
+        "is_sensitive": true,
+        "needs_lock": true,
+        "usage_scene": "主卧"
+      },
+      "expected_slots": ["bedroom_locked_drawer", "locked_cabinet"],
+      "forbidden_slots": ["kids_room_drawer", "living_cabinet_glass", "kitchen_cabinet"],
+      "reason": "处方药属于敏感物品、必须上锁，且绝不能放在儿童房"
+    },
+    {
+      "id": "medicine_002",
+      "category": "medicine",
+      "item": {
+        "name": "感冒药",
+        "category": "medicine",
+        "subcategory": "otc",
+        "estimated_size": "small",
+        "is_sensitive": true,
+        "needs_lock": true,
+        "usage_scene": "主卧"
+      },
+      "expected_slots": ["bedroom_locked_drawer", "locked_cabinet"],
+      "forbidden_slots": ["kids_room_drawer", "kitchen_cabinet"],
+      "reason": "感冒药需上锁，避免儿童接触"
+    },
+    {
+      "id": "medicine_003",
+      "category": "medicine",
+      "item": {
+        "name": "儿童退烧药",
+        "category": "medicine",
+        "subcategory": "kids_medicine",
+        "estimated_size": "small",
+        "is_sensitive": true,
+        "needs_lock": true,
+        "usage_scene": "儿童房"
+      },
+      "expected_slots": ["kids_room_locked", "locked_cabinet"],
+      "forbidden_slots": ["kitchen_cabinet", "living_cabinet_open"],
+      "reason": "儿童药品应上锁存放"
+    },
+    {
+      "id": "medicine_004",
+      "category": "medicine",
+      "item": {
+        "name": "创可贴",
+        "category": "medicine",
+        "subcategory": "first_aid",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "主卧"
+      },
+      "expected_slots": ["bedroom_drawer", "bedroom_locked_drawer"],
+      "forbidden_slots": ["kitchen_cabinet", "bathroom_cabinet"],
+      "reason": "创可贴可放在卧室抽屉（不属于强制上锁药品）"
+    },
+
+    {
+      "id": "kids_001",
+      "category": "kids",
+      "item": {
+        "name": "儿童绘本",
+        "category": "kids",
+        "subcategory": "book",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "儿童房"
+      },
+      "expected_slots": ["kids_room_drawer", "kids_room_shelf"],
+      "forbidden_slots": ["bedroom_locked_drawer", "kitchen_cabinet"],
+      "reason": "儿童绘本应放在儿童房"
+    },
+    {
+      "id": "kids_002",
+      "category": "kids",
+      "item": {
+        "name": "儿童水杯",
+        "category": "kids",
+        "subcategory": "tableware",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "儿童房"
+      },
+      "expected_slots": ["kids_room_drawer"],
+      "forbidden_slots": ["bedroom_locked_drawer"],
+      "reason": "儿童日常用品放在儿童房"
+    },
+    {
+      "id": "kids_003",
+      "category": "kids",
+      "item": {
+        "name": "儿童书包",
+        "category": "kids",
+        "subcategory": "bag",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "儿童房"
+      },
+      "expected_slots": ["kids_room_drawer", "kids_room_shelf"],
+      "forbidden_slots": ["bedroom_locked_drawer"],
+      "reason": "儿童书包放在儿童房"
+    },
+    {
+      "id": "kids_004",
+      "category": "kids",
+      "item": {
+        "name": "儿童蜡笔",
+        "category": "kids",
+        "subcategory": "stationery",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "儿童房"
+      },
+      "expected_slots": ["kids_room_drawer"],
+      "forbidden_slots": ["kitchen_cabinet", "living_cabinet_glass"],
+      "reason": "儿童学习/手工用品放儿童房"
+    },
+
+    {
+      "id": "toys_001",
+      "category": "toys",
+      "item": {
+        "name": "乐高积木",
+        "category": "toys",
+        "subcategory": "building_blocks",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "儿童房"
+      },
+      "expected_slots": ["kids_room_drawer", "kids_room_shelf"],
+      "forbidden_slots": ["bedroom_locked_drawer", "kitchen_cabinet"],
+      "reason": "积木类玩具放儿童房"
+    },
+    {
+      "id": "toys_002",
+      "category": "toys",
+      "item": {
+        "name": "毛绒玩具",
+        "category": "toys",
+        "subcategory": "plush",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "儿童房"
+      },
+      "expected_slots": ["kids_room_shelf", "kids_room_drawer"],
+      "forbidden_slots": ["bedroom_locked_drawer"],
+      "reason": "毛绒玩具放儿童房"
+    },
+    {
+      "id": "toys_003",
+      "category": "toys",
+      "item": {
+        "name": "遥控车",
+        "category": "toys",
+        "subcategory": "electronic",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open", "kids_room_drawer"],
+      "forbidden_slots": ["kitchen_cabinet", "bedroom_locked_drawer"],
+      "reason": "电子玩具可在客厅或儿童房"
+    },
+
+    {
+      "id": "cable_001",
+      "category": "cable",
+      "item": {
+        "name": "USB-C 数据线",
+        "category": "tool",
+        "subcategory": "cable",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open", "living_cabinet_glass"],
+      "forbidden_slots": ["kitchen_cabinet", "bathroom_cabinet"],
+      "reason": "数据线常用于客厅电子设备充电"
+    },
+    {
+      "id": "cable_002",
+      "category": "cable",
+      "item": {
+        "name": "HDMI 线",
+        "category": "tool",
+        "subcategory": "cable",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open"],
+      "forbidden_slots": ["kitchen_cabinet", "bedroom_wardrobe"],
+      "reason": "HDMI 线用于客厅电视"
+    },
+    {
+      "id": "cable_003",
+      "category": "cable",
+      "item": {
+        "name": "网线",
+        "category": "tool",
+        "subcategory": "cable",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open", "living_cabinet_glass"],
+      "forbidden_slots": ["kitchen_cabinet"],
+      "reason": "网线通常用于客厅/书房"
+    },
+
+    {
+      "id": "charger_001",
+      "category": "charger",
+      "item": {
+        "name": "手机充电器",
+        "category": "tool",
+        "subcategory": "charger",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open", "bedroom_drawer"],
+      "forbidden_slots": ["kitchen_cabinet", "bathroom_cabinet"],
+      "reason": "手机充电器可在客厅或卧室"
+    },
+    {
+      "id": "charger_002",
+      "category": "charger",
+      "item": {
+        "name": "笔记本电脑充电器",
+        "category": "tool",
+        "subcategory": "charger",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "书房"
+      },
+      "expected_slots": ["living_cabinet_open", "bedroom_drawer"],
+      "forbidden_slots": ["kitchen_cabinet", "bathroom_cabinet"],
+      "reason": "笔电充电器可在客厅或卧室"
+    },
+
+    {
+      "id": "book_001",
+      "category": "book",
+      "item": {
+        "name": "《三体》小说",
+        "category": "book",
+        "subcategory": "fiction",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "书房"
+      },
+      "expected_slots": ["living_cabinet_open", "living_cabinet_glass"],
+      "forbidden_slots": ["kitchen_cabinet", "bedroom_locked_drawer"],
+      "reason": "小说可放在客厅展示柜"
+    },
+    {
+      "id": "book_002",
+      "category": "book",
+      "item": {
+        "name": "技术手册",
+        "category": "book",
+        "subcategory": "technical",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "书房"
+      },
+      "expected_slots": ["living_cabinet_glass", "bedroom_drawer"],
+      "forbidden_slots": ["kitchen_cabinet", "bathroom_cabinet"],
+      "reason": "技术书放在客厅玻璃柜"
+    },
+    {
+      "id": "book_003",
+      "category": "book",
+      "item": {
+        "name": "菜谱",
+        "category": "book",
+        "subcategory": "cookbook",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet"],
+      "forbidden_slots": ["bedroom_wardrobe", "living_cabinet_glass"],
+      "reason": "菜谱应放在厨房"
+    },
+
+    {
+      "id": "clothes_001",
+      "category": "clothes",
+      "item": {
+        "name": "冬季羽绒服",
+        "category": "clothes",
+        "subcategory": "winter",
+        "estimated_size": "large",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "主卧"
+      },
+      "expected_slots": ["bedroom_wardrobe"],
+      "forbidden_slots": ["kitchen_cabinet", "kids_room_drawer"],
+      "reason": "冬季衣物应放在卧室衣柜"
+    },
+    {
+      "id": "clothes_002",
+      "category": "clothes",
+      "item": {
+        "name": "夏季T恤",
+        "category": "clothes",
+        "subcategory": "summer",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "主卧"
+      },
+      "expected_slots": ["bedroom_wardrobe", "bedroom_drawer"],
+      "forbidden_slots": ["kitchen_cabinet", "living_cabinet_glass"],
+      "reason": "夏季衣物放在卧室衣柜"
+    },
+    {
+      "id": "clothes_003",
+      "category": "clothes",
+      "item": {
+        "name": "袜子",
+        "category": "clothes",
+        "subcategory": "underwear",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "主卧"
+      },
+      "expected_slots": ["bedroom_drawer"],
+      "forbidden_slots": ["kitchen_cabinet", "living_cabinet_glass"],
+      "reason": "袜子等贴身衣物放在卧室抽屉"
+    },
+    {
+      "id": "clothes_004",
+      "category": "clothes",
+      "item": {
+        "name": "围巾",
+        "category": "clothes",
+        "subcategory": "accessory",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "主卧"
+      },
+      "expected_slots": ["bedroom_wardrobe", "bedroom_drawer"],
+      "forbidden_slots": ["kitchen_cabinet"],
+      "reason": "围巾放在卧室"
+    },
+
+    {
+      "id": "cleaning_001",
+      "category": "cleaning",
+      "item": {
+        "name": "洗洁精",
+        "category": "cleaning",
+        "subcategory": "kitchen_cleaner",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet"],
+      "forbidden_slots": ["bedroom_wardrobe", "kids_room_drawer"],
+      "reason": "厨房清洁剂应放在厨房"
+    },
+    {
+      "id": "cleaning_002",
+      "category": "cleaning",
+      "item": {
+        "name": "洗衣液",
+        "category": "cleaning",
+        "subcategory": "laundry",
+        "estimated_size": "large",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "卫生间"
+      },
+      "expected_slots": ["bathroom_cabinet"],
+      "forbidden_slots": ["kitchen_cabinet", "bedroom_wardrobe"],
+      "reason": "洗衣液应放在卫生间"
+    },
+    {
+      "id": "cleaning_003",
+      "category": "cleaning",
+      "item": {
+        "name": "玻璃清洁剂",
+        "category": "cleaning",
+        "subcategory": "glass_cleaner",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "卫生间"
+      },
+      "expected_slots": ["bathroom_cabinet"],
+      "forbidden_slots": ["kids_room_drawer"],
+      "reason": "玻璃清洁剂放在卫生间柜子"
+    },
+
+    {
+      "id": "food_001",
+      "category": "food",
+      "item": {
+        "name": "大米",
+        "category": "food",
+        "subcategory": "grain",
+        "estimated_size": "large",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet"],
+      "forbidden_slots": ["bedroom_wardrobe", "living_cabinet_glass"],
+      "reason": "主食应放在厨房"
+    },
+    {
+      "id": "food_002",
+      "category": "food",
+      "item": {
+        "name": "零食",
+        "category": "food",
+        "subcategory": "snack",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open", "kitchen_cabinet"],
+      "forbidden_slots": ["bedroom_locked_drawer", "bathroom_cabinet"],
+      "reason": "零食可在客厅或厨房"
+    },
+    {
+      "id": "food_003",
+      "category": "food",
+      "item": {
+        "name": "巧克力",
+        "category": "food",
+        "subcategory": "candy",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["kitchen_cabinet", "living_cabinet_open"],
+      "forbidden_slots": ["bedroom_wardrobe"],
+      "reason": "巧克力可放厨房或客厅"
+    },
+
+    {
+      "id": "tool_001",
+      "category": "tool",
+      "item": {
+        "name": "螺丝刀",
+        "category": "tool",
+        "subcategory": "hand_tool",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open"],
+      "forbidden_slots": ["kitchen_cabinet", "bedroom_locked_drawer"],
+      "reason": "工具放客厅开放区或杂物柜"
+    },
+    {
+      "id": "tool_002",
+      "category": "tool",
+      "item": {
+        "name": "扳手",
+        "category": "tool",
+        "subcategory": "hand_tool",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open"],
+      "forbidden_slots": ["kids_room_drawer", "bedroom_locked_drawer"],
+      "reason": "金属工具不应放在儿童房"
+    },
+    {
+      "id": "tool_003",
+      "category": "tool",
+      "item": {
+        "name": "电钻",
+        "category": "tool",
+        "subcategory": "power_tool",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open"],
+      "forbidden_slots": ["kitchen_cabinet", "bedroom_wardrobe"],
+      "reason": "电动工具应放在客厅收纳"
+    },
+
+    {
+      "id": "camping_001",
+      "category": "camping",
+      "item": {
+        "name": "帐篷",
+        "category": "camping",
+        "subcategory": "shelter",
+        "estimated_size": "large",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open", "bedroom_wardrobe"],
+      "forbidden_slots": ["kitchen_cabinet", "bathroom_cabinet"],
+      "reason": "大件露营装备可放客厅收纳柜"
+    },
+    {
+      "id": "camping_002",
+      "category": "camping",
+      "item": {
+        "name": "睡袋",
+        "category": "camping",
+        "subcategory": "sleeping",
+        "estimated_size": "large",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open", "bedroom_wardrobe"],
+      "forbidden_slots": ["kitchen_cabinet"],
+      "reason": "睡袋放客厅/卧室"
+    },
+    {
+      "id": "camping_003",
+      "category": "camping",
+      "item": {
+        "name": "露营头灯",
+        "category": "camping",
+        "subcategory": "lighting",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open"],
+      "forbidden_slots": ["kitchen_cabinet", "bedroom_locked_drawer"],
+      "reason": "小件露营装备放客厅开放区"
+    },
+
+    {
+      "id": "fragile_001",
+      "category": "fragile",
+      "item": {
+        "name": "玻璃水杯",
+        "category": "fragile",
+        "subcategory": "glass",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet", "living_cabinet_glass"],
+      "forbidden_slots": ["kids_room_drawer"],
+      "reason": "玻璃器皿不应放在儿童房"
+    },
+    {
+      "id": "fragile_002",
+      "category": "fragile",
+      "item": {
+        "name": "陶瓷花瓶",
+        "category": "fragile",
+        "subcategory": "ceramic",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_glass"],
+      "forbidden_slots": ["kids_room_drawer", "bedroom_locked_drawer"],
+      "reason": "易碎品只能放在客厅展示柜"
+    },
+    {
+      "id": "fragile_003",
+      "category": "fragile",
+      "item": {
+        "name": "红酒杯",
+        "category": "fragile",
+        "subcategory": "glass",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_glass", "kitchen_cabinet"],
+      "forbidden_slots": ["kids_room_drawer"],
+      "reason": "玻璃酒杯放客厅展示柜或厨房"
+    }
+  ]
+}

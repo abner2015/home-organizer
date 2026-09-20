@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "home-organizer-api"
+version = "0.1.0"
+description = "AI 家庭收纳管家 - Backend API"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "alembic>=1.13.3",
+    "asyncpg>=0.30.0",
+    "psycopg[binary]>=3.2.3",
+    "redis[hiredis]>=5.2.0",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-multipart>=0.0.17",
+    "httpx>=0.28.0",
+    "structlog>=24.4.0",
+    "anyio>=4.6.2",
+    "email-validator>=2.2.0",
+    "boto3>=1.35.0",
+    "pillow>=11.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+    "types-passlib>=1.7.7.20240819",
+    "aiosqlite>=0.20.0",
+    "moto[s3]>=5.0.0",
+    "types-boto3[s3]>=1.35.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B", "SIM", "RUF001", "RUF002"]
+# Search-agent modules surface Chinese-language user-facing strings (the
+# agent answers in CJK); RUF001/RUF002 would flag fullwidth punctuation.
+"app/agents/search/*" = ["RUF001", "RUF002"]
+"app/api/v1/search.py" = ["RUF001", "RUF002"]
+"app/schemas/search.py" = ["RUF001", "RUF002"]
+"app/services/search_service.py" = ["RUF001", "RUF002"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+exclude = ["alembic/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --strict-markers --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

@@ -1,0 +1,172 @@
+{
+  "version": "1.0.0",
+  "description": "Additional edge-case cases for the AI evaluation dataset. Covers low-confidence items, ambiguous items, items with no clear slot, and adversarial inputs.",
+  "categories": [
+    "ambiguous", "no_clear_slot", "low_confidence", "large_item", "duplicate"
+  ],
+  "cases": [
+    {
+      "id": "ambiguous_001",
+      "category": "ambiguous",
+      "item": {
+        "name": "玻璃瓶装可乐",
+        "category": "food",
+        "subcategory": "drink",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["kitchen_cabinet", "living_cabinet_open"],
+      "forbidden_slots": ["kids_room_drawer"],
+      "reason": "瓶装饮料可放厨房或客厅"
+    },
+    {
+      "id": "ambiguous_002",
+      "category": "ambiguous",
+      "item": {
+        "name": "充电宝",
+        "category": "tool",
+        "subcategory": "power_bank",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open", "bedroom_drawer"],
+      "forbidden_slots": ["kitchen_cabinet"],
+      "reason": "充电宝可在客厅或卧室"
+    },
+    {
+      "id": "ambiguous_003",
+      "category": "ambiguous",
+      "item": {
+        "name": "装饰画",
+        "category": "decor",
+        "subcategory": "art",
+        "estimated_size": "medium",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open"],
+      "forbidden_slots": ["kitchen_cabinet", "bathroom_cabinet"],
+      "reason": "装饰画应放在客厅"
+    },
+    {
+      "id": "ambiguous_004",
+      "category": "ambiguous",
+      "item": {
+        "name": "纸巾",
+        "category": "daily",
+        "subcategory": "paper",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open", "kitchen_cabinet"],
+      "forbidden_slots": ["bedroom_locked_drawer"],
+      "reason": "纸巾放客厅或厨房"
+    },
+
+    {
+      "id": "no_clear_slot_001",
+      "category": "no_clear_slot",
+      "item": {
+        "name": "神秘物品",
+        "category": "unknown",
+        "subcategory": null,
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "未知"
+      },
+      "expected_slots": ["any_open_slot"],
+      "forbidden_slots": ["bedroom_locked_drawer"],
+      "reason": "无法识别的物品应放在开放区（不在敏感区）"
+    },
+    {
+      "id": "no_clear_slot_002",
+      "category": "no_clear_slot",
+      "item": {
+        "name": "杂物",
+        "category": "misc",
+        "subcategory": null,
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open"],
+      "forbidden_slots": ["kitchen_cabinet", "bedroom_locked_drawer"],
+      "reason": "杂物放客厅开放区"
+    },
+
+    {
+      "id": "large_item_001",
+      "category": "large_item",
+      "item": {
+        "name": "行李箱",
+        "category": "travel",
+        "subcategory": "luggage",
+        "estimated_size": "large",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open", "bedroom_wardrobe"],
+      "forbidden_slots": ["kitchen_cabinet", "kids_room_drawer"],
+      "reason": "大件行李可放卧室衣柜或客厅"
+    },
+    {
+      "id": "large_item_002",
+      "category": "large_item",
+      "item": {
+        "name": "落地电风扇",
+        "category": "appliance",
+        "subcategory": "fan",
+        "estimated_size": "large",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open"],
+      "forbidden_slots": ["kitchen_cabinet", "bedroom_locked_drawer"],
+      "reason": "大件电器只能放在客厅"
+    },
+
+    {
+      "id": "duplicate_001",
+      "category": "duplicate",
+      "item": {
+        "name": "龙井茶叶",
+        "category": "food",
+        "subcategory": "tea",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "厨房"
+      },
+      "expected_slots": ["kitchen_cabinet"],
+      "forbidden_slots": ["bedroom_locked_drawer"],
+      "reason": "重复物品 — 与 tea_001 同样预期位置"
+    },
+    {
+      "id": "duplicate_002",
+      "category": "duplicate",
+      "item": {
+        "name": "USB-C 数据线",
+        "category": "tool",
+        "subcategory": "cable",
+        "estimated_size": "small",
+        "is_sensitive": false,
+        "needs_lock": false,
+        "usage_scene": "客厅"
+      },
+      "expected_slots": ["living_cabinet_open"],
+      "forbidden_slots": ["kitchen_cabinet"],
+      "reason": "重复数据线 — 与 cable_001 同样预期位置"
+    }
+  ]
+}
