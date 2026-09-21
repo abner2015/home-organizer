@@ -96,24 +96,27 @@ async def test_rejects_empty_body(api_client, seeded_actor) -> None:  # type: ig
 # --------------------------------------------------------- auth headers
 
 
-async def test_missing_user_header(api_client, seeded_actor) -> None:  # type: ignore[no-untyped-def]
+async def test_missing_token_is_rejected(api_client, seeded_actor) -> None:  # type: ignore[no-untyped-def]
     body = make_png_bytes()
     resp = api_client.post(
         "/api/v1/assets/upload",
         headers={"X-Home-Id": str(seeded_actor.home_id)},
         files={"file": ("x.png", body, "image/png")},
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 401
 
 
-async def test_invalid_user_header(api_client, seeded_actor) -> None:  # type: ignore[no-untyped-def]
+async def test_invalid_token_is_rejected(api_client, seeded_actor) -> None:  # type: ignore[no-untyped-def]
     body = make_png_bytes()
     resp = api_client.post(
         "/api/v1/assets/upload",
-        headers={"X-User-Id": "not-a-uuid", "X-Home-Id": str(seeded_actor.home_id)},
+        headers={
+            "Authorization": "Bearer not-a-jwt",
+            "X-Home-Id": str(seeded_actor.home_id),
+        },
         files={"file": ("x.png", body, "image/png")},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 401
 
 
 # --------------------------------------------------------- GET / DELETE
@@ -139,7 +142,8 @@ async def test_get_asset_wrong_home_returns_404(api_client, seeded_actor) -> Non
     body = make_png_bytes()
     upload = _upload(api_client, seeded_actor, body, "image/png", "p.png")
     asset_id = upload.json()["asset_id"]
-    other = {"X-User-Id": str(seeded_actor.user_id), "X-Home-Id": str(uuid.uuid4())}
+    # A valid token, but a home this user is not a member of.
+    other = {**seeded_actor.headers(), "X-Home-Id": str(uuid.uuid4())}
     resp = api_client.get(f"/api/v1/assets/{asset_id}", headers=other)
     assert resp.status_code == 404
 
@@ -172,7 +176,8 @@ async def test_delete_wrong_home_returns_404(api_client, seeded_actor) -> None: 
     body = make_png_bytes()
     upload = _upload(api_client, seeded_actor, body, "image/png", "p.png")
     asset_id = upload.json()["asset_id"]
-    other = {"X-User-Id": str(seeded_actor.user_id), "X-Home-Id": str(uuid.uuid4())}
+    # A valid token, but a home this user is not a member of.
+    other = {**seeded_actor.headers(), "X-Home-Id": str(uuid.uuid4())}
     resp = api_client.delete(f"/api/v1/assets/{asset_id}", headers=other)
     assert resp.status_code == 404
 

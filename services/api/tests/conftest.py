@@ -45,6 +45,7 @@ from app.models import (  # noqa: F401
     User,
     UserPreference,
 )
+from app.services.security import create_access_token
 
 # ----------------------------------------------------------------- Seeded actor
 
@@ -59,8 +60,15 @@ class SeededActor:
     home_id: uuid.UUID
 
     def headers(self) -> dict[str, str]:
+        """A real access token plus the home to act in.
+
+        Deliberately a signed token rather than a test-only auth bypass: the
+        JWT secret is local and signing is a pure function, so every API test
+        walks the same ``get_actor`` path production does. Overriding the
+        dependency would skip authentication entirely and leave it untested.
+        """
         return {
-            "X-User-Id": str(self.user_id),
+            "Authorization": f"Bearer {create_access_token(self.user_id)}",
             "X-Home-Id": str(self.home_id),
         }
 

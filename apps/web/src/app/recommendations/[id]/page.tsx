@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { api } from "@/lib/api";
-import { getSession } from "@/lib/session";
+import { requireSession } from "@/lib/session.server";
+import type { Session } from "@/lib/session";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorState } from "@/components/States";
 import { RecommendationActions } from "./RecommendationActions";
@@ -32,13 +33,12 @@ interface PageData {
   error: string | null;
 }
 
-async function load(id: string): Promise<PageData> {
-  const session = getSession();
+async function load(id: string, session: Session): Promise<PageData> {
   try {
-    const rec = await api.getRecommendation(id, session.userId, session.homeId);
+    const rec = await api.getRecommendation(id, session);
     let units: StorageUnit[] = [];
     try {
-      const tree = await api.getSpaceTree(session.userId, session.homeId);
+      const tree = await api.getSpaceTree(session);
       units = tree.rooms.flatMap((room) => (room.units ?? []).map((u) => ({ ...u })));
     } catch {
       // best-effort
@@ -51,7 +51,8 @@ async function load(id: string): Promise<PageData> {
 }
 
 export default async function RecommendationDetail({ params }: { params: { id: string } }) {
-  const data = await load(params.id);
+  const session = await requireSession();
+  const data = await load(params.id, session);
   if (data.error) {
     return (
       <div>
@@ -104,6 +105,7 @@ export default async function RecommendationDetail({ params }: { params: { id: s
             <RecommendationActions
               recId={rec.recommendation_id}
               candidates={rec.candidates}
+              session={session}
             />
           ) : null}
         </div>

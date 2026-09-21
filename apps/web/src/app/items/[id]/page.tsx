@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { api } from "@/lib/api";
-import { getSession } from "@/lib/session";
+import { requireSession } from "@/lib/session.server";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorState, Loading } from "@/components/States";
 import { formatDateTime, formatSlotPath, formatCategory, formatSize } from "@/lib/format";
@@ -16,11 +16,11 @@ interface DetailData {
 }
 
 async function loadItem(id: string): Promise<DetailData> {
-  const session = getSession();
+  const session = await requireSession();
   try {
     const [item, placements] = await Promise.all([
-      api.getItem(id, session.userId, session.homeId),
-      api.getItemPlacements(id, session.userId, session.homeId).catch(() => []),
+      api.getItem(id, session),
+      api.getItemPlacements(id, session).catch(() => []),
     ]);
     return { item, placements, error: null };
   } catch (err) {

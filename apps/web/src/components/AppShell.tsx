@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { clsx } from "@/lib/format";
+import { clearSession, getSession, type Session } from "@/lib/session";
 
 interface NavItem {
   href: string;
@@ -28,8 +30,29 @@ function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+// Login / signup are their own screens — showing the app's navigation beside
+// a sign-in form invites clicking into pages that will only redirect back.
+const BARE_PATHS = ["/login", "/signup"];
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() ?? "/";
+  // Read after mount: `getSession()` reads a cookie, which does not exist
+  // during the server pass. Rendering a name here that we then have to correct
+  // would be a hydration mismatch.
+  const [session, setSession] = useState<Session | null>(null);
+  useEffect(() => {
+    setSession(getSession());
+  }, [pathname]);
+
+  if (BARE_PATHS.includes(pathname)) {
+    return <div className="min-h-screen bg-ink-50">{children}</div>;
+  }
+
+  function signOut() {
+    clearSession();
+    window.location.href = "/login";
+  }
+
   return (
     <div className="min-h-screen bg-ink-50">
       {/* Top bar (mobile + desktop) */}
@@ -58,10 +81,27 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </Link>
             ))}
           </nav>
-          <Link href="/items/new" className="btn-primary hidden sm:inline-flex">
-            <PlusIcon className="h-4 w-4" />
-            添加物品
-          </Link>
+          <div className="flex items-center gap-2">
+            <Link href="/items/new" className="btn-primary hidden sm:inline-flex">
+              <PlusIcon className="h-4 w-4" />
+              添加物品
+            </Link>
+            {session && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm("退出登录？")) signOut();
+                }}
+                title="退出登录"
+                className="hidden items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-ink-600 hover:bg-ink-100 sm:flex"
+              >
+                <span className="grid h-6 w-6 place-items-center rounded-full bg-brand-100 text-xs font-medium text-brand-700">
+                  {session.displayName.slice(0, 1)}
+                </span>
+                {session.displayName}
+              </button>
+            )}
+          </div>
         </div>
       </header>
 

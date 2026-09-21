@@ -236,10 +236,39 @@ async def test_list_storage_units_other_home_room_is_404(
 # ------------------------------------------------------------------------ auth
 
 
-async def test_missing_actor_headers_are_rejected(api_client: TestClient) -> None:
-    """No X-User-Id / X-Home-Id → 401/422, never a data leak."""
+async def test_missing_credentials_are_rejected(api_client: TestClient) -> None:
+    """No Bearer token → 401, never a data leak."""
     resp = api_client.get("/api/v1/homes")
-    assert resp.status_code in {401, 422}
+    assert resp.status_code == 401
+
+
+async def test_spoofed_user_header_grants_nothing(
+    api_client: TestClient, seeded_actor
+) -> None:
+    """The pre-JWT stub headers are inert: identity comes from the signed token.
+
+    Before P0.1a any caller could name themselves with ``X-User-Id``. Those
+    headers must now buy exactly nothing.
+    """
+    resp = api_client.get(
+        "/api/v1/homes",
+        headers={
+            "X-User-Id": str(seeded_actor.user_id),
+            "X-Home-Id": str(seeded_actor.home_id),
+        },
+    )
+    assert resp.status_code == 401, resp.text
+
+
+async def test_non_member_home_is_404_not_403(
+    api_client: TestClient, seeded_actor
+) -> None:
+    """A valid token naming someone else's home must not confirm it exists."""
+    resp = api_client.get(
+        f"/api/v1/homes/{uuid.uuid4()}/space-tree",
+        headers={**seeded_actor.headers(), "X-Home-Id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == 404, resp.text
 
 
 _ = HomeMembership

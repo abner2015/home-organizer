@@ -2,20 +2,20 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, APIError } from "@/lib/api";
-import { getSession } from "@/lib/session";
+import { api, APIError, type ApiSession } from "@/lib/api";
 import { Spinner } from "@/components/States";
 import type { CandidateView } from "@/lib/types";
 
 export function RecommendationActions({
   recId,
   candidates,
+  session,
 }: {
   recId: string;
   candidates: CandidateView[];
+  session: ApiSession;
 }) {
   const router = useRouter();
-  const session = getSession();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,7 +23,7 @@ export function RecommendationActions({
     setBusy(`accept:${c.slot_id}`);
     setError(null);
     try {
-      await api.acceptRecommendation(recId, {}, session.userId, session.homeId);
+      await api.acceptRecommendation(recId, {}, session);
       router.push("/items");
       router.refresh();
     } catch (err) {
@@ -37,12 +37,7 @@ export function RecommendationActions({
     setBusy("reject");
     setError(null);
     try {
-      await api.rejectRecommendation(
-        recId,
-        { note: "用户拒绝" },
-        session.userId,
-        session.homeId,
-      );
+      await api.rejectRecommendation(recId, { note: "用户拒绝" }, session);
       router.refresh();
     } catch (err) {
       setError(extract(err, "操作失败"));

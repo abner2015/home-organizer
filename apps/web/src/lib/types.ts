@@ -23,6 +23,29 @@ export interface User {
   display_name?: string;
 }
 
+// ------------------------------------------------------------- auth
+// Mirrors `app/schemas/auth.py`. A session is a bearer access token (who you
+// are) plus a home id (which of your homes you are acting in) — the backend
+// re-verifies that pairing on every request.
+
+export interface SignupBody {
+  email: string;
+  password: string;
+  display_name: string;
+}
+
+export interface LoginBody {
+  email: string;
+  password: string;
+}
+
+export interface TokenResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type: "bearer";
+  expires_in: number;
+}
+
 // ------------------------------------------------------------- storage tree
 
 export type RoomType = "bedroom" | "kitchen" | "living" | "bathroom" | "study" | "garage" | "other";

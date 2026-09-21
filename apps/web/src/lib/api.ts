@@ -2,6 +2,12 @@
 // (configured in `next.config.mjs`) which proxy to the FastAPI backend —
 // so the browser only ever talks to its own origin, and no API key
 // is ever exposed to the client.
+//
+// Identity is passed in explicitly as an `ApiSession` rather than read from a
+// module-level global. Server Components get theirs from `session.server.ts`
+// (request cookies) and Client Components from `session.ts` (document
+// cookies); a shared mutable global would leak one visitor's token into
+// another's request on the server.
 
 import type {
   AcceptRequest,
@@ -9,6 +15,7 @@ import type {
   AssetRecognizeResponse,
   AssetUploadResponse,
   CandidateListResponse,
+  Home,
   InferItemBody,
   InferItemResponse,
   Item,
@@ -16,6 +23,7 @@ import type {
   ItemPlacement,
   ItemUpsertBody,
   ItemVisionResponse,
+  LoginBody,
   PaginatedItems,
   PatchRequest,
   PatchResponse,
@@ -24,26 +32,31 @@ import type {
   RecommendResponse,
   RejectRequest,
   RejectResponse,
+  Room,
   SearchRequestBody,
   SearchResponseBody,
+  SignupBody,
   SpaceTree,
   StorageSlot,
   StorageUnit,
+  TokenResponse,
+  User,
   UUID,
-  Home,
-  Room,
 } from "./types";
+import { clearSession } from "./session";
 
 // In the browser we hit relative URLs so the Next.js rewrite kicks in.
 // During SSR we can fall back to the configured API base.
 const isBrowser = typeof window !== "undefined";
 
-function defaultHeaders(userId: UUID, homeId: UUID): Record<string, string> {
-  return {
-    "Content-Type": "application/json",
-    "X-User-Id": userId,
-    "X-Home-Id": homeId,
-  };
+/**
+ * What `request()` needs to talk to the API: a bearer token, plus the home to
+ * act in. `homeId` is optional because the calls made *before* a home is known
+ * (login, signup, listing your homes) have no home to name yet.
+ */
+export interface ApiSession {
+  token: string;
+  homeId?: UUID;
 }
 
 export class APIError extends Error {
@@ -59,9 +72,9 @@ export class APIError extends Error {
 
 async function request<T>(
   path: string,
-  init: RequestInit & { userId: UUID; homeId: UUID },
+  init: RequestInit & { session?: ApiSession },
 ): Promise<T> {
-  const { userId, homeId, ...rest } = init;
+  const { session, ...rest } = init;
   const overrideHeaders: Record<string, string> = {};
   if (rest.headers) {
     if (rest.headers instanceof Headers) {
@@ -75,7 +88,9 @@ async function request<T>(
     }
   }
   const headers: Record<string, string> = {
-    ...defaultHeaders(userId, homeId),
+    "Content-Type": "application/json",
+    ...(session ? { Authorization: `Bearer ${session.token}` } : {}),
+    ...(session?.homeId ? { "X-Home-Id": session.homeId } : {}),
     ...overrideHeaders,
   };
   // FormData must keep the browser-generated multipart boundary; the default
@@ -93,6 +108,13 @@ async function request<T>(
     }
   }
   if (!res.ok) {
+    // An expired token is indistinguishable from a revoked one, so drop the
+    // session and let the middleware route us to /login rather than leaving
+    // the user on a page that can only ever fail.
+    if (res.status === 401 && session && isBrowser) {
+      clearSession();
+      window.location.href = "/login";
+    }
     const message =
       (body && typeof body === "object" && "error" in body
         ? String((body as { error: { message?: string } }).error?.message ?? "")
@@ -102,72 +124,82 @@ async function request<T>(
   return body as T;
 }
 
-// ------------------------------------------------------------- identity
-
 export const api = {
-  // NOTE: there is deliberately no client method for GET /api/v1/auth/me.
-  // That route requires a JWT bearer token, while every other route this app
-  // calls authenticates with the stub X-User-Id / X-Home-Id headers (see
-  // `session.ts`). Adding a client method that could only ever 401 would be
-  // worse than omitting it. Wiring real JWTs is a separate piece of work.
+  // ------------------------------------------------------------- auth
 
-  // ------------------------------------------------------------- homes
-
-  async listHomes(userId: UUID, homeId: UUID): Promise<Home[]> {
-    return request<Home[]>("/api/v1/homes", { method: "GET", userId, homeId });
-  },
-
-  async getHome(targetHomeId: UUID, userId: UUID, homeId: UUID): Promise<Home> {
-    return request<Home>(`/api/v1/homes/${targetHomeId}`, {
-      method: "GET",
-      userId,
-      homeId,
+  async signup(body: SignupBody): Promise<{ user: User }> {
+    return request<{ user: User }>("/api/v1/auth/signup", {
+      method: "POST",
+      body: JSON.stringify(body),
     });
   },
 
-  async getSpaceTree(userId: UUID, homeId: UUID): Promise<SpaceTree> {
-    return request<SpaceTree>(`/api/v1/homes/${homeId}/space-tree`, {
+  async login(body: LoginBody): Promise<TokenResponse> {
+    return request<TokenResponse>("/api/v1/auth/login", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  /** The signed-in user. Needs only the token — there is no home yet. */
+  async me(token: string): Promise<User> {
+    return request<User>("/api/v1/auth/me", {
       method: "GET",
-      userId,
-      homeId,
+      session: { token },
+    });
+  },
+
+  // ------------------------------------------------------------- homes
+
+  /**
+   * Homes the caller belongs to. Takes the session without `homeId` because
+   * this is exactly the call that *discovers* which home to use next.
+   */
+  async listHomes(session: ApiSession): Promise<Home[]> {
+    return request<Home[]>("/api/v1/homes", { method: "GET", session });
+  },
+
+  async getHome(targetHomeId: UUID, session: ApiSession): Promise<Home> {
+    return request<Home>(`/api/v1/homes/${targetHomeId}`, {
+      method: "GET",
+      session,
+    });
+  },
+
+  async getSpaceTree(session: ApiSession): Promise<SpaceTree> {
+    return request<SpaceTree>(`/api/v1/homes/${session.homeId}/space-tree`, {
+      method: "GET",
+      session,
     });
   },
 
   // ------------------------------------------------------------- rooms / storage
 
-  async listRooms(userId: UUID, homeId: UUID): Promise<Room[]> {
-    return request<Room[]>(`/api/v1/homes/${homeId}/rooms`, {
+  async listRooms(session: ApiSession): Promise<Room[]> {
+    return request<Room[]>(`/api/v1/homes/${session.homeId}/rooms`, {
       method: "GET",
-      userId,
-      homeId,
+      session,
     });
   },
 
-  async listStorageUnits(
-    roomId: UUID,
-    userId: UUID,
-    homeId: UUID,
-  ): Promise<StorageUnit[]> {
+  async listStorageUnits(roomId: UUID, session: ApiSession): Promise<StorageUnit[]> {
     return request<StorageUnit[]>(`/api/v1/rooms/${roomId}/storage-units`, {
       method: "GET",
-      userId,
-      homeId,
+      session,
     });
   },
 
-  async listAllSlots(userId: UUID, homeId: UUID): Promise<StorageSlot[]> {
-    return request<StorageSlot[]>(`/api/v1/homes/${homeId}/slots`, {
+  async listAllSlots(session: ApiSession): Promise<StorageSlot[]> {
+    return request<StorageSlot[]>(`/api/v1/homes/${session.homeId}/slots`, {
       method: "GET",
-      userId,
-      homeId,
+      session,
     });
   },
 
   // ------------------------------------------------------------- items
 
   async listItems(
-    userId: UUID,
-    homeId: UUID,
+    session: ApiSession,
     params: { q?: string; category?: string; page?: number; page_size?: number } = {},
   ): Promise<PaginatedItems> {
     const qs = new URLSearchParams();
@@ -178,40 +210,28 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return request<PaginatedItems>(`/api/v1/items${suffix}`, {
       method: "GET",
-      userId,
-      homeId,
+      session,
     });
   },
 
-  async getItem(itemId: UUID, userId: UUID, homeId: UUID): Promise<Item> {
+  async getItem(itemId: UUID, session: ApiSession): Promise<Item> {
     return request<Item>(`/api/v1/items/${itemId}`, {
       method: "GET",
-      userId,
-      homeId,
+      session,
     });
   },
 
-  async getItemPlacements(
-    itemId: UUID,
-    userId: UUID,
-    homeId: UUID,
-  ): Promise<ItemPlacement[]> {
+  async getItemPlacements(itemId: UUID, session: ApiSession): Promise<ItemPlacement[]> {
     return request<ItemPlacement[]>(`/api/v1/items/${itemId}/placements`, {
       method: "GET",
-      userId,
-      homeId,
+      session,
     });
   },
 
-  async createItem(
-    body: ItemCreateBody,
-    userId: UUID,
-    homeId: UUID,
-  ): Promise<Item> {
+  async createItem(body: ItemCreateBody, session: ApiSession): Promise<Item> {
     return request<Item>("/api/v1/items", {
       method: "POST",
-      userId,
-      homeId,
+      session,
       body: JSON.stringify(body),
     });
   },
@@ -220,28 +240,21 @@ export const api = {
   async updateItem(
     itemId: UUID,
     body: Partial<ItemUpsertBody>,
-    userId: UUID,
-    homeId: UUID,
+    session: ApiSession,
   ): Promise<Item> {
     return request<Item>(`/api/v1/items/${itemId}`, {
       method: "PATCH",
-      userId,
-      homeId,
+      session,
       body: JSON.stringify(body),
     });
   },
 
   // ------------------------------------------------------------- vision
 
-  async recognizeItem(
-    itemId: UUID,
-    userId: UUID,
-    homeId: UUID,
-  ): Promise<ItemVisionResponse> {
+  async recognizeItem(itemId: UUID, session: ApiSession): Promise<ItemVisionResponse> {
     return request<ItemVisionResponse>(`/api/v1/items/${itemId}/vision`, {
       method: "POST",
-      userId,
-      homeId,
+      session,
     });
   },
 
@@ -250,13 +263,11 @@ export const api = {
   // stricter ingest path.
   async recognizeImage(
     body: { asset_id: UUID; description?: string },
-    userId: UUID,
-    homeId: UUID,
+    session: ApiSession,
   ): Promise<AssetRecognizeResponse> {
     return request<AssetRecognizeResponse>("/api/v1/items/recognize", {
       method: "POST",
-      userId,
-      homeId,
+      session,
       body: JSON.stringify(body),
     });
   },
@@ -265,26 +276,23 @@ export const api = {
 
   async recommend(
     itemId: UUID,
-    userId: UUID,
-    homeId: UUID,
+    session: ApiSession,
     body: Record<string, never> = {},
   ): Promise<RecommendResponse> {
     return request<RecommendResponse>(
       `/api/v1/recommendations/items/${itemId}/recommend`,
-      { method: "POST", userId, homeId, body: JSON.stringify(body) },
+      { method: "POST", session, body: JSON.stringify(body) },
     );
   },
 
   async acceptRecommendation(
     recId: UUID,
     body: AcceptRequest,
-    userId: UUID,
-    homeId: UUID,
+    session: ApiSession,
   ): Promise<AcceptResponse> {
     return request<AcceptResponse>(`/api/v1/recommendations/${recId}/accept`, {
       method: "POST",
-      userId,
-      homeId,
+      session,
       body: JSON.stringify(body),
     });
   },
@@ -292,13 +300,11 @@ export const api = {
   async rejectRecommendation(
     recId: UUID,
     body: RejectRequest,
-    userId: UUID,
-    homeId: UUID,
+    session: ApiSession,
   ): Promise<RejectResponse> {
     return request<RejectResponse>(`/api/v1/recommendations/${recId}/reject`, {
       method: "POST",
-      userId,
-      homeId,
+      session,
       body: JSON.stringify(body),
     });
   },
@@ -306,38 +312,26 @@ export const api = {
   async patchRecommendation(
     recId: UUID,
     body: PatchRequest,
-    userId: UUID,
-    homeId: UUID,
+    session: ApiSession,
   ): Promise<PatchResponse> {
     return request<PatchResponse>(`/api/v1/recommendations/${recId}`, {
       method: "PATCH",
-      userId,
-      homeId,
+      session,
       body: JSON.stringify(body),
     });
   },
 
-  async getRecommendation(
-    recId: UUID,
-    userId: UUID,
-    homeId: UUID,
-  ): Promise<RecommendResponse> {
+  async getRecommendation(recId: UUID, session: ApiSession): Promise<RecommendResponse> {
     return request<RecommendResponse>(`/api/v1/recommendations/${recId}`, {
       method: "GET",
-      userId,
-      homeId,
+      session,
     });
   },
 
-  async listCandidates(
-    itemId: UUID,
-    userId: UUID,
-    homeId: UUID,
-  ): Promise<CandidateListResponse> {
+  async listCandidates(itemId: UUID, session: ApiSession): Promise<CandidateListResponse> {
     return request<CandidateListResponse>(`/api/v1/items/${itemId}/candidates`, {
       method: "GET",
-      userId,
-      homeId,
+      session,
     });
   },
 
@@ -345,28 +339,21 @@ export const api = {
 
   async search(
     body: SearchRequestBody,
-    userId: UUID,
-    homeId: UUID,
+    session: ApiSession,
   ): Promise<SearchResponseBody> {
     return request<SearchResponseBody>("/api/v1/search", {
       method: "POST",
-      userId,
-      homeId,
+      session,
       body: JSON.stringify(body),
     });
   },
 
   // ------------------------------------------------------------- uploads
 
-  async presignUpload(
-    body: PresignRequest,
-    userId: UUID,
-    homeId: UUID,
-  ): Promise<PresignResponse> {
+  async presignUpload(body: PresignRequest, session: ApiSession): Promise<PresignResponse> {
     return request<PresignResponse>("/api/v1/uploads/presign", {
       method: "POST",
-      userId,
-      homeId,
+      session,
       body: JSON.stringify(body),
     });
   },
@@ -374,32 +361,22 @@ export const api = {
   // Send the bytes through the API instead of direct-to-storage. Works with
   // every storage backend (the presign path needs an object store the browser
   // can reach).
-  async uploadAsset(
-    file: File,
-    userId: UUID,
-    homeId: UUID,
-  ): Promise<AssetUploadResponse> {
+  async uploadAsset(file: File, session: ApiSession): Promise<AssetUploadResponse> {
     const form = new FormData();
     form.append("file", file);
     return request<AssetUploadResponse>("/api/v1/assets/upload", {
       method: "POST",
-      userId,
-      homeId,
+      session,
       body: form,
     });
   },
 
   // Fill an item's attributes from its name. Read-only server-side (one trace
   // row), so calling it repeatedly while the user types is safe.
-  async inferItem(
-    body: InferItemBody,
-    userId: UUID,
-    homeId: UUID,
-  ): Promise<InferItemResponse> {
+  async inferItem(body: InferItemBody, session: ApiSession): Promise<InferItemResponse> {
     return request<InferItemResponse>("/api/v1/items/infer", {
       method: "POST",
-      userId,
-      homeId,
+      session,
       body: JSON.stringify(body),
     });
   },
@@ -407,6 +384,7 @@ export const api = {
   // `contentType` must be byte-identical to the one passed to `presignUpload`:
   // the backend includes it in the signature, so a mismatch is a 403 from
   // MinIO. Callers should compute it once and pass the same value to both.
+  // No Authorization header — the presigned signature *is* the credential.
   async putToPresignedUrl(url: string, file: File, contentType: string): Promise<void> {
     const res = await fetch(url, {
       method: "PUT",

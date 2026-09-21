@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { getSession } from "@/lib/session";
+import { requireSession } from "@/lib/session.server";
 import { PageHeader, StatCard } from "@/components/PageHeader";
 import { ErrorState } from "@/components/States";
 import type { Home, SpaceTree } from "@/lib/types";
@@ -13,11 +13,11 @@ interface HomeData {
 }
 
 async function loadHome(): Promise<HomeData> {
-  const session = getSession();
+  const session = await requireSession();
   try {
     const [home, tree] = await Promise.all([
-      api.getHome(session.homeId, session.userId, session.homeId).catch(() => null),
-      api.getSpaceTree(session.userId, session.homeId).catch(() => null),
+      api.getHome(session.homeId, session).catch(() => null),
+      api.getSpaceTree(session).catch(() => null),
     ]);
     return { home, tree };
   } catch (err) {

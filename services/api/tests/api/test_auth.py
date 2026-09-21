@@ -9,6 +9,11 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from sqlalchemy import select
+
+from app.db.enums import HomeRole
+from app.models import Home, HomeMembership
+
 
 def _signup_payload(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
@@ -85,6 +90,70 @@ async def test_signup_extra_field_is_forbidden(api_client) -> None:  # type: ign
         json={**_signup_payload(), "is_admin": True},
     )
     assert resp.status_code == 422
+
+
+async def test_signup_provisions_exactly_one_home(api_client, db_session) -> None:  # type: ignore[no-untyped-def]
+    """Registering yields a usable account, not a dead end.
+
+    Every screen acts inside a home (``X-Home-Id``) and no endpoint creates
+    one, so signup itself has to provision exactly one, owned by the new user.
+    """
+    resp = api_client.post("/api/v1/auth/signup", json=_signup_payload())
+    assert resp.status_code == 201, resp.text
+    user_id = uuid.UUID(resp.json()["user"]["id"])
+
+    homes = (
+        (await db_session.execute(select(Home).where(Home.owner_id == user_id)))
+        .scalars()
+        .all()
+    )
+    assert len(homes) == 1
+    assert homes[0].name == "我的家"
+
+    memberships = (
+        (
+            await db_session.execute(
+                select(HomeMembership).where(HomeMembership.user_id == user_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(memberships) == 1
+    assert memberships[0].home_id == homes[0].id
+    assert memberships[0].role == HomeRole.OWNER.value
+
+
+async def test_signup_then_discover_home_with_the_new_token(api_client) -> None:  # type: ignore[no-untyped-def]
+    """The web client's post-login discovery step, end to end.
+
+    ``GET /homes`` is deliberately not behind ``X-Home-Id`` — it is the call
+    that tells a freshly logged-in client which home to select.
+    """
+    api_client.post("/api/v1/auth/signup", json=_signup_payload())
+    login = api_client.post(
+        "/api/v1/auth/login",
+        json={"email": "alice@example.com", "password": "supersecret1"},
+    )
+    token = login.json()["access_token"]
+    homes = api_client.get(
+        "/api/v1/homes", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert homes.status_code == 200, homes.text
+    listed = homes.json()
+    assert len(listed) == 1
+    assert listed[0]["name"] == "我的家"
+
+    # ...and the discovered home is actually usable, which is the whole point.
+    tree = api_client.get(
+        f"/api/v1/homes/{listed[0]['id']}/space-tree",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Home-Id": listed[0]["id"],
+        },
+    )
+    assert tree.status_code == 200, tree.text
+    assert tree.json()["rooms"] == []
 
 
 # ----------------------------------------------------------------- login

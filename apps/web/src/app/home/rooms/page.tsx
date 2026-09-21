@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { getSession } from "@/lib/session";
+import { requireSession } from "@/lib/session.server";
 import { PageHeader } from "@/components/PageHeader";
 import { EmptyState, ErrorState } from "@/components/States";
 import type { SpaceTree } from "@/lib/types";
@@ -18,10 +18,10 @@ const ROOM_TYPE_LABEL: Record<string, string> = {
 };
 
 export default async function RoomsPage() {
-  const session = getSession();
+  const session = await requireSession();
   let tree: SpaceTree | null = null;
   try {
-    tree = await api.getSpaceTree(session.userId, session.homeId);
+    tree = await api.getSpaceTree(session);
   } catch (err) {
     console.error("rooms load failed", err);
   }

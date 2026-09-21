@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { getSession } from "@/lib/session";
+import { requireSession } from "@/lib/session.server";
 import { PageHeader, StatCard } from "@/components/PageHeader";
 import { ItemGrid } from "@/components/Items";
 import { ErrorState, Loading } from "@/components/States";
@@ -16,11 +16,11 @@ interface DashboardData {
 }
 
 async function loadDashboard(): Promise<DashboardData> {
-  const session = getSession();
+  const session = await requireSession();
   try {
     const [items, tree] = await Promise.all([
-      api.listItems(session.userId, session.homeId, { page: 1, page_size: 6 }),
-      api.getSpaceTree(session.userId, session.homeId).catch(() => null),
+      api.listItems(session, { page: 1, page_size: 6 }),
+      api.getSpaceTree(session).catch(() => null),
     ]);
     return { items: items.items, total: items.total, tree };
   } catch (err) {
@@ -31,7 +31,6 @@ async function loadDashboard(): Promise<DashboardData> {
 
 export default async function HomePage() {
   const data = await loadDashboard();
-  const session = getSession();
   const itemCount = data.total;
   const roomCount = data.tree?.rooms?.length ?? 0;
   const slotCount = data.tree?.rooms?.reduce(

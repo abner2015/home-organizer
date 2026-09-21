@@ -267,8 +267,9 @@ async def test_accept_cross_home_is_404(
         f"/api/v1/recommendations/{rec_id}/accept",
         json={},
         headers={
-            "X-User-Id": str(seeded_actor.user_id),
-            "X-Home-Id": str(uuid.uuid4()),  # foreign home
+            # A valid token, but a home this user is not a member of.
+            **seeded_actor.headers(),
+            "X-Home-Id": str(uuid.uuid4()),
         },
     )
     assert resp.status_code == 404

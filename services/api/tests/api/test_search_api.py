@@ -55,10 +55,7 @@ def _intent_payload(
 
 
 def _auth_headers(actor: SeededActor) -> dict[str, str]:
-    return {
-        "X-User-Id": str(actor.user_id),
-        "X-Home-Id": str(actor.home_id),
-    }
+    return actor.headers()
 
 
 async def _seed_item(

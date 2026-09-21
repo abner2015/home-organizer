@@ -7,10 +7,10 @@ routes the frontend needs, all phrased as thin wrappers over the already-tested
 ``app/tools/home_tools`` queries so there is exactly one place that knows how
 to walk the hierarchy.
 
-Auth is the stub ``X-User-Id`` / ``X-Home-Id`` pair (``get_actor``), matching
-assets / items / recommendations / search. Every route requires the caller to
-be a member of the home in the path; non-members and unknown ids both 404 so
-the API never leaks the existence of another home's data.
+Auth is the shared ``get_actor`` dependency (Bearer JWT + ``X-Home-Id``), the
+same one assets / items / recommendations / search use. Every route requires
+the caller to be a member of the home in the path; non-members and unknown ids
+both 404 so the API never leaks the existence of another home's data.
 """
 from __future__ import annotations
 
@@ -22,10 +22,10 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import Actor, get_actor
+from app.api.deps import Actor, ensure_member, get_actor, get_current_user
 from app.core.exceptions import NotFoundError
 from app.db.session import get_db
-from app.models import HomeMembership
+from app.models import HomeMembership, User
 from app.models.item import Item
 from app.models.room import Room
 from app.models.rule import HomeRule
@@ -51,18 +51,6 @@ rooms_router = APIRouter(prefix="/rooms", tags=["homes"])
 
 
 # --------------------------------------------------------------------- guards
-
-
-async def _ensure_member(db: AsyncSession, *, home_id: uuid.UUID, user_id: uuid.UUID) -> None:
-    """404 unless ``user_id`` is a member of ``home_id``."""
-    result = await db.execute(
-        select(HomeMembership.id).where(
-            HomeMembership.home_id == home_id,
-            HomeMembership.user_id == user_id,
-        )
-    )
-    if result.scalar_one_or_none() is None:
-        raise NotFoundError("Home not found")
 
 
 async def _count(db: AsyncSession, model: Any, home_id: uuid.UUID) -> int:
@@ -183,13 +171,18 @@ async def _space_tree(db: AsyncSession, *, home_id: uuid.UUID) -> SpaceTreeView:
 
 @router.get("", response_model=list[HomeView], summary="List the caller's homes")
 async def list_homes(
-    actor: Annotated[Actor, Depends(get_actor)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[HomeView]:
-    """Homes the caller is a member of, oldest first."""
+    """Homes the caller is a member of, oldest first.
+
+    Uses ``get_current_user`` rather than ``get_actor``: listing your homes does
+    not presuppose *which* one you are acting in, so there is no ``X-Home-Id``
+    to verify and no reason to require one.
+    """
     stmt = (
         select(HomeMembership)
-        .where(HomeMembership.user_id == actor.user_id)
+        .where(HomeMembership.user_id == current_user.id)
         .order_by(HomeMembership.joined_at)
     )
     memberships = (await db.execute(stmt)).scalars().all()
@@ -219,7 +212,7 @@ async def get_home_endpoint(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> HomeView:
     """Single home with its member / item / rule counts. Non-member → 404."""
-    await _ensure_member(db, home_id=home_id, user_id=actor.user_id)
+    await ensure_member(db, home_id=home_id, user_id=actor.user_id)
     home = await get_home(db=db, home_id=home_id)
     return _home_view(
         home,
@@ -239,7 +232,7 @@ async def list_rooms(
     actor: Annotated[Actor, Depends(get_actor)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[RoomView]:
-    await _ensure_member(db, home_id=home_id, user_id=actor.user_id)
+    await ensure_member(db, home_id=home_id, user_id=actor.user_id)
     rooms = await get_rooms(db=db, home_id=home_id)
     units = await get_storage_units(db=db, home_id=home_id)
     unit_counts: dict[str, int] = defaultdict(int)
@@ -258,7 +251,7 @@ async def get_space_tree(
     actor: Annotated[Actor, Depends(get_actor)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SpaceTreeView:
-    await _ensure_member(db, home_id=home_id, user_id=actor.user_id)
+    await ensure_member(db, home_id=home_id, user_id=actor.user_id)
     return await _space_tree(db, home_id=home_id)
 
 
@@ -272,7 +265,7 @@ async def list_slots(
     actor: Annotated[Actor, Depends(get_actor)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[StorageSlotView]:
-    await _ensure_member(db, home_id=home_id, user_id=actor.user_id)
+    await ensure_member(db, home_id=home_id, user_id=actor.user_id)
     slots = await get_storage_slots(db=db, home_id=home_id)
     return [_slot_view(slot) for slot in slots]
 

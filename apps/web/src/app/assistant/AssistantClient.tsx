@@ -2,8 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { api, APIError } from "@/lib/api";
-import { getSession } from "@/lib/session";
+import { api, APIError, type ApiSession } from "@/lib/api";
 import { Spinner } from "@/components/States";
 import { formatSlotPath, formatCategory, clsx } from "@/lib/format";
 import type { SearchResponseBody } from "@/lib/types";
@@ -43,8 +42,13 @@ const INTENT_LABEL: Record<string, string> = {
   unknown: "未理解",
 };
 
-export function AssistantClient({ suggestions }: { suggestions: string[] }) {
-  const session = getSession();
+export function AssistantClient({
+  suggestions,
+  session,
+}: {
+  suggestions: string[];
+  session: ApiSession;
+}) {
   const [turns, setTurns] = useState<ChatTurn[]>([
     {
       id: "welcome",
@@ -84,8 +88,7 @@ export function AssistantClient({ suggestions }: { suggestions: string[] }) {
     try {
       const r = await api.search(
         { query: trimmed, conversation_id: conversationId.current },
-        session.userId,
-        session.homeId,
+        session,
       );
       conversationId.current = r.conversation_id;
       setTurns((prev) =>

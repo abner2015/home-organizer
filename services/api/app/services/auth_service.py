@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import ConflictError, UnauthorizedError
+from app.db.enums import HomeRole
+from app.models import Home, HomeMembership
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
@@ -43,7 +45,12 @@ def _issue_tokens(user_id: uuid.UUID) -> TokenResponse:
 
 
 async def signup(db: AsyncSession, req: SignupRequest) -> User:
-    """Create a new user.
+    """Create a new user, and the home they own.
+
+    The home is not a nicety: every screen acts *inside* a home (``X-Home-Id``)
+    and nothing in the API can create one, so an account without a home is a
+    dead end. Provisioning exactly one here is what makes "register, then use
+    the app" a single step. The client discovers it through ``GET /homes``.
 
     Email uniqueness is enforced at the DB level; we explicitly ``flush()`` to
     surface IntegrityError as ``ConflictError`` rather than waiting until the
@@ -61,6 +68,18 @@ async def signup(db: AsyncSession, req: SignupRequest) -> User:
     except IntegrityError as exc:
         await db.rollback()
         raise ConflictError("Email already registered") from exc
+
+    home = Home(id=uuid.uuid4(), name="我的家", owner_id=user.id)
+    db.add(home)
+    await db.flush()
+    db.add(
+        HomeMembership(
+            home_id=home.id,
+            user_id=user.id,
+            role=HomeRole.OWNER.value,
+        )
+    )
+    await db.flush()
     return user
 
 

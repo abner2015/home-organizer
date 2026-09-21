@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { getSession } from "@/lib/session";
+import { requireSession } from "@/lib/session.server";
 import { PageHeader } from "@/components/PageHeader";
 import { ItemGrid } from "@/components/Items";
 import { EmptyState, ErrorState } from "@/components/States";
@@ -19,12 +19,12 @@ export default async function ItemsPage({
 }: {
   searchParams: SearchParams;
 }) {
-  const session = getSession();
+  const session = await requireSession();
   let items: Item[] = [];
   let total = 0;
   let error: string | null = null;
   try {
-    const result = await api.listItems(session.userId, session.homeId, {
+    const result = await api.listItems(session, {
       q: searchParams.q,
       category: searchParams.category,
       page: 1,

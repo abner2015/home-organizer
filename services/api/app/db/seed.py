@@ -6,9 +6,8 @@ existing rows are reused. Run via:
     python -m app.db.seed
 
 Creates:
-  * 1 demo user (email: demo@home.local, password: demo1234 — DO NOT USE IN PROD)
-    with fixed id 00000000-0000-0000-0000-000000000001 (matches the web
-    app's stub-auth default)
+  * 1 demo user (email: demo@example.com, password: demo1234 — DO NOT USE IN
+    PROD) with fixed id 00000000-0000-0000-0000-000000000001
   * 1 home ("我的家") with fixed id ...-0002
   * 4 rooms: 客厅 / 厨房 / 主卧 / 儿童房
   * Storage hierarchy:
@@ -62,15 +61,19 @@ from app.services.security import hash_password
 logger = get_logger(__name__)
 
 
-SEED_USER_EMAIL = "demo@home.local"
+# Must be an address the API will actually accept: `LoginRequest.email` is an
+# `EmailStr`, and email-validator rejects special-use TLDs outright. The old
+# `demo@home.local` made the demo account a dead end — it was seeded fine but
+# every login attempt 422'd, taking the whole seeded home with it.
+SEED_USER_EMAIL = "demo@example.com"
 SEED_USER_NAME = "演示用户"
 SEED_HOME_NAME = "我的家"
 SEED_USER_PASSWORD = "demo1234"
 
-# Stable ids so the demo web app (which hardcodes these in
-# apps/web/src/lib/session.ts and apps/web/.env.example) can talk to the
-# seeded data without a login round-trip. 0001/0002 are the values the
-# frontend's stub-auth headers use.
+# Stable ids, so a demo database can be re-seeded and referenced predictably
+# across runs (`pyproject.toml`, docs and the evaluation fixtures all quote
+# these). The web app no longer hardcodes them: it logs in and discovers the
+# home through `GET /api/v1/homes`.
 SEED_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 SEED_HOME_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
 
