@@ -45,7 +45,11 @@ class MockAIProvider:
         vision_response: dict[str, Any] | None = None,
         vision_raw_text: str | None = None,
         vision_side_effect: BaseException | None = None,
-        chat_response: str = "mock chat response",
+        # Empty by default: the search service treats "the model said nothing"
+        # as "no scripted phrasing" and falls back to its deterministic draft,
+        # so an unscripted mock exercises the degraded path rather than
+        # injecting placeholder text into a user-visible answer.
+        chat_response: str = "",
         structured_output_response: dict[str, Any] | None = None,
         # Phase 6: when set, each structured_output() call pops the next entry;
         # may be a dict (parsed against the requested schema) or a BaseException
@@ -101,10 +105,13 @@ class MockAIProvider:
         image_url: str,
         *,
         hint: str | None = None,
+        context: str = "",
         timeout_s: float = 30.0,
     ) -> VisionOutput:
         self.call_count += 1
-        self.recorded_calls.append(("vision", {"image_url": image_url, "hint": hint}))
+        self.recorded_calls.append(
+            ("vision", {"image_url": image_url, "hint": hint, "context": context})
+        )
         await self._maybe_sleep()
         if self.vision_side_effect is not None:
             raise self.vision_side_effect

@@ -4,7 +4,8 @@ The endpoint ``POST /api/v1/items/recognize`` accepts an ``asset_id``
 and optional ``description``. This service:
 
 1. Loads the asset and verifies it belongs to the calling home.
-2. Issues a fresh presigned URL for the AI provider.
+2. Inlines the stored bytes as a `data:` URI for the AI provider, so the
+   model never has to fetch a URL it cannot reach.
 3. Calls :func:`vision_service.recognize_image` to run the Vision LLM.
 4. Persists the recognition into an ``AgentTrace`` row so the result is
    linkable from logs and from the future ``items`` table.
@@ -24,7 +25,9 @@ from app.ai.provider import AIProvider
 from app.core.exceptions import NotFoundError, ValidationFailedError
 from app.core.logging import get_logger
 from app.models import Asset
-from app.services import asset_service, vision_service
+from app.services import vision_service
+from app.services.image_payload import to_data_uri
+from app.storage.backend import get_storage
 
 logger = get_logger(__name__)
 
@@ -51,6 +54,7 @@ async def recognize_from_asset(
     user_id: uuid.UUID,
     asset_id: uuid.UUID,
     description: str | None = None,
+    context: str = "",
     timeout_s: float = 30.0,
 ) -> vision_service.VisionResult:
     """Run vision recognition on an existing asset.
@@ -63,16 +67,17 @@ async def recognize_from_asset(
         AIProviderError subclasses: bubbled up from :mod:`app.ai.errors`.
     """
     asset = await _load_asset(db, asset_id, home_id)
-    url = asset_service.make_presigned_url(asset)
+    image_uri = to_data_uri(get_storage().get(asset.object_key))
 
     return await vision_service.recognize_image(
         db,
         provider=provider,
-        image_url=url,
+        image_url=image_uri,
         asset_id=asset.id,
         home_id=home_id,
         user_id=user_id,
         hint=description,
+        context=context,
         timeout_s=timeout_s,
     )
 

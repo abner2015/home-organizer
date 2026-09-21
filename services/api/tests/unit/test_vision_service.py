@@ -67,7 +67,7 @@ async def test_parse_error_retries_then_succeeds() -> None:
     # Pre-program: first call returns bad JSON, second succeeds.
     call_n = {"n": 0}
 
-    async def fake_vision(image_url, *, hint=None, timeout_s=30.0):
+    async def fake_vision(image_url, *, hint=None, context="", timeout_s=30.0):
         call_n["n"] += 1
         if call_n["n"] == 1:
             raise AIOutputParseError(
@@ -124,7 +124,7 @@ async def test_incomplete_error_is_also_retried() -> None:
 async def test_transport_error_retries_then_succeeds() -> None:
     call_n = {"n": 0}
 
-    async def fake_vision(image_url, *, hint=None, timeout_s=30.0):
+    async def fake_vision(image_url, *, hint=None, context="", timeout_s=30.0):
         call_n["n"] += 1
         if call_n["n"] == 1:
             raise AIProviderTransportError("conn reset")

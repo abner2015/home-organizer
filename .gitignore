@@ -28,6 +28,8 @@ htmlcov/
 .pytest_cache/
 # Generated evaluation reports (services/api/evaluation/reports/*)
 services/api/evaluation/reports/
+# Local storage backend root (STORAGE_BACKEND=local)
+services/api/var/
 .idea/
 .vscode/
 *.swp

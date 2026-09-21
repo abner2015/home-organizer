@@ -34,7 +34,8 @@ from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.db.enums import AssetStatus
 from app.models import Asset
-from app.storage import minio_client
+from app.storage.backend import get_storage
+from app.storage.errors import StorageError
 
 logger = get_logger(__name__)
 
@@ -56,6 +57,10 @@ _EXT_BY_TYPE: Final[dict[str, str]] = {
 MAX_UPLOAD_BYTES: Final[int] = 20 * 1024 * 1024  # 20 MiB
 
 PRESIGNED_URL_TTL_SECONDS: Final[int] = 3600
+
+# Direct-upload tickets are short-lived: the browser PUTs immediately after
+# asking for the URL.
+PRESIGNED_UPLOAD_TTL_SECONDS: Final[int] = 600
 
 
 # --------------------------------------------------------------------------- errors
@@ -92,6 +97,15 @@ class UploadResult:
     asset: Asset
     url: str
     deduplicated: bool  # True if an existing asset was reused (sha256 hit)
+
+
+@dataclass(slots=True)
+class PresignedUpload:
+    """A direct-to-storage upload ticket (no `assets` row yet)."""
+
+    upload_url: str
+    object_key: str
+    expires_in: int
 
 
 # --------------------------------------------------------------------------- service
@@ -147,18 +161,22 @@ def _sniff_content_type(head: bytes, claimed: str) -> tuple[str, int, int] | Non
     return content_type_for_kind[kind], width, height
 
 
-def _build_object_key(home_id: uuid.UUID, content_type: str, sha256_hex: str) -> str:
+def _build_object_key(
+    home_id: uuid.UUID, content_type: str, shard: str | None = None
+) -> str:
     """Build a server-side object key.
 
-    Format: `home/<home_uuid>/<YYYY>/<MM>/<uuid>.<ext>`
-    Never contains the user's filename. Uses SHA-256 prefix as a shard hint
-    so duplicate uploads cluster in the same MinIO prefix range.
+    Format: `home/<home_uuid>/<YYYY>/<MM>/<uuid>_<shard>.<ext>`
+    Never contains the user's filename. `shard` is a hash prefix used as a
+    distribution hint so duplicate uploads cluster in the same MinIO prefix
+    range; for the presign flow the body isn't available yet, so it falls back
+    to random hex.
     """
     ext = _EXT_BY_TYPE[content_type]
     now = datetime.now(UTC)
     return (
         f"home/{home_id}/{now.year:04d}/{now.month:02d}/"
-        f"{uuid.uuid4().hex}_{sha256_hex[:12]}.{ext}"
+        f"{uuid.uuid4().hex}_{shard or uuid.uuid4().hex[:12]}.{ext}"
     )
 
 
@@ -167,6 +185,52 @@ def _bucket_for(content_type: str) -> str:
     a future split (e.g., 'thumbnails') would key off the type here.
     """
     return settings.minio_bucket_uploads
+
+
+def presign_upload(*, home_id: uuid.UUID, content_type: str) -> PresignedUpload:
+    """Issue a presigned PUT URL for a direct browser → MinIO upload.
+
+    Only the content-type whitelist is enforced here: the body never reaches
+    the API, so the magic-byte / size / dedup checks that :func:`upload_image`
+    performs cannot run. That is the documented trade-off of the presign flow
+    (``docs/API.md`` §6) — the bytes land in a private bucket and are only ever
+    served through short-lived presigned GETs.
+
+    Raises:
+        UploadRejectedError: content type not in :data:`ALLOWED_CONTENT_TYPES`.
+    """
+    content_type = content_type.lower().strip()
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        raise UploadRejectedError(
+            "unsupported_content_type",
+            f"Content-Type {content_type!r} not allowed. "
+            f"Allowed: {sorted(ALLOWED_CONTENT_TYPES)}",
+        )
+
+    if get_storage().name != "minio":
+        # There is no browser-reachable upload target under the local backend;
+        # clients should POST the bytes to /assets/upload instead.
+        raise UploadRejectedError(
+            "presign_unsupported",
+            "Direct upload is unavailable with the configured storage backend.",
+            http_status=409,
+        )
+
+    object_key = _build_object_key(home_id, content_type)
+    upload_url = get_storage().put_url(
+        object_key, content_type, PRESIGNED_UPLOAD_TTL_SECONDS
+    )
+    logger.info(
+        "asset.presigned_upload",
+        home_id=str(home_id),
+        object_key=object_key,
+        content_type=content_type,
+    )
+    return PresignedUpload(
+        upload_url=upload_url,
+        object_key=object_key,
+        expires_in=PRESIGNED_UPLOAD_TTL_SECONDS,
+    )
 
 
 async def upload_image(
@@ -231,9 +295,7 @@ async def upload_image(
             sha256=sha256_hex,
             home_id=str(home_id),
         )
-        url = minio_client.presigned_get_url(
-            existing.bucket, existing.object_key, PRESIGNED_URL_TTL_SECONDS
-        )
+        url = get_storage().url_for(existing.object_key, PRESIGNED_URL_TTL_SECONDS)
         return UploadResult(asset=existing, url=url, deduplicated=True)
 
     # 6. Build key, ensure bucket, upload
@@ -256,10 +318,11 @@ async def upload_image(
     db.add(asset)
     await db.flush()
 
+    storage = get_storage()
     try:
-        minio_client.ensure_bucket(bucket)
-        minio_client.put_object(bucket, object_key, body, real_content_type)
-    except minio_client.StorageError as exc:
+        storage.ensure_ready()
+        storage.put(object_key, body, real_content_type)
+    except StorageError as exc:
         asset.status = AssetStatus.FAILED.value
         asset.failure_reason = str(exc)
         await db.commit()
@@ -275,7 +338,7 @@ async def upload_image(
         ) from exc
 
     # 7. Verify object landed
-    if not minio_client.object_exists(bucket, object_key):
+    if not storage.exists(object_key):
         asset.status = AssetStatus.FAILED.value
         asset.failure_reason = "Object not found after upload"
         await db.commit()
@@ -290,7 +353,7 @@ async def upload_image(
     await db.commit()
     await db.refresh(asset)
 
-    url = minio_client.presigned_get_url(bucket, object_key, PRESIGNED_URL_TTL_SECONDS)
+    url = storage.url_for(object_key, PRESIGNED_URL_TTL_SECONDS)
     logger.info(
         "asset.uploaded",
         asset_id=str(asset.id),
@@ -315,8 +378,8 @@ async def delete_asset(db: AsyncSession, asset: Asset) -> None:
     objects can be cleaned up by a periodic GC.
     """
     try:
-        minio_client.delete_object(asset.bucket, asset.object_key)
-    except minio_client.StorageError as exc:
+        get_storage().delete(asset.object_key)
+    except StorageError as exc:
         logger.warning(
             "asset.delete_storage_failed",
             asset_id=str(asset.id),
@@ -327,5 +390,17 @@ async def delete_asset(db: AsyncSession, asset: Asset) -> None:
 
 
 def make_presigned_url(asset: Asset, ttl_seconds: int = PRESIGNED_URL_TTL_SECONDS) -> str:
-    """Generate a fresh presigned URL for an existing asset."""
-    return minio_client.presigned_get_url(asset.bucket, asset.object_key, ttl_seconds)
+    """Generate a fresh read URL for an existing asset."""
+    return get_storage().url_for(asset.object_key, ttl_seconds)
+
+
+def presigned_url_for_key(
+    object_key: str, ttl_seconds: int = PRESIGNED_URL_TTL_SECONDS
+) -> str:
+    """Generate a fresh read URL for a raw object key.
+
+    ``item_images`` stores only the key (its ``url`` column is a snapshot), so
+    every read re-signs here rather than handing out a URL that expired an hour
+    after the row was written.
+    """
+    return get_storage().url_for(object_key, ttl_seconds)

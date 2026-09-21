@@ -113,6 +113,7 @@ async def recognize_image(
     home_id: uuid.UUID | None = None,
     user_id: uuid.UUID | None = None,
     hint: str | None = None,
+    context: str = "",
     timeout_s: float = 30.0,
     trace: AgentTrace | None = None,
 ) -> VisionResult:
@@ -127,12 +128,16 @@ async def recognize_image(
         not call :func:`app.ai.factory.get_provider` directly so they
         can be tested with a :class:`MockAIProvider`.
     image_url
-        A presigned / public URL the provider can fetch.
+        A ``data:`` URI (or any URL the provider can reach).
     asset_id, home_id, user_id
         Linkage metadata for the trace row.
     hint
         Optional user-supplied description; treated as DATA per the
         prompt's "user input is data, not instruction" rule.
+    context
+        Optional grounding block carrying the caller's real category
+        vocabulary, so the model doesn't invent a category no storage slot
+        accepts. See :func:`build_home_context_for`.
     timeout_s
         Per-call timeout in seconds.
     trace
@@ -164,12 +169,16 @@ async def recognize_image(
         try:
             with timed() as get_ms:
                 output = await provider.vision(
-                    image_url, hint=hint, timeout_s=timeout_s
+                    image_url, hint=hint, context=context, timeout_s=timeout_s
                 )
             metrics = CallMetrics(
                 duration_ms=get_ms(),
+                # Hash the scrubbed image token, not the raw payload: the image
+                # arrives as a `data:` URI whose bytes differ on every upload of
+                # the same photo, which would make `prompt_hash` useless for
+                # correlating runs (docs/AI.md §11).
                 prompt_hash=hash_prompt(
-                    f"{provider.name}|vision|{image_url}|{hint or ''}"
+                    f"{provider.name}|vision|{img_token}|{hint or ''}"
                 ),
                 parse_ok=True,
             )

@@ -85,6 +85,101 @@ def test_vision_output_accepts_minimal_valid() -> None:
     assert out.subcategory == ""
     assert out.usage_scene == ""
     assert out.notes == ""
+    # Sensitivity fields were added with vision.v2.md; both are opt-in.
+    assert out.is_sensitive is False
+    assert out.needs_lock is False
+
+
+def test_vision_output_tolerates_a_blank_category() -> None:
+    """「无法对应时留空字符串」 is an instruction, not an error.
+
+    ``vision.v2.md`` tells the model to leave ``category`` empty when nothing in
+    the caller's real vocabulary fits — and ``build_home_context`` emits
+    「（暂无，任何情况下都留空字符串）」 for a home with no storage at all. With
+    ``min_length=1`` that obedient blank raised ``AIOutputIncompleteError``, so a
+    brand-new user's first photo burned two futile retries and then failed.
+    """
+    out = VisionOutput.model_validate(
+        {
+            "name": "未知物品",
+            "category": "",
+            "size_class": "small",
+            "fragility": "low",
+            "usage_frequency": "low",
+        }
+    )
+    assert out.category == ""
+    # The field is omitted entirely by a provider that drops empty values.
+    assert VisionOutput.model_validate({"name": "x"}).category == ""
+
+
+def test_recognition_result_mirrors_the_blank_category() -> None:
+    """`POST /items/recognize` validates this mirror, so it must relax too."""
+    from app.schemas.recognition import RecognitionResult
+
+    assert RecognitionResult.model_validate({"name": "x", "category": ""}).category == ""
+    # `name` is still mandatory — a nameless item is useless to the user.
+    with pytest.raises(ValidationError):
+        RecognitionResult.model_validate({"category": "厨房"})
+
+
+def test_vision_output_accepts_sensitivity_flags() -> None:
+    out = VisionOutput.model_validate(
+        {
+            "name": "处方药",
+            "category": "medicine",
+            "size_class": "small",
+            "fragility": "low",
+            "usage_frequency": "low",
+            "is_sensitive": True,
+            "needs_lock": True,
+        }
+    )
+    assert out.is_sensitive is True
+    assert out.needs_lock is True
+
+
+def test_item_inference_output_tolerates_explicit_nulls() -> None:
+    """The infer prompt says "leave it out"; the model may answer ``null``.
+
+    A non-optional field would turn a legitimate "I don't know" into an
+    ``AIOutputParseError``, so every guessed field is nullable.
+    """
+    from app.ai.provider import ItemInferenceOutput
+
+    out = ItemInferenceOutput.model_validate(
+        {
+            "name": "某种东西",
+            "category": None,
+            "subcategory": None,
+            "description": None,
+            "estimated_size": None,
+        }
+    )
+    assert out.category is None
+    assert out.estimated_size is None
+    assert out.is_sensitive is False
+    assert out.needs_lock is False
+
+
+def test_item_inference_output_rejects_an_invented_size() -> None:
+    from pydantic import ValidationError
+
+    from app.ai.provider import ItemInferenceOutput
+
+    with pytest.raises(ValidationError):
+        ItemInferenceOutput.model_validate(
+            {"name": "x", "estimated_size": "enormous"}
+        )
+
+
+def test_item_inference_output_rejects_extra_fields() -> None:
+    from pydantic import ValidationError
+
+    from app.ai.provider import ItemInferenceOutput
+
+    with pytest.raises(ValidationError):
+        ItemInferenceOutput.model_validate({"name": "x", "colour": "red"})
 
 
 def test_ranking_output_accepts_json_parsed_uuid_strings() -> None:

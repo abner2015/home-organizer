@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.core.config import settings
 from app.db.enums import AssetStatus
 from app.storage import minio_client
+from app.storage.backend import get_storage, reset_storage
 
 # Re-export for convenience; the canonical definition is in tests/conftest.py.
 from tests.conftest import SeededActor, seeded_actor  # noqa: F401
@@ -44,14 +45,34 @@ def mock_s3(monkeypatch) -> Iterator[None]:
     the test so the storage wrapper talks to a host moto can stub. The
     boto3 client is cached via `lru_cache`; we clear it before AND after so
     cached connections don't leak across tests.
+
+    `storage_backend` is pinned to `minio` for the same reason: `Settings`
+    reads `services/api/.env`, so a developer pointing their local `.env` at
+    the `local` backend would otherwise silently redirect the whole API suite
+    at the filesystem. Tests that want `local` opt in explicitly.
     """
     monkeypatch.setattr(settings, "minio_endpoint", "s3.amazonaws.com")
     monkeypatch.setattr(settings, "minio_use_ssl", True)
+    monkeypatch.setattr(settings, "storage_backend", "minio")
     minio_client.get_s3_client.cache_clear()
+    reset_storage()
     with mock_aws():
         minio_client.ensure_bucket(settings.minio_bucket_uploads)
         yield
     minio_client.get_s3_client.cache_clear()
+    reset_storage()
+
+
+@pytest.fixture
+def local_storage(monkeypatch, tmp_path) -> Iterator[None]:
+    """Run a test against the `local` storage backend rooted at `tmp_path`."""
+    monkeypatch.setattr(settings, "storage_backend", "local")
+    monkeypatch.setattr(settings, "storage_local_dir", str(tmp_path / "storage"))
+    monkeypatch.setattr(settings, "api_public_base_url", "")
+    reset_storage()
+    get_storage().ensure_ready()
+    yield
+    reset_storage()
 
 
 # --------------------------------------------------------------- image helpers

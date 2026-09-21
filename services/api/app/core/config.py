@@ -71,6 +71,19 @@ class Settings(BaseSettings):
     minio_bucket_uploads: str = "home-organizer-uploads"
     minio_use_ssl: bool = False
 
+    # Object storage backend. `minio` talks to an S3-compatible server;
+    # `local` writes to `storage_local_dir` on this machine and serves the
+    # bytes back through `GET /api/v1/files/{key}`. Local exists so the app
+    # works without an object store (e.g. the sandbox demo).
+    storage_backend: Literal["minio", "local"] = "minio"
+    storage_local_dir: str = "./var/storage"
+    # Signing key for local-storage read URLs. Falls back to `jwt_secret`.
+    storage_local_secret: str | None = None
+    # Absolute origin prepended to locally-issued URLs. Leave empty to emit
+    # root-relative URLs (the browser resolves them against the web origin and
+    # the Next.js rewrite proxies /api/:path* to this API).
+    api_public_base_url: str = ""
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

@@ -23,15 +23,21 @@ from botocore.exceptions import ClientError
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.storage.errors import StorageError
 
 logger = get_logger(__name__)
 
-
-class StorageError(Exception):
-    """Raised when an object-storage operation fails.
-
-    Wraps boto3/botocore errors so callers don't need to know about AWS.
-    """
+__all__ = [
+    "StorageError",
+    "delete_object",
+    "ensure_bucket",
+    "get_object",
+    "get_s3_client",
+    "object_exists",
+    "presigned_get_url",
+    "presigned_put_url",
+    "put_object",
+]
 
 
 @lru_cache
@@ -98,6 +104,20 @@ def put_object(
         raise StorageError(f"Put failed for {bucket}/{key}: {exc}") from exc
 
 
+def get_object(bucket: str, key: str) -> bytes:
+    """Fetch an object's bytes.
+
+    Used by the vision path, which inlines the image as a `data:` URI rather
+    than handing the model a URL it would have to fetch itself.
+    """
+    try:
+        response = get_s3_client().get_object(Bucket=bucket, Key=key)
+        body: bytes = response["Body"].read()
+        return body
+    except ClientError as exc:
+        raise StorageError(f"Get failed for {bucket}/{key}: {exc}") from exc
+
+
 def delete_object(bucket: str, key: str) -> None:
     """Remove an object. Missing objects are not an error."""
     try:
@@ -105,6 +125,20 @@ def delete_object(bucket: str, key: str) -> None:
         logger.info("storage.object_deleted", bucket=bucket, key=key)
     except ClientError as exc:
         raise StorageError(f"Delete failed for {bucket}/{key}: {exc}") from exc
+
+
+def _rewrite_public_host(url: str) -> str:
+    """Rewrite an internal endpoint host to `minio_public_endpoint`.
+
+    Only the host is swapped, so a presigned URL stays valid for a browser that
+    can resolve the public name but not the internal one (the signature covers
+    the *public* host when MinIO is itself reachable under that name).
+    """
+    public = settings.minio_public_endpoint
+    internal = settings.minio_endpoint
+    if public and internal and internal in url:
+        return url.replace(internal, public, 1)
+    return url
 
 
 def presigned_get_url(bucket: str, key: str, expires_seconds: int = 3600) -> str:
@@ -124,13 +158,35 @@ def presigned_get_url(bucket: str, key: str, expires_seconds: int = 3600) -> str
     except ClientError as exc:
         raise StorageError(f"Presign failed for {bucket}/{key}: {exc}") from exc
 
-    public = settings.minio_public_endpoint
-    if public:
-        # Rewrite host:port to the public endpoint so the browser can resolve it.
-        internal = settings.minio_endpoint
-        if internal and internal in url:
-            url = url.replace(internal, public, 1)
-    return url
+    return _rewrite_public_host(url)
+
+
+def presigned_put_url(
+    bucket: str,
+    key: str,
+    content_type: str,
+    expires_seconds: int = 600,
+) -> str:
+    """Return a presigned PUT URL so a browser can upload bytes directly.
+
+    `content_type` is part of the signature, so the client MUST send exactly
+    this Content-Type header on the PUT or MinIO answers 403
+    SignatureDoesNotMatch.
+
+    This is a purely local signing operation — it does not contact MinIO and
+    does not create the bucket. Buckets are provisioned once by the
+    `minio-init` compose service (see `docker-compose.yml`).
+    """
+    try:
+        url: str = get_s3_client().generate_presigned_url(
+            "put_object",
+            Params={"Bucket": bucket, "Key": key, "ContentType": content_type},
+            ExpiresIn=expires_seconds,
+        )
+    except ClientError as exc:
+        raise StorageError(f"Presign PUT failed for {bucket}/{key}: {exc}") from exc
+
+    return _rewrite_public_host(url)
 
 
 def object_exists(bucket: str, key: str) -> bool:

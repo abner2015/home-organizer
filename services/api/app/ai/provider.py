@@ -49,13 +49,50 @@ class VisionOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     name: str = Field(min_length=1, max_length=128)
-    category: str = Field(min_length=1, max_length=64)
+    # Blank is a *legal* answer: ``vision.v2.md`` tells the model to leave this
+    # empty when nothing in the caller's real vocabulary fits, and the context
+    # block says so outright for a home that has no storage yet. Requiring
+    # min_length=1 turned that obedience into an ``AIOutputIncompleteError``, so
+    # a brand-new user's first photo burned two retries and then failed. Kept in
+    # sync with ``RecognitionResult``.
+    category: str = Field(default="", max_length=64)
     subcategory: str = Field(default="", max_length=64)
     usage_scene: str = Field(default="", max_length=128)
     usage_frequency: Literal["high", "medium", "low"] = "medium"
     size_class: Literal["small", "medium", "large"] = "medium"
     fragility: Literal["low", "medium", "high"] = "low"
     notes: str = Field(default="", max_length=512)
+    # Whether the item must be kept out of reach / under lock. Judged by the
+    # model (see `vision_v2` prompt); defaults keep older callers and the mock
+    # valid without a signature change.
+    is_sensitive: bool = False
+    needs_lock: bool = False
+
+
+# --------------------------------------------------------------------------- item inference output
+
+
+class ItemInferenceOutput(BaseModel):
+    """Attributes guessed for a *typed* item name (no image involved).
+
+    Backs ``POST /api/v1/items/infer``: the Web app hands over a name and the
+    model fills the rest of the item form so the user only has to confirm.
+
+    Not ``strict``, and every optional field is `str | None`: the prompt asks
+    the model to leave a field empty when nothing fits, and JSON `null` is a
+    likely spelling of "empty". A non-Optional field would turn that into an
+    ``AIOutputParseError``. Callers normalise `None` to `""`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128)
+    category: str | None = Field(default=None, max_length=64)
+    subcategory: str | None = Field(default=None, max_length=64)
+    description: str | None = Field(default=None, max_length=512)
+    estimated_size: Literal["small", "medium", "large"] | None = None
+    is_sensitive: bool = False
+    needs_lock: bool = False
 
 
 # --------------------------------------------------------------------------- Ranking output (Phase 8 stub)
@@ -121,6 +158,7 @@ class AIProvider(Protocol):
         image_url: str,
         *,
         hint: str | None = None,
+        context: str = "",
         timeout_s: float = 30.0,
     ) -> VisionOutput:
         """Identify the item in ``image_url`` and return structured output.
@@ -128,6 +166,12 @@ class AIProvider(Protocol):
         ``image_url`` is opaque to the provider — it may be a public URL, a
         presigned MinIO URL, or a ``data:`` URI. The provider decides how to
         fetch / encode it for its own backend.
+
+        ``context`` is an optional grounding block (the caller's real category
+        vocabulary and location names, see
+        :func:`app.agents.search.context.build_home_context`). It is rendered
+        into the prompt so the model does not invent a ``category`` that no
+        storage slot accepts.
         """
         ...
 

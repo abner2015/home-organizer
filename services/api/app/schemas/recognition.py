@@ -37,13 +37,19 @@ class RecognitionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     name: str = Field(min_length=1, max_length=128)
-    category: str = Field(min_length=1, max_length=64)
+    # Mirrors ``VisionOutput.category`` — blank means "nothing in the caller's
+    # vocabulary fit", which the prompt asks for by name. See that field's note.
+    category: str = Field(default="", max_length=64)
     subcategory: str = Field(default="", max_length=64)
     usage_scene: str = Field(default="", max_length=128)
     usage_frequency: Literal["high", "medium", "low"] = "medium"
     size_class: Literal["small", "medium", "large"] = "medium"
     fragility: Literal["low", "medium", "high"] = "low"
     notes: str = Field(default="", max_length=512)
+    # Added with ``VisionOutput``'s sensitivity fields (``vision.v2.md``). Both
+    # default to False so a provider that doesn't emit them stays valid.
+    is_sensitive: bool = False
+    needs_lock: bool = False
 
 
 class RecognizeResponse(BaseModel):

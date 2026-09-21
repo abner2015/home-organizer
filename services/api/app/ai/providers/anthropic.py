@@ -65,11 +65,14 @@ class AnthropicProvider:
         image_url: str,
         *,
         hint: str | None = None,
+        context: str = "",
         timeout_s: float | None = None,
     ) -> VisionOutput:
         from app.agent.prompts import render
 
-        prompt = render("vision", version=1, hint=(hint or ""))
+        prompt = render(
+            "vision", version=2, hint=(hint or ""), home_context=context
+        )
         prompt_hash = hash_prompt(prompt)
         timeout = timeout_s or self.default_timeout_s
 

@@ -7,9 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1 import assets as assets_v1
 from app.api.v1 import auth as auth_v1
+from app.api.v1 import files as files_v1
+from app.api.v1 import homes as homes_v1
 from app.api.v1 import items as items_v1
 from app.api.v1 import recommendations as recommendations_v1
 from app.api.v1 import search as search_v1
+from app.api.v1 import uploads as uploads_v1
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.health import check_database, check_redis
@@ -61,9 +64,14 @@ register_exception_handlers(app)
 # Routers (versioned)
 app.include_router(auth_v1.router, prefix="/api/v1")
 app.include_router(assets_v1.router, prefix="/api/v1")
+# Registered unconditionally; it self-404s unless storage_backend == "local".
+app.include_router(files_v1.router, prefix="/api/v1")
+app.include_router(homes_v1.router, prefix="/api/v1")
+app.include_router(homes_v1.rooms_router, prefix="/api/v1")
 app.include_router(items_v1.router, prefix="/api/v1")
 app.include_router(recommendations_v1.router, prefix="/api/v1")
 app.include_router(search_v1.router, prefix="/api/v1")
+app.include_router(uploads_v1.router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["meta"])
