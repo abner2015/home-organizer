@@ -63,7 +63,7 @@ def check_slot_exists(ctx: VerificationContext, candidate: dict[str, Any]) -> Ch
     return CheckResult(
         "slot_exists",
         False,
-        f"Slot {slot_id} not in the candidate set",
+        f"位置 {slot_id} 不在候选集合中",
         details={"candidate_id": str(slot_id)},
     )
 
@@ -77,7 +77,7 @@ def check_slot_belongs_to_home(
     return CheckResult(
         "slot_belongs_to_home",
         False,
-        "Slot belongs to a different home",
+        "该位置不属于当前家庭",
         details={"expected_home": str(ctx.home_id), "got_home": candidate.get("home_id")},
     )
 
@@ -92,7 +92,8 @@ def check_capacity(ctx: VerificationContext, candidate: dict[str, Any]) -> Check
     return CheckResult(
         "capacity",
         False,
-        f"Slot {candidate.get('code', slot_id)} already holds {active}/{capacity} items",
+        f"位置「{candidate.get('label') or candidate.get('code') or slot_id}」"
+        f"已放 {active} 件，容量上限 {capacity} 件",
         details={"active": active, "capacity": capacity},
     )
 
@@ -144,10 +145,9 @@ def check_hard_safety(
         "hard_safety",
         False,
         (
-            "Sensitive item requires a locked container "
-            "(drawer_cabinet / box / a slot marked as locked), got "
-            f"unit_type={candidate.get('unit_type')} "
-            f"section={candidate.get('section_name')}"
+            "敏感物品必须放在带锁的收纳位置（带锁抽屉 / 收纳盒 / 名称含「锁」的格子），"
+            f"当前位置：{candidate.get('section_name')} {candidate.get('label') or ''}"
+            f"（类型 {candidate.get('unit_type')}）"
         ),
         details={
             "required_unit_types": sorted(_LOCKED_UNIT_TYPES),
@@ -165,7 +165,7 @@ def check_home_rules(
             return CheckResult(
                 "home_rules",
                 False,
-                f"Home rule '{rule.get('name')}' forbids this placement",
+                f"家庭规则「{rule.get('name')}」不允许放在这里",
                 details={"rule_id": rule.get("id"), "rule_name": rule.get("name")},
             )
     return CheckResult("home_rules", True, "")
@@ -185,7 +185,7 @@ def check_user_preferences(
             return CheckResult(
                 "user_preferences",
                 False,
-                "User has marked this slot as 'avoid'",
+                "您已把这个位置标记为「不常用」",
                 details={"slot_id": slot_id},
             )
     return CheckResult("user_preferences", True, "")
@@ -209,7 +209,7 @@ def check_reason_consistent(
         return CheckResult(
             "reason_consistent",
             False,
-            "Reason is empty",
+            "推荐理由为空",
         )
     item_tokens = set(_tokens(ctx.item.get("name", ""))) | set(
         _tokens(ctx.item.get("category", ""))
@@ -227,7 +227,7 @@ def check_reason_consistent(
     return CheckResult(
         "reason_consistent",
         False,
-        "Reason does not mention the item name / category or the slot location",
+        "推荐理由必须提到物品名称 / 类别，或该收纳位置",
         details={"reason": reason},
     )
 
@@ -269,7 +269,7 @@ def check_no_more_obvious_conflict(
         return CheckResult(
             "no_more_obvious_conflict",
             False,
-            f"Item category '{category}' is not appropriate for a bedroom",
+            f"「{category}」类物品不适合放在卧室",
             details={"room_type": "bedroom", "category": category},
         )
     return CheckResult("no_more_obvious_conflict", True, "")
@@ -285,7 +285,7 @@ def check_no_hallucinated_location(
     return CheckResult(
         "no_hallucinated_location",
         False,
-        f"Slot {slot_id} was not in the candidate whitelist (LLM hallucination)",
+        f"位置 {slot_id} 不在候选白名单中（模型编造）",
         details={"candidate_id": str(slot_id)},
     )
 
