@@ -30,7 +30,9 @@
 
 1. `AIProvider` 必须抽象——业务代码不允许写死任何具体模型供应商。
 2. 所有 LLM 输出必须是结构化 JSON，并经 Pydantic Schema 验证。
-3. **AI 不允许创造数据库中不存在的房间、柜子、层、格子**。推荐位置必须来自真实 `StorageSlot`，且 `Recommendation.candidates[*].slot_id` 必须 ∈ 推荐时由"候选生成 + 约束过滤"给出的白名单。
+3. **AI 不能静默创建结构**。AI 可以提议新建房间、柜子、层、格子（这是"无需繁琐录入"的前提——让用户自己搭五层结构等于让他自己做收纳规划），但**必须经用户显式确认后才能写入数据库**，未确认的提议不得落库。推荐位置必须来自真实 `StorageSlot`，且 `Recommendation.candidates[*].slot_id` 必须 ∈ 推荐时由"候选生成 + 约束过滤"给出的白名单。
+
+   > 本条于 2026-09-21 由「AI 不允许创造数据库中不存在的房间、柜子、层、格子」修订而来。原始意图（禁止 AI 静默捏造结构、禁止幻觉写入）完整保留，改变的只是把"提议"与"创建"解耦：此前 AI 连提议都不允许，导致用户必须手工建模。
 4. 推荐必须经过 Verifier；Verifier 失败时允许 Retry，最多 2 次。
 5. **推荐 pipeline 必须分层**：Vision（LLM）→ Storage Retrieval（DB）→ Candidate Generation（确定性代码）→ Constraint Filtering（确定性代码）→ Ranking（确定性代码）→ LLM Decision（LLM）→ Verifier（确定性代码）→ Retry → Persist。LLM **只**做"对已筛候选打分 + 写理由"，不承担候选生成 / 约束过滤。
 6. 不要为了技术炫技引入复杂基础设施。第一版只用 PostgreSQL + Redis + MinIO。
@@ -52,59 +54,79 @@
 
 ## 5. 当前仓库状态
 
-本仓库已完成规划阶段，业务代码尚未开始。当前目录布局：
+> 本节最后更新：2026-09-21。规划阶段早已结束，后端与 Web MVP 均已落地。
 
 ```
 home-organizer/
 ├── AGENTS.md              # 本文件
-├── CLAUDE.md              # 早期针对 Vite/React 脚手架的说明（与目标态不一致，仅供历史参考）
-├── prompt.md              # 项目原始 prompt
-├── package.json           # 早期 npm workspaces 根（声明了 client/ 与 server/，未完成）
-├── .gitignore
-├── client/                # 早期 Vite + React + TS 脚手架（部分完成，与目标态 Next.js 不一致）
-│   ├── package.json
-│   ├── vite.config.ts
-│   ├── tsconfig.json
-│   ├── tsconfig.node.json
-│   ├── index.html
-│   └── src/main.tsx
-└── docs/                  # 本阶段产出
-    ├── PRD.md
-    ├── DOMAIN.md
-    ├── ARCHITECTURE.md
-    ├── DATABASE.md
-    ├── AGENT.md
-    ├── AI.md
-    ├── API.md
-    ├── EVALUATION.md
-    ├── DEPLOYMENT.md
-    └── DEVELOPMENT_PLAN.md
+├── docs/                  # 设计文档（PRD / DOMAIN / ARCHITECTURE / DATABASE /
+│                          #   AGENT / AI / API / EVALUATION / DEPLOYMENT /
+│                          #   DEVELOPMENT_PLAN）
+├── services/api/          # FastAPI 后端（app/ + alembic/ + tests/ + evaluation/）
+├── apps/web/              # Next.js 14 前端 MVP（app router + Tailwind）
+├── infra/postgres/initdb/ # 首次启动建 pgcrypto 扩展
+├── docker-compose.yml     # postgres + redis + minio + minio-init + api
+└── .env.example
 ```
 
-注意：`CLAUDE.md`、`package.json` 根、`client/` 是早期探索产物，技术栈与目标态（Next.js + FastAPI）不一致。开始实现前应清理这些文件，并按 `docs/ARCHITECTURE.md` 与 `docs/DEPLOYMENT.md` 建立新的目录结构。
+已有能力（Phase 1–13）：
+
+- **后端**：JWT 认证、Home/Room/Unit/Section/Slot 层级、物品 CRUD + 图片上传、
+  Vision 识别、9 步推荐 pipeline（含 Verifier + Retry）、自然语言搜索助手（含多轮记忆）、
+  可切换存储后端（`STORAGE_BACKEND=local|minio`）。
+- **前端**：`/` 首页、`/login`、`/signup`、`/home`（含 rooms / storage）、`/items`（含详情、新增）、
+  `/recommendations/[id]`、`/assistant`。认证走 cookie + `Authorization: Bearer`，
+  未登录由 `src/middleware.ts` 重定向到 `/login`。
+- **测试基线**：`services/api` 534 passed / 1 skipped；ruff 32 / mypy 20（均为历史遗留，不得上升）；
+  `apps/web` 的 `npx tsc --noEmit` 与 `npx next lint` 必须干净。
+
+已知缺口（完整路线图与验收标准见 `docs/DEVELOPMENT_PLAN.md` 下篇「P0 路线图」）：
+
+1. **P0.2 拍照即建模** —— **当前最大的断点**。收纳结构只能靠 `python -m app.db.seed` 建立，
+   没有任何创建 room / unit / section / slot 的接口（见 `docs/API.md` §3 的实现状态注记）。
+   新注册的账号拿到的是空树，于是推荐永远候选为空。交付物含「AI 提议结构 + 用户确认」。
+2. **P0.3 反向录入** —— 已有物品直接落位，不经 LLM。
+3. **P0.4 闭环 + 讲理由** —— 接受 / 拒绝反馈回灌偏好；推荐给出人话理由。
+4. **P0.1 的尾巴** —— `jwt_access_ttl = 3600` 而 web 从不调 `/auth/refresh`，一小时后静默掉线。
+
+产品层面的定位、核心价值（放 / 理 / 找）、三段旅程、权限模型、使用指引见 `docs/PRD.md` §1–§2。
 
 ---
 
-## 6. 推荐的目标目录结构
+## 6. 目录结构
 
 ```
 home-organizer/
 ├── AGENTS.md
 ├── README.md
-├── docker-compose.yml
+├── docker-compose.yml      # postgres + redis + minio + minio-init + api
 ├── .env.example
 ├── .gitignore
-├── apps/
-│   ├── web/                # Next.js + TypeScript + Tailwind
+├── services/
 │   └── api/                # FastAPI + SQLAlchemy + Alembic
-├── packages/
-│   └── ai/                 # AIProvider 抽象、Prompt 模板、Schema
+│       ├── app/            # 业务代码（含 ai/ = AIProvider 抽象 + prompts + schemas）
+│       ├── alembic/        # 迁移
+│       ├── tests/          # unit / api / db
+│       ├── evaluation/     # golden case 数据集 + 跑批
+│       └── var/            # STORAGE_BACKEND=local 时的落盘目录（不进 Git）
+├── apps/
+│   └── web/                # Next.js 14 + TypeScript + Tailwind
 ├── infra/
-│   ├── nginx/
-│   ├── minio/
-│   └── postgres/
+│   ├── nginx/default.conf
+│   ├── minio/README.md
+│   └── postgres/initdb/01-extensions.sql
 └── docs/
 ```
+
+与早期计划的差异（2026-09-21 订正）：
+
+- 后端在 **`services/api/`**，不是 `apps/api/`。
+- **没有 `packages/ai/`**。`AIProvider` 抽象、Prompt 模板、Schema 全在 `services/api/app/ai/`。
+  早期计划的 monorepo 分包没有落地，也不打算落地——只有一个消费方，拆包是纯开销。
+- `docker-compose.yml` 目前只有 **postgres / redis / minio / minio-init / api** 五个服务。
+  **Web 未容器化**（`apps/web/` 下没有 Dockerfile），`infra/nginx/default.conf` 也还没接进 compose。
+  所以「一条 `docker compose up` 起完整系统」目前**不成立**；本地跑法是
+  「compose 起后端依赖 + 本地 `next dev`」，或后端也用 `STORAGE_BACKEND=local` 完全脱离 MinIO。
 
 详细职责划分见 `docs/ARCHITECTURE.md`。
 
@@ -123,10 +145,34 @@ home-organizer/
 
 ## 8. 验证 / 测试约定
 
-- Backend：pytest，按 `apps/api/tests/` 分层（unit / integration / agent）。
-- Frontend：Vitest + React Testing Library（组件），Playwright（端到端）。
-- AI：关键场景必须有"金标用例"（golden case），用于回归。
-- 评估指标与口径见 `docs/EVALUATION.md`。
+**后端**（`services/api/`）
+
+```bash
+cd services/api && source .venv/bin/activate
+python -m pytest tests/ --no-header -q   # 基线 534 passed / 1 skipped
+python -m ruff check app/ tests/         # 基线 32（历史遗留，不得上升）
+python -m mypy app/                      # 基线 20（历史遗留，不得上升）
+```
+
+分层：`tests/unit/`（纯函数 / service）、`tests/api/`（走 FastAPI `TestClient`）、`tests/db/`。
+（早期计划里的 `tests/integration/` 与 `tests/agent/` 未落地，Agent 测试分散在 `unit/` 与 `api/` 中。）
+
+- **API 测试用真签发的 JWT，不用 `dependency_overrides`。** override 会整条跳过认证路径，
+  等于没测。`SeededActor.headers()` 直接 `create_access_token(...)`。
+- `Settings` 会读 `services/api/.env`，所以两个 conftest 都 pin 了 `storage_backend="minio"`
+  ——改 `.env` 的存储后端前务必确认这一点，否则整套 API 测试会红。
+
+**前端**（`apps/web/`）
+
+```bash
+cd apps/web && npx tsc --noEmit && npx next lint   # 必须干净
+```
+
+> ⚠️ 前端**还没有测试框架**：`package.json` 里没有 Vitest / React Testing Library / Playwright。
+> 早期计划写的「组件测试 + 端到端测试」尚未落地，**不要照做**。
+
+**AI**：关键场景必须有金标用例（golden case）用于回归，数据集在
+`services/api/evaluation/dataset/`，跑法与口径见 `docs/EVALUATION.md`。
 
 ---
 
@@ -150,6 +196,8 @@ home-organizer/
 | Verifier | 在 LLM 输出上做合法性 / 硬规则 / 白名单校验的安全网 |
 | Agent | 推荐流程的协调者（9 步 pipeline，详见 docs/AGENT.md §2） |
 | AgentTrace | 一次 Agent 调用的完整轨迹（9 步 + LLM 响应 + 耗时） |
+| 拍照即建模 | 三段旅程 A：用户拍照 / 描述 → AI **提议**空间结构 → 用户确认后落库（P0.2） |
+| 反向录入 | 三段旅程 B：把已有物品直接放进指定 Slot，不经 LLM（P0.3） |
 
 ---
 

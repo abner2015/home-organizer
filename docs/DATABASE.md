@@ -1,6 +1,11 @@
 # DATABASE — 数据库设计
 
 > PostgreSQL 16。所有表使用 `uuid` 主键（`gen_random_uuid()`，需要 `pgcrypto` 扩展）、`created_at` / `updated_at` 时间戳。所有变更走 Alembic。
+>
+> 最后更新：2026-09-21 —— 订正 §1「枚举用 PostgreSQL ENUM」（实际是 text + CHECK）、
+> §3.11 `recommendations.status` 的 CHECK（`adjusted` → `superseded`，迁移 `0003`）。
+>
+> 已落地的迁移：`0001_initial_schema` / `0002_assets` / `0003_update_recommendation_status`。
 
 ---
 
@@ -9,7 +14,11 @@
 - **主键**：UUID，默认 `gen_random_uuid()`。
 - **时间戳**：`created_at TIMESTAMPTZ NOT NULL DEFAULT now()`，`updated_at` 由 SQLAlchemy onupdate 维护。
 - **软删**：本设计**不使用**软删。删除约束在应用层（Service 层校验依赖关系）。
-- **枚举**：用 PostgreSQL `ENUM` 类型，集中定义在 `app/db/enums.py`。
+- **枚举**：**不用 PostgreSQL `ENUM` 类型**，而是 `text` + `CHECK` 约束。值集中定义在
+  `app/db/enums.py`（`StrEnum`），它是 SQLAlchemy 列类型、Pydantic schema、CHECK 约束三者的
+  共同来源。新增枚举值必须**同时**改 `enums.py`、对应 Alembic 迁移的 CHECK 字符串、
+  以及模型里手写的 CHECK（如 `app/models/recommendation.py:27`）——漏改任何一处，
+  测试会通过而生产会 500。
 - **命名**：表名复数 snake_case；列名 snake_case；外键 `<resource>_id`；索引 `ix_<table>_<col>`。
 - **字符集 / 排序**：UTF-8 / `en_US.utf8`（如对中文排序有要求再调整 collation）。
 
@@ -228,10 +237,21 @@ users ──< home_memberships >── homes
 | pre_filter_count | int | NOT NULL, default 0 | Step 3 候选生成后的候选数（≤ 20） |
 | post_filter_count | int | NOT NULL, default 0 | Step 5 约束过滤后剩余候选数 |
 | chosen_slot_id | uuid | NULL, FK → storage_slots.id | |
-| status | text | NOT NULL, CHECK in ('pending','accepted','adjusted','rejected') | |
+| status | text | NOT NULL, CHECK in ('pending','accepted','rejected','superseded') | 见下方迁移注记 |
 | created_at | timestamptz | NOT NULL, default now() | |
 
 索引：`ix_recommendations_item_id`、`ix_recommendations_status (status)`。
+
+> ⚠️ **CHECK 约束已变更。** 最初是 `('pending','accepted','adjusted','rejected')`；
+> 迁移 **`0003_update_recommendation_status`** 删掉了 `adjusted`、加入 `superseded`，
+> 并把既有的 `adjusted` 行回填为 `accepted`。
+>
+> 改动原因：`adjusted` 是为「用户手动选了别的位置」设的状态，但它和 `accepted` 在**业务上
+> 是同一件事**（都落了 `ItemPlacement`），区别只在 placement 的 `source`。多一个状态意味着
+> 每个下游查询都要记得带上它。现在换位置走 **PATCH + accept**，状态留在 `pending` 直到接受。
+>
+> `app/models/recommendation.py:27` 的 CHECK 字符串必须与迁移保持一致 —— 这是同一个值的
+> 两处声明，`app/db/enums.py` 是它们的共同来源。
 
 ---
 

@@ -1,6 +1,14 @@
 # DOMAIN — 领域模型
 
 > 完整定义核心实体、属性、关系与业务规则。表结构见 `docs/DATABASE.md`。
+>
+> 最后更新：2026-09-21 —— 订正 `Recommendation.status`（`adjusted` → `superseded`）、
+> §5 的 schema（类名 `RankingOutput`、上限 3、不加 `strict=True`）、
+> §7 的 `AgentTrace.steps` 形状（键名 `state`，取值是 `RecommendationState`，
+> 不是 `think/act/observe/...` 那套 ReAct 词汇）。
+>
+> **代码是唯一事实来源。** 本文档在描述 schema 时尽量贴出代码原文，但仍可能滞后；
+> 冲突时以 `app/models/` 与 `app/ai/provider.py` 为准。
 
 ---
 
@@ -200,8 +208,24 @@ User ──< HomeMembership >── Home
 | pre_filter_count | int | Step 3 候选生成后的候选数（≤ 20），用于可观测性 |
 | post_filter_count | int | Step 5 约束过滤后剩余候选数 |
 | chosen_slot_id | UUID? | 用户最终接受的位置（落库时回填） |
-| status | enum | `pending` / `accepted` / `adjusted` / `rejected` |
+| status | enum | `pending` / `accepted` / `rejected` / `superseded` |
 | created_at | timestamptz | |
+
+**状态机**（`app/db/enums.py:RecommendationStatus`，CHECK 约束见 `docs/DATABASE.md`）：
+
+| 状态 | 含义 |
+| --- | --- |
+| `pending` | AI 已给出候选，等用户决定。**用户 PATCH 改了 `chosen_slot_id` 之后仍是 `pending`** |
+| `accepted` | 用户接受（或其改过的版本）；已生成 `ItemPlacement` |
+| `rejected` | 用户否决；什么都没放 |
+| `superseded` | 同一物品重新推荐并被接受后，旧的 pending 推荐被作废（保留供审计） |
+
+> ⚠️ **`adjusted` 已不存在。** 早期设计用 `status = 'adjusted'` 表示「用户手动选别的位置」，
+> 该值已从 CHECK 约束移除（迁移 `0003_update_recommendation_status`，历史 `adjusted` 回填为
+> `accepted`）。现在换位置走 **PATCH + accept**：PATCH 只改 `chosen_slot_id`（状态留在
+> `pending`），accept 才落 `ItemPlacement`，且该 placement 记为 `source = user_manual`。
+> 这样「用户接受了一个改过的推荐」与「用户接受了原推荐」在数据上不再需要区分状态，
+> 差异体现在 placement 的来源上。
 
 `candidates` 顶层 JSON schema：
 
@@ -356,19 +380,32 @@ User ──< HomeMembership >── Home
 
 ## 5. Recommendation.candidates JSON Schema（Pydantic）
 
+实际定义在 **`app/ai/provider.py`**（本文档只作说明，代码是唯一事实来源）：
+
 ```python
 class CandidateSlot(BaseModel):
+    model_config = ConfigDict(extra="forbid")   # 刻意 NOT strict，见下
     slot_id: UUID
     confidence: float = Field(ge=0.0, le=1.0)
-    reason: str
+    reason: str = Field(min_length=1, max_length=512)
     matched_rules: list[str] = []
     evidence_item_ids: list[UUID] = []
 
-class CandidatesPayload(BaseModel):
-    candidates: list[CandidateSlot] = Field(min_length=1, max_length=5)
+class RankingOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    candidates: list[CandidateSlot] = Field(min_length=1, max_length=3)
 ```
 
 LLM 输出必须能解析为该 schema，失败则重试（最多 2 次）。
+
+**两处订正**：
+
+- 类名是 **`RankingOutput`**，不是 `CandidatesPayload`。
+- 上限是 **3**，不是 5 —— 与 `docs/AGENT.md` §7.2「Top 1~3」以及产品口径（给用户 1~3 个
+  选择）一致。原稿的 5 与任何一处都对不上。
+- **不要加 `strict=True`**：这是拿 LLM 的 JSON 文本校验的，`slot_id` / `evidence_item_ids`
+  在 JSON 里是字符串，strict 模式要求真正的 `UUID` 实例、会拒掉它们，表现为一句误导性的
+  "missing required fields"（详见 `docs/AI.md` §4.2）。
 
 ---
 
@@ -387,19 +424,46 @@ class RuleScope(BaseModel):
 
 ## 7. AgentTrace.steps JSON Schema
 
-```python
-class TraceStep(BaseModel):
-    step_index: int
-    step_type: Literal["think", "act", "observe", "verify", "retry", "answer"]
-    started_at: datetime
-    finished_at: datetime
-    duration_ms: int
-    payload: dict            # 步骤输入/输出（截断到 4KB）
-    error: str | None = None
+每个元素是 `AgentStepResult.to_json()` 的产物（`app/agents/state.py`）：
 
-class TracePayload(BaseModel):
-    steps: list[TraceStep]
+```python
+# 存进 AgentTrace.steps 的实际形状
+{
+    "state": "retrieve",          # RecommendationState 的值，见下
+    "started_at": "2026-09-21T...",
+    "ended_at": "2026-09-21T...",
+    "payload": {...},             # 该步的输入/输出（无 LLM 原文）
+    "error": null
+}
 ```
+
+> ⚠️ **原稿与代码不符的两处，都已订正：**
+>
+> 1. 键名是 **`state`**（不是 `step_type`），且**没有** `step_index` / `duration_ms`
+>    —— 时长由 `started_at` / `ended_at` 相减得出。
+> 2. 取值是 **`RecommendationState`**（`app/agents/state.py`），不是
+>    `think / act / observe / verify / retry / answer` 那套 ReAct 词汇：
+
+```python
+class RecommendationState(StrEnum):
+    INTAKE = "intake"
+    UNDERSTAND = "understand"
+    RETRIEVE = "retrieve"
+    CANDIDATE_GENERATION = "candidate_generation"
+    FILTER = "filter"
+    RANK = "rank"
+    DECIDE = "decide"
+    VERIFY = "verify"
+    RETRY = "retry"
+    ANSWER = "answer"
+    FAILED = "failed"
+```
+
+> 注意 **`ANSWER` 不产生 step**：pipeline 在 VERIFY 成功后直接返回 `state=ANSWER`，
+> 不再 append 一步。断言步骤时应断言 run 的 `state`，而不是「存在一个 answer 步骤」。
+>
+> `RETRY` 步骤的**条数**就是 `retries_used` —— `GET /recommendations/{recId}` 是靠数
+> RETRY 步骤把它算出来的，DB 里没有这一列。
 
 ---
 

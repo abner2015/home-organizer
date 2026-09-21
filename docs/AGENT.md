@@ -1,7 +1,16 @@
 # AGENT — AI Agent 设计
 
-> 定义推荐 Agent 的分层 pipeline：Vision → Structured Item → Storage Retrieval → Candidate Generation → Constraint Filtering → Ranking → LLM Decision → Verifier → Retry → Recommendation。
+> 定义推荐 Agent 的分层 pipeline：INTAKE → UNDERSTAND → RETRIEVE → CANDIDATE_GENERATION → FILTER → RANK → DECIDE → VERIFY →（RETRY）→ ANSWER / FAILED。
 > 核心原则：**LLM 只做"对已筛选候选打分 + 写理由"这一件事**；候选生成、约束过滤、Verifier 全部由确定性代码完成。
+>
+> **本文档范围**：§1–§13 描述**推荐 pipeline**（✅ 已实现，代码在 `app/agents/pipeline.py`）。
+> §14 描述**结构提议 pipeline**（⏳ P0.2「拍照即建模」，**尚未实现**）—— 它是第二条链路，
+> 解决的是"用户的家是空树"这个问题：推荐链路的**输入**是已存在的 Slot，而结构提议链路的
+> **输出**正是 Slot 本身。
+>
+> 最后更新：2026-09-21 —— 新增 §14；**§1 / §2 / §10 的步骤名与状态机整体订正**（原稿用的
+> `Vision → Structured Item → Storage Retrieval → …` 这套名字与代码里的 `RecommendationState`
+> 是两套，且把 Vision 错列为 pipeline 的第一步，见下）；订正 §3.1 的工具名。
 
 ---
 
@@ -10,16 +19,31 @@
 Agent 负责"为一件物品找到合适的 StorageSlot"。它**不直接调 LLM 写 JSON**，而是按以下分层 pipeline 协调：
 
 ```
-Step 1   Vision              (LLM)            → Structured Item (Pydantic)
-Step 2   Storage Retrieval   (DB)             → 家庭全部 Slot + 层级
-Step 3   Candidate Generation(确定性代码)      → 候选 Slot 缩到 ≤ 20
-Step 4   Constraint Filtering(确定性代码)      → 剔除违反 hard rule 的 Slot
-Step 5   Ranking             (确定性代码)      → 候选打分排序
-Step 6   LLM Decision        (LLM)            → Top 1~3 + 理由
-Step 7   Verifier            (确定性代码)     → 最终安全网（重做硬规则、存在性、去重）
-Step 8   Retry               (回到 Step 6)   → 失败 ≤ 2 次
-Step 9   Persist             (DB)            → 写 AgentTrace + Recommendation
+1  INTAKE                (DB)            → 取出这件物品
+2  UNDERSTAND            (确定性)         → 提取下游要用的物品属性
+3  RETRIEVE              (DB)            → 家庭 + 全部 Slot + 规则 + 偏好 + 同类历史
+4  CANDIDATE_GENERATION  (确定性代码)     → 全部 Slot 缩到 ≤ 20
+5  FILTER                (确定性代码)     → 剔除违反 hard rule 的 Slot；空了就直接 FAILED
+6  RANK                  (确定性代码)     → 确定性打分排序（limit 20）
+7  DECIDE                (LLM)           → 对已筛候选精排，选出**一个**最佳 + 写理由
+8  VERIFY                (确定性代码)     → 最终安全网（存在性 / 白名单 / 硬规则 / 去重 / 数量 / reason）
+   ↳ 失败则 RETRY 回到 7，最多 2 次
+9  ANSWER                → 成功终止（**不产生 step**）；VERIFY 超限则 FAILED
 ```
+
+**四个必须记住的事实**（它们和直觉不一样，且原稿都写错了）：
+
+1. **pipeline 里没有 Vision 步骤。** Vision 在**物品录入时**就做完了（`POST /items/{id}/vision`
+   或 `/items/recognize`），结果落进 `Item`。pipeline 的 INTAKE 只是把这行已经存在的物品读出来。
+   所以「9 步 pipeline」里 **LLM 只出现一次**（DECIDE），不是两次。
+2. **DECIDE 只选一个 slot**，不是 1~3 个（`max(candidates, key=confidence)`）。VERIFY 校验的也是
+   这**一个**。给用户看的 1~3 个候选来自 **RANK 的确定性输出**（`ctx.ranked_candidates`），
+   不是 LLM 的产物 —— 所以「Top-3 召回率」衡量的是排序器，不是模型。
+3. **`ANSWER` 不产生 step。** 验证通过后直接返回，不再 append 一步。断言时应断言 run 的
+   `state`，而不是「存在一个 answer 步骤」。
+4. **DECIDE 里的异常被全部吞掉**（`except Exception` → 写进 `last_failure` → 重试）。
+   所以「Provider 错误不 Retry」这条**对 DECIDE 不成立** —— 网络抖动确实会触发重试。
+   流式地看，这其实是好事（抖动值得重试），但文档不应声称相反的行为。
 
 **为什么这样分**：
 
@@ -27,79 +51,85 @@ Step 9   Persist             (DB)            → 写 AgentTrace + Recommendation
 2. **硬规则必须确定性执行**。用 LLM 判断"是否违反硬规则"既贵又不稳定；直接用代码做。
 3. **LLM 的真正价值是"对已筛候选打 confidence + 写人话理由"**。这才是它擅长的。
 4. **每一步独立可测**。每一步都可以独立单测、golden case、debug 工具。
-5. **错误定位精确**。失败时能立刻定位是哪一步（Vision 失败 / 候选生成为空 / Verifier 失败）。
+5. **错误定位精确**。失败时能立刻定位是哪一步（读取失败 / 候选生成为空 / Verifier 失败）。
 
 ---
 
 ## 2. 状态机
 
 ```
-                     ┌──────────┐
-                     │  START   │
-                     └────┬─────┘
-                          ▼
-                  ┌───────────────┐
-                  │ 1. VISION     │ (LLM)
-                  └───────┬───────┘
-                          ▼
-                  ┌───────────────┐
-                  │ 2. STRUCTURED │  Pydantic parse
-                  │    ITEM       │  parse fail → Retry (Vision) ≤ 2
-                  └───────┬───────┘
-                          ▼
-                  ┌───────────────┐
-                  │ 3. STORAGE    │  DB query
-                  │    RETRIEVAL  │
-                  └───────┬───────┘
-                          ▼
-                  ┌───────────────┐
-                  │ 4. CANDIDATE  │  确定性
-                  │    GENERATION │  no candidates → END (empty)
-                  └───────┬───────┘
-                          ▼
-                  ┌───────────────┐
-                  │ 5. CONSTRAINT │  确定性 hard rule
-                  │    FILTERING  │  all filtered → END (empty) + trace
-                  └───────┬───────┘
-                          ▼
-                  ┌───────────────┐
-                  │ 6. RANKING    │  确定性 scoring
-                  └───────┬───────┘
-                          ▼
-                  ┌───────────────┐
-                  │ 7. LLM        │  (LLM)  Top 1~3 + 理由
-                  │    DECISION   │  parse fail → Retry (LLM) ≤ 2
-                  └───────┬───────┘
-                          ▼
-                  ┌───────────────┐
-                  │ 8. VERIFIER   │  确定性 安全网
-                  └───────┬───────┘
-                          ▼
-                  ┌───────────────┐
-                  │ 9. PERSIST    │
-                  └───────┬───────┘
-                          ▼
-                         END
+                ┌──────────┐
+                │  START   │
+                └────┬─────┘
+                     ▼
+             ┌───────────────┐
+             │ 1. INTAKE     │  DB：取出这件物品
+             └───────┬───────┘
+                     ▼
+             ┌───────────────┐
+             │ 2. UNDERSTAND │  确定性：提取下游要用的属性
+             └───────┬───────┘
+                     ▼
+             ┌───────────────┐
+             │ 3. RETRIEVE   │  DB：home + slots + rules + prefs + history
+             └───────┬───────┘
+                     ▼
+             ┌───────────────┐
+             │ 4. CANDIDATE_ │  确定性：全部 Slot → ≤ 20
+             │    GENERATION │
+             └───────┬───────┘
+                     ▼
+             ┌───────────────┐
+             │ 5. FILTER     │  确定性 hard rule
+             └───────┬───────┘
+                     │  空 ⇒ FAILED（"无符合硬规则的位置"，**不 Retry**）
+                     ▼
+             ┌───────────────┐
+             │ 6. RANK       │  确定性 scoring（limit 20）
+             └───────┬───────┘
+                     ▼
+        ┌──► ┌───────────────┐
+        │    │ 7. DECIDE     │  (LLM) 选出**一个** + 理由
+        │    └───────┬───────┘
+        │            ▼
+        │    ┌───────────────┐
+        │    │ 8. VERIFY     │  确定性安全网（校验这一个 slot）
+        │    └───────┬───────┘
+        │            │ ok ⇒ ANSWER（成功终止，不产生 step）
+        │            │ not ok 且 retries < 2 ⇒ 下一步
+        │            ▼
+        │    ┌───────────────┐
+        │    │ 9. RETRY      │  记录 last_failure
+        └────┴───────┬───────┘
+                     │ retries ≥ 2 ⇒ FAILED
+                     ▼
+                    END
 ```
 
 **Retry 边界**：
 
-- Vision parse 失败 → 重做 Step 1，最多 2 次。注入"上一次错误原因"到 vision prompt。
-- LLM Decision parse 失败 → 重做 Step 7，最多 2 次。注入 last_failure。
-- Verifier 失败 → 重做 Step 7，最多 2 次（用新的 last_failure 引导 LLM 自我修正）。
-- Candidate Generation 为空 / Constraint Filtering 全过滤 → **不 Retry**，直接结束（这种情况说明 LLM 也帮不上忙）。
-- Provider 错误（5xx / 超时 / 401）→ **不 Retry**，写 trace + final_status=error。
+- **Verifier 失败 / DECIDE 抛异常** → 回到 **DECIDE**，最多 2 次（`max_retries`），
+  把 `last_failure` 注入 prompt 引导模型自我修正。这是**唯一**的重试路径。
+- **FILTER 后候选为空** → **不 Retry**，直接 `FAILED`（`error="无符合硬规则的位置"`）。
+  这种情况 LLM 帮不上忙。
+- **Provider 错误（5xx / 超时 / 401）** → 落在 DECIDE 的 `except Exception` 里，**会重试**。
+  > 原稿写「Provider 错误不 Retry，写 `final_status=error`」—— **与代码不符**。
+  > 好在结果无害（抖动确实值得重试），但不要按原稿去断言"网络故障只调用一次模型"。
+- **Vision 失败** 与 pipeline 无关（Vision 发生在录入阶段，见 §1）—— 它的重试（parse × 2、
+  transport × 1）由 `vision_service` 自己负责，失败时物品压根到不了 pipeline。
 
-**终止状态**：
+**终止状态**（`RecommendationState` / `AgentTraceStatus`）：
 
-| 终止原因 | final_status | Recommendation.candidates | 备注 |
+| 终止原因 | pipeline state | AgentTrace.final_status | Recommendation.candidates |
 | --- | --- | --- | --- |
-| 成功 | `success` | 1~3 个 | 正常返回 |
-| Vision 失败 | `verifier_failed` 或 `error` | `[]` | 落 trace 记录原因 |
-| 候选生成为空 / 全过滤 | `success` | `[]` | 视为"无合适位置" |
-| LLM parse 失败超 2 次 | `verifier_failed` | `[]` |  |
-| Verifier 失败超 2 次 | `verifier_failed` | `[]` |  |
-| Provider 错误 | `error` | `[]` |  |
+| 成功 | `ANSWER` | `success` | **RANK 的 1~20 个**（不是 LLM 的 1~3 个） |
+| FILTER 后为空 | `FAILED` | `success` | `[]`，`error="无符合硬规则的位置"` |
+| VERIFY 超 2 次 | `FAILED` | `verifier_failed` | `ctx.ranked_candidates`（非空！） |
+| Provider 彻底不可用（重试耗尽后仍失败） | `FAILED` | `verifier_failed` | 同上 |
+
+> 注意 `FAILED` 时 `candidates` **未必是空**：验证失败时返回的是排序后的候选列表，
+> 只是 `chosen_slot_id=None`。UI 是否展示取决于产品判断（当前不展示）。
+> 只有 FILTER 后为空那一种才是真的空列表。
 
 ---
 
@@ -363,38 +393,54 @@ class VerifyResult(BaseModel):
 - 每次 Retry 注入 `last_failure` 到 prompt。
 - Retry 不改变 Step 1~6 的输出（候选生成、过滤、打分已确定），只重做 Step 7（LLM 排序）。
 - 失败信息中**不暴露**其他用户物品 ID 等敏感信息。
-- 仍失败：写 `AgentTrace(final_status=verifier_failed)`，Recommendation.candidates = `[]`，error 字段记首条 violation 摘要。
+- 仍失败：写 `AgentTrace(final_status=verifier_failed)`，`chosen_slot_id = None`，
+  error 字段记首条 violation 摘要。
+  > 注意 `Recommendation.candidates` **不是空列表** —— 它是 RANK 的输出（§2 终止状态表）。
 
 ---
 
 ## 10. Trace 记录
 
-每条 `AgentTrace.steps[]` 中的 step_type 完整覆盖 9 步：
+每个 `AgentTrace.steps[]` 元素来自 `AgentStepResult.to_json()`（`app/agents/state.py`）：
 
 ```python
-class StepType(str, Enum):
-    VISION               = "vision"
-    STRUCTURED_ITEM      = "structured_item"     # parse
-    STORAGE_RETRIEVAL    = "storage_retrieval"
+class RecommendationState(StrEnum):
+    INTAKE               = "intake"
+    UNDERSTAND           = "understand"
+    RETRIEVE             = "retrieve"
     CANDIDATE_GENERATION = "candidate_generation"
-    CONSTRAINT_FILTERING = "constraint_filtering"
-    RANKING              = "ranking"
-    LLM_DECISION         = "llm_decision"
+    FILTER               = "filter"
+    RANK                 = "rank"
+    DECIDE               = "decide"
     VERIFY               = "verify"
-    PERSIST              = "persist"
     RETRY                = "retry"
+    ANSWER               = "answer"      # 终态，**不产生 step**
+    FAILED               = "failed"      # 终态，**不产生 step**
 ```
 
 每个 step 记录：
 
-- `step_index` / `step_type` / `started_at` / `finished_at` / `duration_ms`
-- `payload`：步骤输入/输出（截断到 4KB）
-  - CANDIDATE_GENERATION 的 payload 包含 top 20 + score_breakdown
-  - LLM_DECISION 的 payload 包含 prompt_hash、tokens、provider、parse_ok
-  - VERIFY 的 payload 包含 violations
-- `error: str | None`
+- `state` / `started_at` / `ended_at` / `payload` / `error`
+  > ⚠️ 原稿写的是 `step_index` / `step_type` / `duration_ms` / `finished_at` —— **都不存在**。
+  > 键名是 `state`；时长由 `started_at` 与 `ended_at` 相减得出，没有冗余的 `duration_ms` 列。
+- `payload` 目前**只记计数与标识**，不记 LLM 原文。实际载荷（以 `pipeline.py` 为准）：
+  - `INTAKE` → `{item_id}`
+  - `UNDERSTAND` → `{name, category, is_sensitive}`
+  - `CANDIDATE_GENERATION` / `FILTER` → `{count}`
+  - `RANK` → `{count, top_score}`
+  - `DECIDE` → `{chosen_slot_id, reason, last_failure_was, raw_pick}`
+  - `VERIFY` → `{ok, first_failure, first_message, retries_used}`
+  - `RETRY` → `{last_failure, retries_used}`
+  > **没有 score_breakdown、没有 prompt_hash、没有 tokens。** 原稿声称
+  > CANDIDATE_GENERATION 记了 top 20 的 breakdown、DECIDE 记了 prompt_hash/tokens ——
+  > 这些字段当前**没有落盘**。`docs/AI.md` §11 描述的那套可观测性目前是**设计**，
+  > 不是现状。要让它成真，得先往 payload 里写。
 
-顶层 `final_status` / `total_duration_ms` / `llm_tokens_in/out` / `llm_cost_usd` / `error`。
+顶层字段：`final_status` / `error` / `total_duration_ms` / `llm_tokens_in` / `llm_tokens_out` /
+`llm_cost_usd`。
+> `llm_*` 三个字段**从未被写入**（见 `docs/AI.md` §9）。此外
+> **`retries_used` 不是列** —— `GET /recommendations/{recId}` 是靠数 `steps[]` 里
+> `state == "retry"` 的条数算出来的。
 
 ---
 
@@ -428,15 +474,139 @@ class StepType(str, Enum):
 
 - **Step 3 / 4 / 5（确定性）**：纯函数单测，覆盖每条规则、每条边界。
 - **Step 1 / 7（LLM）**：用 FakeProvider 返回固定 JSON，验证后续 Step 7 / 8 行为。
-- **Orchestrator**：状态机全路径（成功 / Vision 失败 / 候选空 / 全过滤 / LLM 失败 1 次 / LLM 失败 2 次 / Provider 错误 / 硬规则违反 / 编造 slot_id）。
+- **Orchestrator**（`agents/pipeline.py`）：状态机全路径（成功 / 候选空 / 全过滤 /
+  DECIDE 失败 1 次 / 失败 2 次 / Provider 抛错 / 硬规则违反 / 编造 slot_id）。
 - **Golden case**：20~50 条真实（物品 + 家庭 + 期望 Top-1），跑完整 pipeline。
 - **回放**：固定随机种子（如有），任何 trace 都能用相同输入复现。
 
 ---
 
-## 14. 未来扩展
+## 14. 结构提议 pipeline（拍照即建模 · P0.2）
+
+> ⏳ **本节是设计，尚未实现。** 它要回答的是当前最致命的一个事实：
+> **收纳结构只能靠 `python -m app.db.seed` 建立。** 没有任何接口能创建
+> room / unit / section / slot，所以新注册账号的家是一棵空树，推荐永远
+> `pre_filter_count == 0`、`state = failed`。用户根本没机会把自己的家告诉系统。
+>
+> 见 `AGENTS.md` §3.3（2026-09-21 修订：AI 可以**提议**结构，但必须用户显式确认才落库）、
+> `docs/PRD.md` §2.2 旅程 A、`docs/DEVELOPMENT_PLAN.md` 下篇 P0.2。
+
+### 14.1 与推荐 pipeline 的关系
+
+两条链路**共享同一条原则**（LLM 提议 → 确定性校验 → 用户确认 → 落库），但**不共享代码**：
+输入不同（照片 / 一句话 vs. 一件物品）、输出不同（空间结构 vs. 位置）、失败面也不同。
+
+关键差别在**安全网的性质**：
+
+| | 推荐 pipeline | 结构提议 pipeline |
+| --- | --- | --- |
+| LLM 的产物 | 从**已存在的** Slot 里挑 | **创造**还不存在的节点 |
+| 越界长什么样 | 选了一个不存在的 `slot_id` | 凭空多出一个柜子、或写错枚举值 |
+| 拿什么拦 | **白名单**（Verifier 比对 Step 6 的候选集） | 没有白名单可比 —— 换成**用户逐一确认** |
+
+所以本链路里**用户就是 Verifier**。这也是为什么"未确认的提议不得落库"是一条硬约束，而不是体验优化。
+
+### 14.2 状态机
+
+```
+Step 1  Intake        (LLM)      照片 / 一句话 → 观察到的结构要素
+Step 2  Context       (DB)       该 home 的现有空间树（避免重复提议）
+Step 3  Proposal      (LLM)      → StructureProposalOutput (Pydantic)
+Step 4  Validation    (确定性)   枚举合法性 / 上限 / 重名 / code 去重
+Step 5  Present       (API)      返回给前端 —— **到此为止，不落库**
+Step 6  Confirmation  (用户)     逐项确认 / 改名 / 删掉不存在的 / 补上漏掉的
+Step 7  Materialize   (DB)       只把被确认的节点写成真实的 Room/Unit/Section/Slot
+```
+
+**Step 5 → Step 7 之间没有任何数据库写入。** 提议不是一个资源，它是**一次响应的 payload**。
+
+> **取舍（需确认）**：代价是提议**不能跨页面刷新保留** —— 用户关掉页面就重新提议一次。
+> 替代方案是建一张 `structure_proposals` 表（`status=pending`）持久化待确认提议，
+> 但那会把一个 AI 产物变成数据库实体，需要新 migration + 新实体类型，
+> 与 `AGENTS.md` §3.3 的字面表述（"未确认的提议不得落库"）也有张力。
+> **当前选择无状态方案**；若后续要做"提议给我，我明天再看"，再改。
+
+### 14.3 输出 schema
+
+```python
+class ProposedSlot(BaseModel):
+    code: str = Field(min_length=1, max_length=32)
+    label: str | None = None
+    allowed_categories: list[str] = Field(default_factory=list)
+    capacity_hint: Literal["small", "medium", "large"] | None = None
+
+class ProposedSection(BaseModel):
+    name: str
+    section_type: StorageSectionType          # layer | drawer | box | compartment | other
+    slots: list[ProposedSlot] = Field(default_factory=list, max_length=20)
+
+class ProposedUnit(BaseModel):
+    name: str
+    unit_type: StorageUnitType                # cabinet | shelf | drawer_cabinet | box | other
+    sections: list[ProposedSection] = Field(default_factory=list, max_length=12)
+
+class ProposedRoom(BaseModel):
+    name: str
+    room_type: RoomType                       # bedroom | kitchen | bathroom | study | living | storage | other
+    units: list[ProposedUnit] = Field(default_factory=list, max_length=12)
+
+class StructureProposalOutput(BaseModel):
+    rooms: list[ProposedRoom] = Field(min_length=1, max_length=6)
+    rationale: str
+    confidence: float = Field(ge=0.0, le=1.0)
+```
+
+- schema 用 `extra="forbid"`，**不用 `strict=True`** —— 同样的教训在 §7.2 已经吃过一次
+  （`strict=True` 让 JSON 字符串 UUID 校验失败，静默搞坏了整条真实 Rank 链路）。
+- 枚举字段**直接复用 `app/db/enums.py` 的 `StrEnum`**：模型把 `room_type` 写成 `"厨房"`
+  时 Pydantic 当场拒绝并触发 parse-retry，而不是把脏值写进库再炸。
+- **四层深度由 schema 结构本身保证** —— `ProposedSlot` 里没有"再来一层"的字段，
+  模型没有地方表达第五层。
+
+### 14.4 确定性校验（Step 4）
+
+LLM 的产物在返回给用户**之前**必须过一遍纯代码检查：
+
+| 检查 | 失败处理 |
+| --- | --- |
+| 枚举合法性 | 由 Pydantic 承担；违法 → parse-retry（≤ 2 次） |
+| 数量上限 | 单次提议 ≤ 6 房间 / ≤ 12 柜 / ≤ 12 层 / ≤ 20 格 —— 超限**截断**，不整份拒绝 |
+| `code` 唯一性 | 同一 section 内 `code` 不得重复；重复的**丢弃** |
+| `allowed_categories` | 只能取自该 home 的**真实类别词表**；词表外的**清空**（清空＝不限制该 slot），不拒绝 |
+| 与现有结构重名 | 同名 room / unit **不拒绝**，标记为「可能重复」交给用户判断 |
+
+**原则：能在 Step 4 修的就在 Step 4 修，不要退回给 LLM 重跑** —— 只有枚举违法才值得 retry，
+其余都是成本远高于收益的往返。
+
+### 14.5 确认与落库（Step 6–7）
+
+- 确认界面**可编辑**：用户能改名、删掉"其实没有"的那一层、补上漏掉的格子。
+- 落库**复用 P0.2 的结构写接口**（`POST /homes/{id}/rooms`、`POST /rooms/{id}/storage-units` …），
+  **不新增"落库整个提议"的批量端点** —— 每个节点一次请求，失败可以单独重试，
+  也不会出现"柜子建到一半"的半成品。
+- **未被确认的节点永远不到达数据库。** 这一条必须有测试兜底
+  （断言 `rooms` / `storage_units` / `storage_sections` / `storage_slots` 的行数不增），
+  不能只靠 code review。
+
+### 14.6 同一套链路的三种输入
+
+只有 Step 1 不同：
+
+| 输入 | Step 1 | 备注 |
+| --- | --- | --- |
+| 一张柜子的照片 | `vision.v2.md`（内联 data URI） | 模型**数层数很容易错**，用户确认时重点核对 |
+| 一句话（"我家厨房有个三层吊柜"） | `infer.v1.md` 的纯文本接地块 | 最省 token，也最不容易错 |
+| 什么都没有（新账号） | **不调 LLM** | 直接给模板：卧室 / 厨房 / 客厅 + 各一个柜子，让用户改 |
+
+> 第三种是兜底：**拍照即建模不能让"没有照片"的用户卡住。**
+> 一个刚注册、只想手动搭的用户，也应该能在 3 步内得到一个可用 Slot。
+
+---
+
+## 15. 未来扩展
 
 - 多轮对话：Step 7 输入加 `Conversation.history`，LLM 接收上下文。
 - 批量推荐：`BatchRecommendPipeline`，多条物品共享一次 storage retrieval。
 - 主动收纳建议：用户无新物品时，根据季节 / 使用频率触发。
 - 候选生成可学习：基于历史 `accept/reject` 反馈调权重（offline 训练，不引入 ML 基础设施到 MVP）。
+- 结构提议的持久化：把待确认提议存成 `structure_proposals` 行，支持"先提议、稍后确认"（见 §14.2 的取舍）。

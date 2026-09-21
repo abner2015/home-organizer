@@ -1,412 +1,289 @@
 # DEVELOPMENT_PLAN — 阶段化开发计划
 
-> 把开发拆成可以逐个验证的 Phase。每个 Phase 必须有明确产物和验收标准。
+> **本文件分两篇，读之前先看这一行：**
+>
+> - **上篇 · 已交付**（项目史 Phase 1–13）：计划早已执行完。这里记录**实际情况** ——
+>   真实产物路径、真实验收结论、真实基线。已完成的部分不再有「任务」，只有事实。
+> - **下篇 · P0 路线图**（P0.0–P0.4）：唯一还在推进的计划。每个 P0.x 都带交付物与验收标准。
+>
+> 最后更新：2026-09-21 —— 去重编号、订正路径、删除已被证伪的 `strict=True` 处方、新增 P0 路线图。
+>
+> 背景：本文件原稿写于**开工前**。开工后实际走出来的顺序与原稿并不一致，于是原稿里出现了
+> Phase 9、Phase 10 各两份（旧副本与新副本交织），路径也停留在 `apps/api/`。本次一并归位。
 
 ---
+
+## 0. 关于「Phase 编号」
+
+仓库里历史存在**两套互不相同的编号**，这是本文件此前自相矛盾的根源：
+
+| 编号体系 | 出处 | 含义 |
+| --- | --- | --- |
+| 项目史 Phase 1–13 | `AGENTS.md` §5、本文上篇 | **实际交付顺序**，是这个项目真正的历史 |
+| 计划稿 Phase 0–13 | 本文件原稿 | **开工前的设想**，与实际交付顺序不同 |
+
+**归一结论：以项目史编号为准。** 上篇按项目史列已交付批次，并附「对应计划稿 Phase」做交叉引用；
+原稿里唯一仍然重要的一条计划稿内容 —— **「家庭空间 CRUD」** —— 从未交付，它不是历史，
+**它就是 P0.2 的缺口本身**，已移入下篇。
+
+---
+
+# 上篇 · 已交付（项目史 Phase 1–13）
 
 ## 总览
 
-| Phase | 目标 | 关键产物 | 验收 |
+| Phase | 内容 | 对应计划稿 | 状态 |
 | --- | --- | --- | --- |
-| 0 | 规划与脚手架 | docs/*、AGENTS.md、目录骨架 | 文档评审通过；`docker compose config` 合法 |
-| 1 | 基础设施 | docker-compose 启动；alembic 空库 | `docker compose up` 跑通；`alembic upgrade head` 成功 |
-| 2 | 用户与认证 | signup / login / me；JWT | 端到端跑通；测试覆盖 |
-| 3 | 家庭空间 CRUD | Home/Room/Unit/Section/Slot | 树形 API 完整；前端可建空间 |
-| 4 | MinIO 预签名上传 | `/uploads/presign` + 直传 | 浏览器能上传图片到 MinIO |
-| 5 | AIProvider 抽象 + Vision | Provider Protocol + OpenAI 兼容实现 | Vision 在 golden case 上 ≥ 75% 准确率 |
-| 6 | Candidate Generation（确定性） | `generate_candidates` + 冷启动默认映射 | 单测覆盖所有权重分支与冷启动 |
-| 7 | Constraint Filtering + Verifier | `apply_hard_rules` + 复用为 Verifier | 单测覆盖所有 hard rule |
-| 8 | Ranking + LLM Decision | 确定性 ranking + `rank_candidates` + Retry | golden 集 Top-1 ≥ 55% |
-| 9 | 推荐端到端 | Orchestrator 串联 9 步 + 落库 | 端到端 5 个 case 全过 |
-| 10 | 物品搜索 | `/items` 查询 + 当前 placement + `/candidates` 调试 | P95 ≤ 300ms |
-| 11 | 前端最小可用 | 录入新物品全流程 | 浏览器录 1 件物品到推荐到接受 |
-| 12 | 评估与 golden | eval 脚本 + golden set | 评估脚本可跑、报告生成 |
-| 13 | 第二版候选 | pgvector / 多轮对话 / 小程序 | 视业务决定 |
+| 1 | 骨架与基础设施 | Phase 0 + 1 | ✅ |
+| 2 | 数据库：14 实体 / 16 表 + Alembic `0001` + seed | Phase 2(表) + 3(表) | ✅ |
+| 3 | 图片上传（assets + presign） | Phase 4 | ✅ |
+| 4 | AI Vision（`AIProvider` + 识别） | Phase 5 | ✅ |
+| 5 | 存储推荐 Agent（9 步 pipeline + Verifier + Retry） | Phase 6+7+8+9 | ✅ |
+| 6 | 自然语言搜索（含多轮记忆） | Phase 10(读侧) + 原稿没有的新增 | ✅ |
+| 7 | JWT 认证接口 | Phase 2(接口) | ✅ |
+| 8 | Web 前端 MVP | Phase 9/11(前端) | ✅ |
+| 9 | 评估 harness + golden set | Phase 12 | ✅ |
+| 10 | Web ↔ API 接线（读路径 + 写路径） | Phase 3(读接口) | ✅ |
+| 11 | 可切换存储后端 + 图片内联识别 + 模型填表 | Phase 4 的扩展 | ✅ |
+| 12 | 去英文 + 助手记忆 + 模型代笔 | — | ✅ |
+| 13 | 收纳助手「看懂家里布局」 | — | ✅ |
+
+**当前基线**（任何改动都不得使其上升/下降）：
+
+- `services/api`：**534 passed / 1 skipped**
+- `ruff check app/ tests/`：**32**（历史遗留，不得上升）
+- `mypy app/`：**20**（历史遗留，不得上升）
+- `apps/web`：`npx tsc --noEmit` 与 `npx next lint` **干净**
+
+## Phase 明细
+
+### Phase 1 — 骨架与基础设施 ✅
+
+`services/api/app/{core,db,cache}`、`/health`、结构化日志、异常处理器；
+`docker-compose.yml`（postgres / redis / minio / minio-init / api）、`infra/postgres/initdb/`（pgcrypto）。
+
+### Phase 2 — 数据库 ✅
+
+14 实体 / 16 表，Alembic `0001_initial_schema`（含全部 CHECK、部分唯一索引、可延迟 FK），
+`python -m app.db.seed` 幂等种子（4 房间 / 4 柜 / 20 格 / 11 物品）。
+
+> 表在原稿的 Phase 2 与 Phase 3 各写了一半，实际是一次性交付的。
+
+### Phase 3 — 图片上传 ✅
+
+`POST/GET/DELETE /api/v1/assets/*`：JPEG/PNG/WebP 白名单、20 MiB 上限、魔数嗅探 + 尺寸、
+SHA-256 去重、预签名 URL。迁移 `0002_assets`。（本地存储后端在 Phase 11 追加。）
+
+### Phase 4 — AI Vision ✅
+
+`AIProvider` Protocol（`vision()` / `chat()` / `structured_output()` / `rank_candidates()`）；
+三个实现 `MockAIProvider` / `OpenAICompatibleProvider` / `AnthropicProvider`；
+`VisionOutput` schema；`recognize_image()` 重试编排 + `AgentTrace` 落库；
+`app/ai/observability.py` 的日志脱敏。真实 API 测试由 `RUN_REAL_AI_TESTS=1` 开关控制。
+
+> **订正（重要）**：原稿 Phase 5 要求 schema 用 `extra="forbid"` **+ `strict=True`**。
+> 这个处方是错的，已于 2026-09-20 在本文件与代码中一并去掉。`strict=True` 会让 JSON 反序列化
+> 出来的**字符串 UUID** 校验失败，导致 `RankingOutput` 每次调用都抛
+> "Structured output missing required fields"，真实 LLM 的 Rank 步骤**整条链路静默失效**，
+> Agent 只能返回 `state=failed`（详见 `docs/AI.md`）。
+> **现行约定：AI 输出 schema 用 `extra="forbid"`，不用 `strict=True`。**
+
+### Phase 5 — 存储推荐 Agent ✅
+
+9 步 pipeline（INTAKE→UNDERSTAND→RETRIEVE→CANDIDATE_GENERATION→FILTER→RANK→DECIDE→VERIFY
+→(RETRY)→ANSWER/FAILED），最多 2 次 Retry；13 个工具；9 个 Verifier 纯函数检查；
+确定性 ranker（`docs/AGENT.md` §4 权重 + §4.4 打破平局）；
+4 个接口（recommend / accept / reject / patch）。迁移 `0003_update_recommendation_status`。
+
+> 原稿把它拆成 Phase 6–9 四个阶段，实际是一次成型的。模块路径也已归位：
+> `app/agent/*` → **`app/agents/*`**；`app/agent/rules.py` + `verifier.py` → **`app/verification/`**；
+> `app/agent/orchestrator.py` → **`app/agents/pipeline.py`**。
+
+### Phase 6 — 自然语言搜索 ✅
+
+`SearchAgent`（只读）识别意图后分派；支持物品 / 位置 / 存在性 / 列表 / 放置建议 / 存储结构描述
+等意图；`POST /api/v1/search` 有状态（`conversations` + `messages`，回放最近 8 轮），
+由 `search.v4.md` + `answer.v1.md` 驱动。
+
+> 原稿完全没有「自然语言搜索」这一项 —— 它是开工后加进来的能力，且已成为助手的核心。
+
+### Phase 7 — JWT 认证接口 ✅
+
+`/api/v1/auth/{signup,login,refresh,me}`、`auth_service`、`security`（bcrypt + JWT）。
+
+### Phase 8 — Web 前端 MVP ✅
+
+Next.js 14 App Router + Tailwind。页面：`/`、`/login`、`/signup`、`/home`（+ rooms / storage）、
+`/items`（+ 详情 / 新增）、`/recommendations/[id]`、`/assistant`。
+
+> 原稿 Phase 9/11 的验收写「浏览器跑通『**建家** → 录物品 → 看推荐 → 接受』」。
+> 「建家」这一步的实现方式变了：没有任何「创建 home」的接口，**注册时自动 provision 一个家**
+> （见 P0.1），所以「建家」不再是一个用户动作。
+
+### Phase 9 — 评估 harness ✅
+
+`python -m app.evaluation`，61 个 golden case，产出 `report.json` / `report.csv` / `report.md`。
+Mock 与真实 LLM 数字均记录在 `docs/EVALUATION.md`。
+
+### Phase 10 — Web ↔ API 接线 ✅
+
+**读路径**：`app/api/v1/homes.py`（6 条路由）、`GET` 物品牌、`GET /recommendations/{id}`。
+**写路径**：`POST /uploads/presign`、`POST/PATCH /items`、`POST /items/{id}/vision`。
+
+> 原稿 Phase 10「物品搜索」的两条验收（`/items/{id}/placements` 时间线、`/items/{id}/candidates`
+> 调试端点）均已交付；`P95 ≤ 300ms` 未做压测，**未验证**，不当作已达成。
+
+### Phase 11 — 可切换存储后端 ✅
+
+`STORAGE_BACKEND=local|minio`：`app/storage/{errors,backend}.py` + `app/api/v1/files.py`
+（签名 URL 读取，不带 `get_actor`，签名即凭证）。图片改为**内联 data URI** 送给多模态模型
+（远端模型无法 fetch `localhost`）。`POST /items/infer` 让模型把表单一次填齐。
+
+### Phase 12 — 去英文 + 助手记忆 ✅
+
+`full_path` 改用中文 `label`；Verifier 的 10 条消息中文化；`recommend.v2.md` 禁止 code/英文；
+`/assistant` 变成有状态的（`conversation_id` + `Message` 回放）。
+
+### Phase 13 — 收纳助手「看懂家里布局」 ✅
+
+新增第 8 个意图 `describe_storage` + 纯函数 `build_home_blueprint`，
+让「我家有几个柜子 / 有几个房间 / 还有多少空位」这类**结构问题**不再被当成物品搜索。
 
 ---
 
-## Phase 0 — 规划与脚手架
+# 下篇 · P0 路线图（唯一在推进的计划）
 
-**目标**：完成所有规划文档；建立目录骨架。
+## P0 是什么
 
-**任务**：
+P0 是「**让一个真人第一次用起来，能走完一遍并觉得有用**」的最小闭环。
 
-- 写完 `docs/` 下 10 个文档
-- 写 `AGENTS.md`
-- 删除早期 Vite/React 脚手架（`client/`、`package.json` 根、`CLAUDE.md`）
-- 决定 monorepo 形式（apps/* 还是单仓两个 root）
-- 创建 `.env.example`、`.gitignore`、`docker-compose.yml` 骨架（先不写 service 内容）
+判定标准不是功能多少，而是：**一个不会收纳的人，注册进来之后，在不看说明书的情况下能不能
+把一件东西放对地方，并且知道为什么放那儿。** 因此 P0 只做四个批次，任何一个批次单独上线
+都不会把产品弄坏。
 
-**产物**：
+> 核心原则的修订见 `AGENTS.md` §3.3（AI 可以**提议**新结构，但必须用户显式确认才落库）。
+> 产品定位、核心价值（放 / 理 / 找）、三段旅程、权限模型、使用指引见 `docs/PRD.md`。
 
-- 完整 docs/
-- 目录结构与 `docs/ARCHITECTURE.md` §6 一致
-- `docker compose config` 解析通过
+## 依赖关系
 
-**验收**：
+```
+P0.1 真实账号 ✅  ──┐
+                    ├──► P0.2 拍照即建模 ──┬──► P0.3 反向录入
+                    │                      └──► P0.4 闭环 + 讲理由
+                    └──► （P0.1 尾巴：token 续期）
+```
 
-- 团队评审 docs，无重大遗留问题
-- `git status` 干净；目录与架构图一致
-
----
-
-## Phase 1 — 基础设施
-
-**目标**：`docker compose up` 跑通所有服务，能连数据库。
-
-**任务**：
-
-- 写 `apps/api/Dockerfile`、`apps/web/Dockerfile`
-- 写 `infra/nginx/default.conf`
-- 写 `docker-compose.yml`（仅 postgres / redis / minio / minio-init）
-- 写 `apps/api/alembic.ini` 与初始空 migration
-- 写 `apps/api/app/main.py`（空 FastAPI，仅 `/health`）
-- 写 `apps/web/app/page.tsx`（占位）
-- 接入 `pgcrypto` 扩展
-
-**产物**：
-
-- 6 个服务启动并 healthy
-- `curl http://localhost:8000/health` → 200
-- `curl http://localhost:3000` → 200
-
-**验收**：
-
-- `docker compose up -d` → 全 healthy
-- 关闭再启动不丢数据（pgdata、miniodata 持久）
-- `alembic upgrade head` 在空库上成功
+P0.2 是硬前提：**没有真实的 slot，推荐、反向录入、闭环全都无从谈起。**
 
 ---
 
-## Phase 2 — 用户与认证
+## P0.0 — 定位与产品重规划（文档）⏳
 
-**目标**：注册、登录、当前用户可用。
+**为什么**：定位、三段旅程、权限模型从未落进任何文档 —— 它们只存在于讨论里。
 
-**任务**：
+**交付物**
 
-- 写 `users`、`home_memberships` 表 + migration
-- 实现 `/api/v1/auth/signup` `/login` `/refresh` `/me`
-- 实现密码 bcrypt、JWT 签发 / 校验
-- 写 FastAPI 依赖 `get_current_user`
+1. `docs/PRD.md` 重写：产品定位、核心价值 **放 · 理 · 找**、三段旅程
+   （A 拍照即建模 / B 反向录入 / C 找）、权限模型、使用指引、MVP 边界。
+2. 本文件的 P0 路线图（即本节）。
 
-**产物**：
+**验收**
 
-- 4 个接口 + 测试
-
-**验收**：
-
-- signup → 201；login → 拿到 access/refresh
-- 错误密码 → 401
-- `me` 在无 token → 401；有 token → 200
-- 单元 + 集成测试通过
+- 三段旅程的每一段都能指到具体的 P0.x。
+- 每个 P0.x 的验收标准都是**可勾选的事实**，不是形容词。
+- 与 `AGENTS.md` §3 核心原则无冲突；有冲突的已显式记录修订理由。
 
 ---
 
-## Phase 3 — 家庭空间 CRUD
+## P0.1 — 真实账号 ✅ 已完成
 
-**目标**：能建家、建房间、建柜子、层、格。
+**交付物**：`get_actor` 改为真 JWT（`Authorization: Bearer`）+ 每请求重新校验 `HomeMembership`；
+`X-Home-Id` 只是「我在哪个家操作」的选择器，不是凭证；web 会话改为 cookie
+（`requireSession()` 服务端 + 客户端组件从服务端父组件拿 session）；
+`/login` `/signup`；注册时自动 provision「我的家」。
 
-**任务**：
+**验收（全过）**
 
-- 写 `homes`、`rooms`、`storage_units`、`storage_sections`、`storage_slots` 表 + migration
-- 实现对应 CRUD API（按 `docs/API.md` §3-§5）
-- 实现 `/api/v1/homes/{id}/space-tree`
-- 权限校验：仅 home 成员能读写
-- 约束：删除有子级的 unit/room/section 需 409
+- [x] 无 token → 401；伪造 `X-User-Id` / `X-Home-Id` → 401
+- [x] 合法 token + 别人的 home → **404（不是 403）**
+- [x] 注册 → 登录 → `GET /homes` 自动有「我的家」→ 刷新仍在线
+- [x] 7 个页面带 cookie 渲染真实种子数据；无 cookie → 307 `/login`
 
-**产物**：
+**尾巴（待办）**：`jwt_access_ttl = 3600`，而 web 从不调 `/auth/refresh` ⇒ **一小时后静默掉线**。
+修法是在 `session.ts` 的续期点接上 refresh；属于 P0.1，不单列批次。
 
-- 完整空间 API + 测试
-- 树形接口单测覆盖层级
+**附带的两个坑（已修，供后续参考）**
 
-**验收**：
-
-- 端到端：signup → 创建 home → 创建 room → 创建 unit → 创建 section → 创建 slot
-- 删除带 active placement 的 slot → 409
-- 非成员调接口 → 403
-
----
-
-## Phase 4 — MinIO 预签名上传
-
-**目标**：浏览器能拿到预签名 URL 并直传 MinIO。
-
-**任务**：
-
-- 写 `infra/minio/init` 初始化 bucket
-- 写 `app/storage/minio_client.py`
-- 写 `/api/v1/uploads/presign`（生成 PUT 预签名 URL）
-- 写 `/api/v1/uploads/url`（GET 预签名 URL，用于展示）
-
-**产物**：
-
-- 预签名 API + 测试
-
-**验收**：
-
-- 浏览器拿到 URL → PUT 上传成功
-- 错误 content_type / 错误 method → 4xx
-- 过期 URL → 403
+- 种子账号 `demo@home.local` 永远登不进去 —— `EmailStr` 直接拒 special-use TLD（`.local`）。
+  已改为 `demo@example.com`。
+- `next dev` 在文件由 client 翻成 server 后会保留**腐坏的模块图**，报出指向正确文件的假错误。
+  **重启 `next dev` 即可，不要去改代码。**
 
 ---
 
-## Phase 5 — AIProvider 抽象 + Vision
+## P0.2 — 拍照即建模 ⏳
 
-**目标**：拿到图片即可输出结构化 VisionOutput（仅 Vision，不含推荐）。
+**为什么**：目前收纳结构**只能靠 `python -m app.db.seed` 建立** —— 没有任何创建
+room / unit / section / slot 的接口。新注册的账号拿到的是一个空树，于是推荐永远
+`pre_filter_count == 0`。这是产品当前最大的断点：**用户根本没法把自己的家告诉系统。**
 
-**任务**：
+**交付物**
 
-- 写 `app/ai/provider.py`（Protocol，含 `vision_recognize` 与 `rank_candidates`）
-- 写 `app/ai/schemas.py`（`VisionOutput` / `RankingOutput` / `CandidateSlot`，`extra="forbid"` + `strict=True`）
-- 写 `app/ai/providers/openai_compatible.py`
-- 写 `app/ai/providers/anthropic.py`（如必要）
-- 写 `app/ai/factory.py`（按 `AI_PROVIDER` 选择实现）
-- 写 `app/agent/prompts/vision.v1.md`
-- 写 `/api/v1/items/{id}/vision`
-- 写 `app/observability/pii_scrubber.py`（基础正则清理）
+1. **结构写接口**：落地 `docs/API.md` §3–§5 的设计稿 —— rooms / storage-units /
+   sections / slots 的创建、改名、删除。
+   - 删除有子级或有 active placement 的节点 → **409**
+   - 非成员 → **404**（不是 403）—— `AGENTS.md` §3 与 P0.1 已确立的口径
+2. **AI 提议结构 + 用户确认**（`AGENTS.md` §3.3）：AI 可以提议新建房间 / 柜 / 层 / 格，
+   但**必须经用户显式确认才写入数据库**；未确认的提议不得落库。
+3. **Web**：从空树开始搭建空间的最小交互（拍照 / 描述 → AI 提议 → 用户确认 → 落库）。
 
-**产物**：
+**验收**
 
-- 完整 AI 层（仅 Vision）+ 调试用 rank 入口（暂未接 pipeline）
-- 20 张 golden vision set
-
-**验收**：
-
-- golden set Top-1 准确率 ≥ 75%
-- Provider 不可用时返回 503 + trace
-- 解析失败 → 自动 Retry → 失败后写 trace
-- 输出含候选列表外的 slot_id 时抛 `AIOutputConstraintError`（即便调用方未传 candidates 也要对 schema 严格）
+- [ ] 全新账号能在浏览器里从**空树**建出至少 1 个可用 slot，全程不碰命令行
+- [ ] 未确认的 AI 提议在数据库中**不存在**（有测试断言行数，不靠 code review）
+- [ ] 新建出的 slot 能进入推荐候选（`pre_filter_count > 0`，不再 `state=failed`）
+- [ ] 基线下滑即视为未完成：534 passed / 1 skipped，ruff 32，mypy 20 不上升
 
 ---
 
-## Phase 6 — Candidate Generation（确定性）
+## P0.3 — 反向录入 ⏳
 
-**目标**：从全部 Slot 中用确定性代码筛出 ≤ 20 个候选。
+**为什么**：物品**已经在某个地方**时，用户不该被迫走一遍「拍照 → 识别 → 推荐 → 接受」。
+已经有明确去向的东西应当能直接落位。这是「无需繁琐录入」的另一半。
 
-**任务**：
+**交付物**
 
-- 写 `app/agent/candidate_gen.py`：`generate_candidates(item, slots, history, preferences)`
-- 写 `app/agent/scoring.py`：实现 §4 权重公式
-- 写 `app/agent/default_room_map.py`：内置 category → room_type 映射（可被 HomeRule 覆盖）
-- 写 `app/agent/contexts.py`：`SlotContext` / `ItemContext` / `ScoredSlot` 等 Pydantic 模型
-- 单测：每个权重分支、冷启动、无历史、容量不匹配
+1. 把已有物品**直接放进指定 slot** 的接口：直写 `ItemPlacement`（`source=user_manual`），
+   **不经过 LLM**；同一物品的旧 active placement 需被移除。
+2. Web：物品详情 / 列表里的「放到这里」交互，支持连续补录多件。
 
-**产物**：
+**验收**
 
-- `generate_candidates` 函数 + 完整单测
+- [ ] 用户能把一件物品直接「放」进某个 slot，`item_placements` 正确落库
+- [ ] 物品详情显示当前位置，且**不触发任何 LLM 调用**（`agent_traces` 行数不增）
+- [ ] 跨 home 的 slot → 404；删除随后被正确反映在空间树上
 
-**验收**：
-
-- 给定固定输入，输出完全确定
-- 冷启动（无历史）能给出 top 20
-- 性能：1000 slot 输入下 < 100ms
+**依赖**：P0.2（得先有 slot 可放）。
 
 ---
 
-## Phase 7 — Constraint Filtering + Verifier
+## P0.4 — 闭环 + 讲理由 ⏳
 
-**目标**：硬规则约束过滤（pipeline Step 5） + LLM 输出安全网（Step 8），复用同一规则引擎。
+**为什么**：推荐出来后，用户的接受 / 拒绝应当让**下一次更准**；并且用户要能看懂
+「为什么是这个柜子这一格」。当前偏好没有被回灌，拒绝也没有被记住。
 
-**任务**：
+**交付物**
 
-- 写 `app/agent/rules.py`：`apply_hard_rules(candidates, rules, item)` —— **同一函数被 Step 5 和 Step 8 复用**
-- 写 `app/agent/verifier.py`：`verify(ranking_output, candidates_whitelist, item, rules)` —— 包含白名单校验 + 存在性 + 硬规则 + 去重 + 数量
-- 单测：每条 hard rule 单独测、组合测、白名单违反测
+1. **反馈回灌**：接受 → 正偏好；拒绝 → 记录原因并排除该 slot，下次同物品的候选不再包含它。
+2. **讲理由**：每条推荐给出可读的中文理由，并在推荐页 / 物品页展示「为什么放这里」。
 
-**产物**：
+**验收**
 
-- 规则引擎 + Verifier + 完整单测
+- [ ] 接受某个 slot 后，对同类物品再次推荐，该 slot 的排序**上升**
+- [ ] 拒绝某个 slot 后，同物品的候选**不再包含**它
+- [ ] 每条候选都有非空的中文理由，且**不含 code / 英文**（Phase 12 已确立的规则）
 
-**验收**：
-
-- 单测覆盖所有 hard rule 类型与组合
-- LLM 输出含候选外 slot_id → Verifier 拦截
-
----
-
-## Phase 8 — Ranking + LLM Decision
-
-**目标**：确定性 Ranking（Step 6） + LLM Decision（Step 7） + Retry。
-
-**任务**：
-
-- 写 `app/agent/ranking.py`：`rank_candidates(candidates)` 增量信号 + 排序
-- 写 `app/agent/prompts/rank.v1.md`
-- 写 `app/agent/retry.py`：Retry 策略（≤ 2 次，注入 last_failure）
-- 写 `app/ai/providers/<vendor>.py` 中的 `rank_candidates` 实现
-- 写 30 条 golden recommend set
-- 单测：Retry 0 / 1 / 2 次 + Provider 错误
-
-**产物**：
-
-- Ranking + LLM Rank + Retry + golden
-
-**验收**：
-
-- golden set Top-1 ≥ 55%，Top-3 ≥ 80%
-- Verifier 失败后 ≤ 2 次 Retry 通过率 ≥ 90%
-- LLM 越界选 slot → Verifier 拦截 → Retry → 成功
-
----
-
-## Phase 9 — 推荐端到端
-
-**目标**：Orchestrator 串联 9 步 pipeline + 落库。
-
-**任务**：
-
-- 写 `app/agent/orchestrator.py`：9 步状态机
-- 写 `recommendations`、`item_placements`、`agent_traces` 表 + migration（含 `pre_filter_count` / `post_filter_count`）
-- 写 `/api/v1/items/{id}/recommend` `/accept` `/adjust` `/reject`
-- 写 `/api/v1/items/{id}/candidates`（调试端点）
-- 写 `app/services/placement_service.py` / `item_service.py` / `rule_service.py` / `preference_service.py`
-- 5 个端到端 case 测试
-
-**产物**：
-
-- 完整推荐 pipeline + 落库 + 调试端点
-- 端到端集成测试
-
-**验收**：
-
-- 5 个 case 全过：成功 / Retry 后成功 / 候选空 / 全过滤 / 调整 / 否决
-- `agent_traces` 写入 9 步 steps
-- `recommendations.pre_filter_count` / `post_filter_count` 正确
-- `placements` 在 accept 后落库
-
----
-
-## Phase 10 — 物品搜索
-
-**目标**：能用关键字找物品及其当前位置。
-
-**任务**：
-
-- 写 `/api/v1/items` 查询（分页、过滤）
-- 写 `GET /api/v1/items/{id}/placements`（历史时间线）
-- 加索引 `(home_id, category)`、`(home_id, name)`
-
-**产物**：
-
-- 搜索 API + 测试
-
-**验收**：
-
-- P95 ≤ 300ms（1000 items / home 规模下）
-- 支持 `q`、`category`、`in_slot` 过滤
-- 时间线按 `placed_at` 倒序
-
----
-
-## Phase 9 — 前端最小可用
-
-**目标**：浏览器能完整跑"建家 → 录物品 → 看推荐 → 接受"。
-
-**任务**：
-
-- 写 Next.js 路由（按 `docs/API.md` §3）
-- 写空间树组件
-- 写物品上传组件（用 presign URL）
-- 写推荐结果展示
-- 写历史 / 搜索
-
-**产物**：
-
-- 完整 Web 端到端流程
-- 截图 / 录屏
-
-**验收**：
-
-- 全流程在浏览器跑通
-- 主要页面 Lighthouse Performance ≥ 80
-- 关键交互有 loading / error UI
-
----
-
-## Phase 10 — 物品搜索
-
-**目标**：能用关键字找物品及其当前位置。
-
-**任务**：
-
-- 写 `/api/v1/items` 查询（分页、过滤）
-- 写 `/api/v1/items/{id}/candidates` 调试端点
-- 写 `GET /api/v1/items/{id}/placements`（历史时间线）
-- 加索引 `(home_id, category)`、`(home_id, name)`
-
-**产物**：
-
-- 搜索 API + 测试
-
-**验收**：
-
-- P95 ≤ 300ms（1000 items / home 规模下）
-- 支持 `q`、`category`、`in_slot` 过滤
-- 时间线按 `placed_at` 倒序
-
----
-
-## Phase 11 — 前端最小可用
-
-**目标**：浏览器能完整跑"建家 → 录物品 → 看推荐 → 接受"。
-
-**任务**：
-
-- 写 Next.js 路由（按 `docs/API.md` §3）
-- 写空间树组件
-- 写物品上传组件（用 presign URL）
-- 写推荐结果展示（含 9 步 pipeline 状态——若 LLM 慢，前端展示"正在筛选候选"等中间态）
-- 写历史 / 搜索
-
-**产物**：
-
-- 完整 Web 端到端流程
-- 截图 / 录屏
-
-**验收**：
-
-- 全流程在浏览器跑通
-- 主要页面 Lighthouse Performance ≥ 80
-- 关键交互有 loading / error UI
-
----
-
-## Phase 12 — 评估与 golden
-
-**目标**：建立持续评估机制。
-
-**任务**：
-
-- 写 `apps/api/scripts/eval/eval_vision.py`
-- 写 `apps/api/scripts/eval/eval_candidate_gen.py`（新增：预过滤候选 Top-1 命中率）
-- 写 `apps/api/scripts/eval/eval_recommend.py`
-- 写 `apps/api/scripts/eval/eval_verifier.py`
-- 扩充 golden set 到 ≥ 50 个 case
-- 把 eval 接入 CI
-
-**产物**：
-
-- 评估脚本 + 报告
-- CI 状态
-
-**验收**：
-
-- 每次 PR 自动跑 eval
-- 报告对比基线，回归可见
-- 包含 `pre_filter_top1_in_final_rate`（预过滤 top1 是否进 final ≥ 95%）
-
----
-
-## Phase 13+ — 后续候选
-
-- pgvector + 图像相似度搜索
-- 多轮对话（Conversation / Message）
-- 微信小程序
-- 多人协作权限细分
-- 计费 / 套餐 / 多租户
-- 移动端原生
-
-每个 Phase 都视业务反馈再决定是否启动；不在第一版计划内。
+**依赖**：P0.2（有真实 slot 之后，闭环才有意义）。
 
 ---
 
@@ -414,16 +291,14 @@
 
 | 风险 | 触发条件 | 应对 |
 | --- | --- | --- |
-| Provider 行为漂移导致 parse 失败 | parse_error 上升 | 把 parse 失败的样本纳入 golden set；调 prompt / Pydantic schema |
-| 推荐接受率低 | 低于 60% | 调 prompt；增加 explanation；做用户访谈 |
-| Verifier 误拦截高 | 拦截后用户接受占比 > 5% | 软化 hard 规则；增加 evidence 字段 |
-| 上传 / 数据库性能问题 | API P95 上升 | 加缓存；加索引；分离读写 |
-| Token 成本失控 | 月成本超预算 | 加限流；切更便宜模型；缓存空间快照 |
-
----
+| Provider 行为漂移导致 parse 失败 | parse_error 上升 | 把失败样本纳入 golden set；调 prompt / Pydantic schema |
+| 推荐接受率低 | 低于 60% | 调 prompt；补强「讲理由」；做用户访谈 |
+| Verifier 误拦截高 | 拦截后用户仍接受的占比 > 5% | 软化 hard 规则；增加 evidence 字段 |
+| AI 提议结构「太啰嗦」 | 用户确认率低 | 减少单次提议数量；优先提议层 / 格而非整个柜子 |
+| Token 成本失控 | 月成本超预算 | 限流；切更便宜模型；缓存空间快照 |
 
 ## 节奏
 
-- 一个 Phase 至少 1 次完整 demo（视频 / 录屏 / 截图）。
-- 每个 Phase 结束做一次复盘，更新 `docs/EVALUATION.md` 与本文件。
-- 任何对核心原则（AGENTS.md §3）的偏离必须在 PR 描述里显式说明。
+- 一个批次至少 1 次完整 demo（截图 / 录屏）。
+- 每个批次结束更新 `docs/EVALUATION.md` 与本文件。
+- 任何对核心原则（`AGENTS.md` §3）的偏离，必须在 PR 描述里显式说明。
