@@ -137,7 +137,7 @@ async def test_find_item_single_match_with_location(
         assert match["location"] is not None
         assert match["location"]["room_name"] == "厨房"
         assert "厨房" in result.answer_text
-        assert "L1S1" in result.answer_text
+        assert "第1层第1格" in result.answer_text
     finally:
         await holder.__aexit__()
 
@@ -275,8 +275,9 @@ async def test_find_location_by_slot_label(
         assert result.state == "answer"
         names = {m["name"] for m in result.matches}
         assert names == {"马克杯"}
-        # Path should mention 客厅 / 装饰柜 / L1.
-        assert "L1" in result.answer_text
+        # Path is human-readable: room / unit / slot label, no ASCII code.
+        assert "客厅/客厅装饰柜/左玻璃柜第1层" in result.answer_text
+        assert "L1" not in result.answer_text
     finally:
         await holder.__aexit__()
 
@@ -299,6 +300,236 @@ async def test_find_location_empty_slot_returns_not_found(
         assert result.matches == []
     finally:
         await holder.__aexit__()
+
+
+async def test_find_location_room_plus_code_excludes_other_rooms_same_prefix(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """Bug-2 regression: hint 「客厅装饰柜 L1」 must ignore the kitchen's L1S1.
+
+    Before the tokenizer, ``hint in full_path`` failed on the space/slash mix,
+    so the assistant claimed 「客厅装饰柜 L1里没有放置任何物品」 for a slot that
+    really held 马克杯. The kitchen's L1S1 (same code prefix, different room)
+    must stay excluded by the name fragment.
+    """
+    await _place_item(
+        db_engine,
+        home_id=seeded_actor.home_id,
+        user_id=seeded_actor.user_id,
+        slot_id=storage_hierarchy.slots["L1"],
+        item_id=storage_hierarchy.items["马克杯"],
+    )
+    await _place_item(
+        db_engine,
+        home_id=seeded_actor.home_id,
+        user_id=seeded_actor.user_id,
+        slot_id=storage_hierarchy.slots["L1S1"],
+        item_id=storage_hierarchy.items["处方药"],
+    )
+    intent = ExtractedSearchIntent(
+        intent=SearchIntentKind.FIND_LOCATION, location_hint="客厅装饰柜 L1"
+    )
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="客厅装饰柜 L1 放了什么？",
+        )
+        assert result.state == "answer"
+        assert {m["name"] for m in result.matches} == {"马克杯"}
+    finally:
+        await holder.__aexit__()
+
+
+async def test_find_location_unit_name_returns_every_slot_under_it(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """Naming the whole cabinet returns items from all of its slots."""
+    await _place_item(
+        db_engine,
+        home_id=seeded_actor.home_id,
+        user_id=seeded_actor.user_id,
+        slot_id=storage_hierarchy.slots["L2"],
+        item_id=storage_hierarchy.items["马克杯"],
+    )
+    await _place_item(
+        db_engine,
+        home_id=seeded_actor.home_id,
+        user_id=seeded_actor.user_id,
+        slot_id=storage_hierarchy.slots["R1"],
+        item_id=storage_hierarchy.items["处方药"],
+    )
+    intent = ExtractedSearchIntent(
+        intent=SearchIntentKind.FIND_LOCATION, location_hint="客厅装饰柜"
+    )
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="客厅装饰柜放了什么？",
+        )
+        assert result.state == "answer"
+        assert {m["name"] for m in result.matches} == {"马克杯", "处方药"}
+    finally:
+        await holder.__aexit__()
+
+
+async def test_find_location_bare_code_still_reaches_nested_slots(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """A bare 「L1」 keeps the old prefix recall — the kitchen L1S1 stays reachable."""
+    await _place_item(
+        db_engine,
+        home_id=seeded_actor.home_id,
+        user_id=seeded_actor.user_id,
+        slot_id=storage_hierarchy.slots["L1S1"],
+        item_id=storage_hierarchy.items["马克杯"],
+    )
+    intent = ExtractedSearchIntent(
+        intent=SearchIntentKind.FIND_LOCATION, location_hint="L1"
+    )
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="L1放了什么？",
+        )
+        assert result.state == "answer"
+        assert {m["name"] for m in result.matches} == {"马克杯"}
+    finally:
+        await holder.__aexit__()
+
+
+# ---------------------------------------------------------------------- SUGGEST_PLACEMENT
+
+
+async def test_suggest_placement_known_category_returns_slot(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """「雨伞放哪里」 → answer state + a suggested slot, but zero matches."""
+    intent = ExtractedSearchIntent(
+        intent=SearchIntentKind.SUGGEST_PLACEMENT, query="雨伞", category="decor"
+    )
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="我有一把雨伞适合放哪里",
+        )
+        assert result.state == "answer"
+        assert result.matches == []
+        assert result.suggested_slot is not None
+        assert result.suggested_slot["full_path"]
+        assert result.suggested_item_name == "雨伞"
+        assert "雨伞" in result.answer_text
+    finally:
+        await holder.__aexit__()
+
+
+async def test_suggest_placement_without_category_still_answers(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """With no category the gate is permissive, so a suggestion still comes back."""
+    intent = ExtractedSearchIntent(
+        intent=SearchIntentKind.SUGGEST_PLACEMENT, query="手工纪念册"
+    )
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="手工纪念册放哪好？",
+        )
+        assert result.state == "answer"
+        assert result.suggested_slot is not None
+    finally:
+        await holder.__aexit__()
+
+
+async def test_suggest_placement_unknown_category_returns_not_found(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """A category no slot allows yields no candidate → not_found, no slot."""
+    intent = ExtractedSearchIntent(
+        intent=SearchIntentKind.SUGGEST_PLACEMENT, category="spaceship"
+    )
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="飞船适合放哪里",
+        )
+        assert result.state == "not_found"
+        assert result.suggested_slot is None
+        assert "没找到" in result.answer_text
+    finally:
+        await holder.__aexit__()
+
+
+async def test_suggest_placement_without_item_asks_for_clarification(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """No name and no category → ask what to store instead of guessing."""
+    intent = ExtractedSearchIntent(intent=SearchIntentKind.SUGGEST_PLACEMENT)
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="这个东西放哪里？",
+        )
+        assert result.state == "needs_clarification"
+        assert result.suggested_slot is None
+        assert result.answer_text
+    finally:
+        await holder.__aexit__()
+
+
+async def test_suggest_placement_writes_nothing(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """Read-only guarantee: no ItemPlacement / Recommendation rows are created."""
+    from sqlalchemy import func as sa_func
+    from sqlalchemy import select
+
+    from app.models import Recommendation
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async def _counts() -> tuple[int, int]:
+        async with factory() as session:
+            placements = (
+                await session.execute(
+                    select(sa_func.count()).select_from(ItemPlacement)
+                )
+            ).scalar_one()
+            recs = (
+                await session.execute(
+                    select(sa_func.count()).select_from(Recommendation)
+                )
+            ).scalar_one()
+            return placements, recs
+
+    before = await _counts()
+    intent = ExtractedSearchIntent(
+        intent=SearchIntentKind.SUGGEST_PLACEMENT, query="雨伞", category="decor"
+    )
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="我有一把雨伞适合放哪里",
+        )
+        assert result.suggested_slot is not None
+    finally:
+        await holder.__aexit__()
+    assert await _counts() == before
 
 
 # ---------------------------------------------------------------------- CHECK_EXISTENCE
@@ -478,6 +709,147 @@ async def test_db_error_during_dispatch_returns_error_state(
         assert result.intent.intent == SearchIntentKind.UNKNOWN
     finally:
         await holder.__aexit__()
+
+
+# ---------------------------------------------------------------------- DESCRIBE_STORAGE
+
+
+async def test_describe_storage_counts_the_real_hierarchy(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """「我家有几个柜子？」 — the fixture holds 3 rooms and 3 units.
+
+    Regression: this used to be routed as FIND_ITEMS with ``query="柜子"``, so
+    the answer was whichever *item* had 柜子 in its name. Nothing about the
+    storage furniture was ever read.
+    """
+    intent = ExtractedSearchIntent(
+        intent=SearchIntentKind.DESCRIBE_STORAGE, location_hint=""
+    )
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="我家有几个柜子？",
+        )
+        assert result.state == "answer"
+        # No items are involved in a structure answer.
+        assert result.matches == []
+        assert result.intent.intent == SearchIntentKind.DESCRIBE_STORAGE
+        assert "房间 3 个" in result.answer_text
+        assert "收纳家具 3 件" in result.answer_text
+        assert "柜子 2 件" in result.answer_text
+        assert "抽屉柜 1 件" in result.answer_text
+        for name in ("客厅", "厨房", "主卧", "客厅装饰柜", "厨房吊柜", "床头柜"):
+            assert name in result.answer_text
+    finally:
+        await holder.__aexit__()
+
+
+async def test_describe_storage_reports_occupancy(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """「收纳空间够不够用？」 needs the used/free split, not just the total."""
+    await _place_item(
+        db_engine,
+        home_id=seeded_actor.home_id,
+        user_id=seeded_actor.user_id,
+        slot_id=storage_hierarchy.slots["L1"],
+        item_id=storage_hierarchy.items["马克杯"],
+    )
+    intent = ExtractedSearchIntent(intent=SearchIntentKind.DESCRIBE_STORAGE)
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="我家收纳空间够用吗？",
+        )
+        # 11 positions across the fixture's 6 sections, one now occupied.
+        assert "收纳位 11 个" in result.answer_text
+        assert "已放入物品 1 件" in result.answer_text
+        assert "空余 10 个" in result.answer_text
+    finally:
+        await holder.__aexit__()
+
+
+async def test_describe_storage_uses_chinese_labels_only(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """Slot `code`/`unit_type` are ASCII identity — never user-facing text."""
+    intent = ExtractedSearchIntent(intent=SearchIntentKind.DESCRIBE_STORAGE)
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="我家有哪些柜子？",
+        )
+        assert "cabinet" not in result.answer_text
+        assert "drawer_cabinet" not in result.answer_text
+        # `L1` is 左玻璃柜第1层's code; the label must be shown instead.
+        assert "左玻璃柜第1层" in result.answer_text
+        assert "L1S1" not in result.answer_text
+    finally:
+        await holder.__aexit__()
+
+
+async def test_describe_storage_on_a_home_without_rooms_is_not_found(
+    seeded_actor, db_engine
+) -> None:
+    """No hierarchy at all is a real answer ("nothing recorded yet"), not an error."""
+    intent = ExtractedSearchIntent(intent=SearchIntentKind.DESCRIBE_STORAGE)
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        result = await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="我家有几个柜子？",
+        )
+        assert result.state == "not_found"
+        assert "还没有录入任何房间和收纳空间" in result.answer_text
+    finally:
+        await holder.__aexit__()
+
+
+async def test_describe_storage_writes_nothing(
+    seeded_actor, db_engine, storage_hierarchy: StorageHierarchy
+) -> None:
+    """Structure questions are read-only like every other search intent."""
+    intent = ExtractedSearchIntent(intent=SearchIntentKind.DESCRIBE_STORAGE)
+    agent, holder = await _agent_for(db_engine, scripted_intent=intent)
+    try:
+        await agent.run(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            query="我家有几个柜子？",
+        )
+
+        from sqlalchemy import select
+
+        async def _count(model: type) -> int:
+            factory = async_sessionmaker(db_engine, expire_on_commit=False)
+            async with factory() as s:
+                return len((await s.execute(select(model))).scalars().all())
+
+        from app.models.placement import ItemPlacement
+        from app.models.recommendation import Recommendation
+
+        assert await _count(Recommendation) == 0
+        assert await _count(ItemPlacement) == 0
+    finally:
+        await holder.__aexit__()
+
+
+def test_format_describe_storage_empty_blueprint_is_not_found() -> None:
+    from app.agents.search.answer import format_describe_storage
+
+    state, text = format_describe_storage(
+        ExtractedSearchIntent(intent=SearchIntentKind.DESCRIBE_STORAGE), "   "
+    )
+    assert state == "not_found"
+    assert text
 
 
 # ---------------------------------------------------------------------- answer-formatter pure tests

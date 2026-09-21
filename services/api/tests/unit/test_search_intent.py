@@ -44,6 +44,7 @@ def test_search_intent_kind_values_match_documented_strings() -> None:
     assert SearchIntentKind.FIND_LOCATION.value == "find_location"
     assert SearchIntentKind.CHECK_EXISTENCE.value == "check_existence"
     assert SearchIntentKind.LIST_CATEGORY.value == "list_category"
+    assert SearchIntentKind.SUGGEST_PLACEMENT.value == "suggest_placement"
     assert SearchIntentKind.UNKNOWN.value == "unknown"
 
 
@@ -298,3 +299,47 @@ async def test_structured_output_responses_exhausted_raises() -> None:
     assert provider.structured_output_responses == []
     with pytest.raises(RuntimeError, match="exhausted"):
         await extract_intent(provider, user_query="再一次？")
+
+
+# ---------------------------------------------------------------------- history (v3)
+
+
+async def test_history_is_rendered_into_the_prompt() -> None:
+    """The v3 prompt is what makes a follow-up resolvable — pin that the
+    transcript actually reaches the model."""
+    provider = _scripted(
+        {
+            "intent": "suggest_placement",
+            "query": "数据线",
+            "category": "",
+            "location_hint": "",
+            "clarification_needed": False,
+            "question": "",
+        }
+    )
+    await extract_intent(
+        provider,
+        user_query="那它放卧室合适吗？",
+        history="用户：我的数据线在哪里？\n助手：数据线在 书房/书桌抽屉/第2格。",
+    )
+    _, kwargs = provider.recorded_calls[-1]
+    prompt = kwargs["prompt"]
+    assert "用户：我的数据线在哪里？" in prompt
+    assert "数据线在 书房/书桌抽屉/第2格。" in prompt
+
+
+async def test_first_turn_tells_the_model_there_is_no_history() -> None:
+    provider = _scripted(
+        {
+            "intent": "find_item",
+            "query": "马克杯",
+            "category": "",
+            "location_hint": "",
+            "clarification_needed": False,
+            "question": "",
+        }
+    )
+    await extract_intent(provider, user_query="我的马克杯在哪？")
+    _, kwargs = provider.recorded_calls[-1]
+    assert "第一句话" in kwargs["prompt"]
+    assert "{history_block}" not in kwargs["prompt"]

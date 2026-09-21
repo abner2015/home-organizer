@@ -22,6 +22,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent.prompts import render
+from app.agents.search.history import render_history_block
 from app.ai.errors import AIProviderError
 from app.ai.provider import AIProvider
 
@@ -29,10 +30,15 @@ from app.ai.provider import AIProvider
 
 
 class SearchIntentKind(StrEnum):
-    """Six intents the search agent understands.
+    """Eight intents the search agent understands.
 
     The string values are persisted to the ``SearchResponse.intent`` field
     and surfaced to the UI — keep them stable across versions.
+
+    ``DESCRIBE_STORAGE`` is the only *structure*-centric intent: the other
+    seven all end up querying ``Item`` rows, so before it existed a question
+    like 「我家有几个柜子？」 had no home and the model answered it by searching
+    for an item named 柜子. See :mod:`app.agents.search.structure`.
     """
 
     FIND_ITEM = "find_item"
@@ -40,6 +46,8 @@ class SearchIntentKind(StrEnum):
     FIND_LOCATION = "find_location"
     CHECK_EXISTENCE = "check_existence"
     LIST_CATEGORY = "list_category"
+    SUGGEST_PLACEMENT = "suggest_placement"
+    DESCRIBE_STORAGE = "describe_storage"
     UNKNOWN = "unknown"
 
 
@@ -53,11 +61,18 @@ class ExtractedSearchIntent(BaseModel):
 
     - ``intent`` — always one of :class:`SearchIntentKind`.
     - ``query`` — item-name hint (e.g. "数据线"); empty string if the user
-      did not name a specific item.
-    - ``category`` — high-level category hint ("kitchen" / "living" / …);
-      empty string if absent.
-    - ``location_hint`` — room/unit/section hint ("厨房" / "客厅装饰柜
-      L1" …); empty string if absent.
+      did not name a specific item. It must never hold a *structure* word
+      (「柜子」/「房间」/「收纳空间」): those belong to ``DESCRIBE_STORAGE``, and
+      ``search_items`` would substring-match them against item names and return
+      whichever items happen to contain the character.
+    - ``category`` — item-category hint, constrained by the prompt to values
+      that actually exist in the caller's home (see
+      :mod:`app.agents.search.context`); empty string if absent. It must never
+      be a *room* name — ``search_items`` filters ``Item.category == category``
+      exactly, so an invented value silently returns zero rows.
+    - ``location_hint`` — room/unit/section/slot hint ("厨房" / "客厅装饰柜
+      L1" …); empty string if absent. Also the optional scope of a
+      ``DESCRIBE_STORAGE`` question ("客厅有几个柜子？").
     - ``clarification_needed`` — true when the LLM believes more user
       input is required to proceed.
     - ``question`` — short Chinese follow-up question to send back to
@@ -103,9 +118,24 @@ def _fallback_unknown(reason: str = "无法理解您的问题") -> ExtractedSear
 
 
 async def extract_intent(
-    provider: AIProvider, *, user_query: str
+    provider: AIProvider,
+    *,
+    user_query: str,
+    home_context: str = "",
+    history: str = "",
 ) -> ExtractedSearchIntent:
     """Extract the user's intent via a single LLM structured call.
+
+    ``home_context`` is the caller's rendered :func:`build_home_context` block —
+    the user's real categories and storage positions. It is the only thing
+    standing between the LLM and invented vocabulary (see
+    :mod:`app.agents.search.context`); leaving it empty is supported for tests
+    but makes the model guess.
+
+    ``history`` is the prior-turn transcript rendered by
+    :func:`app.agents.search.history.format_history`. It is what lets a
+    follow-up ("那它放哪好？") resolve its pronouns; an empty string is
+    signalled to the model as "first turn, assume no context".
 
     Handles two distinct failure modes:
 
@@ -118,7 +148,13 @@ async def extract_intent(
       ``state='error'`` so the UI can show a system-failure message
       rather than pretending it was a user-input issue.
     """
-    prompt = render("search", 1, user_query=user_query)
+    prompt = render(
+        "search",
+        4,
+        user_query=user_query,
+        home_context=home_context,
+        history_block=render_history_block(history),
+    )
     try:
         result = await provider.structured_output(
             prompt, schema=ExtractedSearchIntent

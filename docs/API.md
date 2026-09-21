@@ -254,10 +254,40 @@ GET /api/v1/items?page=1&page_size=20
 返回：
 
 ```json
-{ "upload_url": "https://minio/...", "object_key": "uploads/2026/09/17/abc.png", "method": "PUT", "expires_in": 600 }
+{ "upload_url": "https://minio/...", "object_key": "home/<home_uuid>/2026/09/17/abc.png", "method": "PUT", "expires_in": 600 }
 ```
 
-Web 拿到 `upload_url` 后 PUT 上去。
+Web 拿到 `upload_url` 后 PUT 上去。**签名的 `Content-Type` 是 URL 的一部分**，
+浏览器必须原样带上同一个头，否则 MinIO 返回 403 SignatureDoesNotMatch。
+
+> **`STORAGE_BACKEND=local` 时此端点返回 409**（`presign_unsupported`）：
+> 本地文件后端没有可供浏览器直传的地址，改用下面的 multipart 上传。
+
+### POST /api/v1/assets/upload
+
+`multipart/form-data`，字段名 `file`。服务端收下字节、校验魔数与宽高、
+按 SHA-256 去重后落盘，返回：
+
+```json
+{
+  "asset_id": "uuid",
+  "object_key": "home/<home_uuid>/2026/09/17/abc.png",
+  "content_type": "image/png",
+  "size": 12345,
+  "width": 800, "height": 600,
+  "deduplicated": false,
+  "url": "https://..."
+}
+```
+
+`object_key` 就是要传给 `POST /api/v1/items` 的 `image_object_keys`。
+
+### GET /api/v1/files/{key}
+
+只在 `STORAGE_BACKEND=local` 下存在，其余后端一律 404。
+`key` 由 `LocalBackend.url_for()` 签出的 `?exp=<unix>&sig=<hmac>` 授权，
+签名即凭证（`<img src>` 带不了 Bearer 头）——错签名或过期一律 403。
+MinIO 部署请继续使用 presigned GET。
 
 ### POST /api/v1/items
 
@@ -314,21 +344,57 @@ Web 拿到 `upload_url` 后 PUT 上去。
 ### POST /api/v1/items/{itemId}/vision
 
 > 触发一次 Vision 识别（一般与上传同流程自动触发，也可手动重跑）。
+> 识别结果会**写回**该物品（`description` 只在用户没填时覆盖），
+> 所以随后 `GET /items/{itemId}` 就能看到。
+
+图片以 `data:image/jpeg;base64,...` 内联进 prompt（见 `app/services/image_payload.py`）,
+模型不需要、也无法访问 `object_key` 对应的 URL。
 
 ```json
 // response 200
 {
+  "item_id": "uuid",
   "vision": {
     "name": "...",
     "category": "...",
-    "confidence": 0.86,
+    "subcategory": "...",
+    "description": "...",
+    "estimated_size": "small | medium | large",
+    "confidence": null,
     "is_sensitive": false,
     "needs_lock": false,
-    "attributes": ["..."]
+    "attributes": []
   },
   "trace_id": "uuid"
 }
 ```
+
+> `confidence` 恒为 `null`、`attributes` 恒为 `[]`：底层 Vision schema 不产出这两项，
+> 与其编一个数字不如显式留空。`category` 由模型从**调用者家中的真实词表**里选
+> （`build_home_context_for`），编造的类别匹配不到任何收纳位。
+
+### POST /api/v1/items/infer
+
+只给名字（和一句可选描述），让模型补全其余属性——用户不再手填表单。
+
+```json
+{ "name": "雨伞", "description": "长柄的" }
+```
+
+返回与 `/items/{itemId}/vision` **完全相同的 `vision` 形状**，
+前端两条路径共用一套类型。模型无法判断的字段返回 `null`/空串。
+
+```json
+{
+  "vision": { "name": "雨伞", "category": "misc", "subcategory": "雨具",
+              "description": "...", "estimated_size": "medium",
+              "is_sensitive": false, "needs_lock": false },
+  "trace_id": "uuid"
+}
+```
+
+> **只推理不落库**：仅写一行 `AgentTrace`（`item_id` 为 `null`），不创建 `Item`。
+> 用户确认后前端再 `POST /items`。
 
 ### POST /api/v1/items/{itemId}/recommend
 
@@ -392,6 +458,50 @@ Web 拿到 `upload_url` 后 PUT 上去。
 ```
 
 仅 home 成员可访问；仅展示不含敏感 LLM 响应。
+
+### POST /api/v1/search（自然语言检索）
+
+请求：
+
+```json
+{ "query": "我有一把雨伞适合放哪里" }
+```
+
+响应：
+
+```json
+{
+  "state": "answer",
+  "intent": "suggest_placement",
+  "answer_text": "建议把「雨伞」放在 客厅/客厅装饰柜/左玻璃柜/L1。",
+  "matches": [],
+  "clarification_question": null,
+  "suggested_slot": {
+    "slot_id": "uuid",
+    "code": "L1",
+    "label": "左玻璃柜L1",
+    "room_name": "客厅",
+    "unit_name": "客厅装饰柜",
+    "section_name": "左玻璃柜",
+    "full_path": "客厅/客厅装饰柜/左玻璃柜/L1"
+  },
+  "suggested_reason": "该位置类别匹配，且当前有空位。",
+  "suggested_item_name": "雨伞",
+  "trace_id": "uuid"
+}
+```
+
+- `state` ∈ `answer` / `needs_clarification` / `not_found` / `exists_but_not_placed` / `error`。
+- `intent` ∈ `find_item` / `find_items` / `find_location` / `check_existence` /
+  `list_category` / `suggest_placement` / `unknown`。
+- **只读**：检索不写 `ItemPlacement` / `Recommendation`，只落一行 `AgentTrace`。
+- `suggest_placement`（"这个东西该放哪"）走确定性 generate → hard_filter → rank
+  管线，结果放 `answer_text` + `suggested_slot` / `suggested_reason` /
+  `suggested_item_name`（其余 intent 三个字段为 `null` / `""`）。前端据此渲染建议卡，
+  CTA 跳 `/items/new?name=…` 让用户确认后再落库。
+- 该 intent 无候选位置时 `state = not_found`、`suggested_slot = null`（仍 200）；
+  名与类别都空时 `state = needs_clarification`。
+- 传给 LLM 的 prompt 会用调用者**真实的**位置与类别做接地（见 `docs/AI.md`）。
 
 ### POST /api/v1/recommendations/{recId}/accept
 

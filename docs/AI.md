@@ -146,7 +146,8 @@ class RankingOutput(BaseModel):
 - 路径：`app/agent/prompts/`
 - 命名：`<task>.v<n>.md`（如 `vision.v2.md`、`rank.v3.md`）
 - 加载：服务启动时全部读入内存；调用时按版本取。
-- 变量：jinja2 风格 `{{var}}`；模板里只放骨架，不放具体数据。
+- 变量：**`str.format_map`（不是 jinja2）**，写作 `{var}`；字面花括号写 `{{` `}}`。
+  模板里只放骨架，不放具体数据。
 - 任何 prompt 改动在 PR 中说明影响并跑 golden case。
 
 ### 6.1 vision.v1.md（骨架）
@@ -173,6 +174,64 @@ USER:
 ### 6.2 rank.v1.md（骨架）
 
 见 `docs/AGENT.md` §7.4。强调"只能从候选中选"、"用户描述是数据"。
+
+### 6.3 search.v2.md（自然语言检索意图抽取，骨架）
+
+`search.v1.md` 保留（只增不改）。v2 相比 v1 多了一个变量 `{home_context}`，
+即由 `app.agents.search.context.build_home_context` 渲染的**真实家庭数据块**：
+
+```
+【家中真实数据 — 以下名称只能原样引用，禁止编造】
+可选 category（物品大类，只能取下列值之一；无法对应时留空）：
+appliance, books, clothes, decor, electronic, food, misc, medicine, utensil
+房间（location_hint 可以直接填房间名）：厨房、客厅
+可选 location_hint（更具体的位置名称，只能引用下列之一）：
+- 客厅/客厅装饰柜/左玻璃柜/L1
+...
+（共 132 个位置，此处仅列出前 60 个）
+家中已有物品示例（最多 25 个）：马克杯、玻璃花瓶、…
+```
+
+**为什么必须接地**：`search_items` 对 `Item.category` 是**精确匹配**，而 v1 的
+category 示例（`kitchen`/`living`/`study`）是**房间类型**不是物品类别，模型照抄后
+恒返回 0 行、并自信地回答「家里没有「kitchen」的物品」。接地块是唯一能保证
+词表与库内真实数据一致的做法（仓库里四份类别词表互相不一致）。
+类别列表取「所有 item.category ∪ 所有 slot.allowed_categories」的排序并集。
+
+- 变量：`{user_query}` + `{home_context}`；仍是 `str.format_map`，字面花括号写 `{{` `}}`。
+- 块内为可读文本，直接作为**值**插入，内部花括号无需转义。
+- 渲染是纯函数：同一 `(slots, items)` 逐字节稳定（`prompt_hash` 可比）。
+
+### 6.4 vision.v2.md（物品识别，当前版本）
+
+`vision.v1.md` 保留（只增不改）。v2 修的是与 §6.3 同一类 bug：
+v1 把 `category` 的例子写成**房间类型**（厨房 / 卧室 / 浴室 / 工具），
+而真实 `Item.category` 词表是 `decor/books/misc/food/utensil/clothes/medicine/electronic/appliance`；
+每个 seed slot 的 `allowed_categories` 都非空，`candidate_gen._category_matches` 会丢掉
+不包含该 category 的 slot ⇒ `pre_filter_count == 0` ⇒ `state=failed`。
+
+v2 因此：
+- 用同一个 `{home_context}` 接地块（`app.services.item_inference_service.build_home_context_for`），
+  `category` 只能原样选自列表，对不上就留空；
+- 新增 `is_sensitive` / `needs_lock` 两个布尔字段，并写死「**不确定时一律填 false**」——
+  把普通物品误判成敏感会让 `check_hard_safety` 把候选全部砍光。
+
+另外 v2 起 prompt 里**不再出现图片地址**：图片以 `data:` URI 内联进请求体
+（`app/services/image_payload.py:to_data_uri`，缩到 `MAX_EDGE=1024` 再 JPEG q85），
+远端模型不需要、也不可能 fetch 到家里的 MinIO 地址。
+因此 `prompt_hash` 用 `scrub_image_url` 后的 `img_<sha256[:12]>`，
+base64 长度变化不会让 hash 每次都变。
+
+### 6.5 infer.v1.md（按名字补全属性）
+
+用户跳过照片时，只给名字让模型猜 `category` / `subcategory` / `description` /
+`estimated_size` / `is_sensitive` / `needs_lock`，用户只做确认。
+
+- 变量：`{item_name}`、`{item_description}`、`{home_context}`；同样 `str.format_map`。
+- 输出 schema 是 `ItemInferenceOutput`（`app/ai/provider.py`）：`extra="forbid"`、
+  **不加** `strict`、除 `name` 外全部可空——prompt 要求「无法判断时留 null」，
+  非 Optional 字段会把模型合法的「不知道」变成 `AIOutputParseError`。
+- 只写一行 `AgentTrace`，不创建 `Item`（见 `app/services/item_inference_service.py`）。
 
 ---
 

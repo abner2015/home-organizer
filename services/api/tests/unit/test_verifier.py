@@ -120,7 +120,7 @@ async def test_check_slot_exists_fail() -> None:
     fake = _slot_dict(uuid.uuid4(), home_id=ctx.home_id)
     result = check_slot_exists(ctx, fake)
     assert result.passed is False
-    assert "not in the candidate set" in result.message
+    assert "不在候选集合中" in result.message
 
 
 # ----------------------------------------------------------- check 2
@@ -155,7 +155,7 @@ async def test_check_capacity_fail() -> None:
     ctx = _ctx_for(slot, home_id=home_id, active_count={uuid.UUID(slot["id"]): 1})
     result = check_capacity(ctx, slot)
     assert result.passed is False
-    assert "already holds 1/1" in result.message
+    assert "已放 1 件，容量上限 1 件" in result.message
 
 
 async def test_check_capacity_infinite_when_no_hint() -> None:
@@ -190,7 +190,7 @@ async def test_check_hard_safety_fail_sensitive_in_cabinet() -> None:
     )
     result = check_hard_safety(ctx, slot)
     assert result.passed is False
-    assert "drawer_cabinet" in result.message
+    assert "带锁" in result.message
 
 
 async def test_check_hard_safety_pass_sensitive_in_drawer() -> None:
@@ -343,7 +343,7 @@ async def test_check_user_preferences_fail_in_avoid_list() -> None:
     )
     result = check_user_preferences(ctx, slot)
     assert result.passed is False
-    assert "avoid" in result.message
+    assert "不常用" in result.message
 
 
 # ----------------------------------------------------------- check 7
@@ -391,7 +391,7 @@ async def test_check_reason_consistent_fail_empty() -> None:
     ctx = _ctx_for(slot, home_id=home_id)
     result = check_reason_consistent(ctx, slot)
     assert result.passed is False
-    assert "empty" in result.message
+    assert "推荐理由为空" in result.message
 
 
 # ----------------------------------------------------------- check 8
@@ -412,7 +412,7 @@ async def test_check_no_more_obvious_conflict_fail() -> None:
     )
     result = check_no_more_obvious_conflict(ctx, slot)
     assert result.passed is False
-    assert "bedroom" in result.message
+    assert "卧室" in result.message
 
 
 async def test_check_no_more_obvious_conflict_pass_medicine_in_bedroom() -> None:
@@ -448,7 +448,7 @@ async def test_check_no_hallucinated_location_fail() -> None:
     hallucinated = _slot_dict(uuid.uuid4(), home_id=home_id)
     result = check_no_hallucinated_location(ctx, hallucinated)
     assert result.passed is False
-    assert "whitelist" in result.message
+    assert "白名单" in result.message
 
 
 # ----------------------------------------------------------- run_verifier

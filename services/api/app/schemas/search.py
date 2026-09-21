@@ -39,6 +39,14 @@ class SearchRequest(BaseModel):
     query: str = Field(
         min_length=1, max_length=512, description="User's natural-language question."
     )
+    conversation_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Omit to start a new conversation. Pass the id returned by the "
+            "previous turn to keep the assistant's memory of it — that is what "
+            "makes a follow-up like「那它放哪好？」resolvable."
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- response
@@ -97,7 +105,16 @@ class SearchResponse(BaseModel):
             "'error' (provider failure)."
         ),
     )
-    intent: str = Field(description="The parsed SearchIntentKind value.")
+    intent: str = Field(
+        description=(
+            "The parsed SearchIntentKind value: 'find_item' | 'find_items' | "
+            "'find_location' | 'check_existence' | 'list_category' | "
+            "'suggest_placement' | 'describe_storage' | 'unknown'. "
+            "'describe_storage' answers questions about the storage structure "
+            "itself (房间/柜子/收纳位 的数量与布局) rather than about items, and "
+            "is the only intent whose answer_text is not derived from items."
+        ),
+    )
     matches: list[CandidateMatch] = Field(
         default_factory=list,
         max_length=10,
@@ -106,6 +123,28 @@ class SearchResponse(BaseModel):
     clarification_question: str | None = Field(
         default=None,
         description="When state='needs_clarification', the question to send back to the user.",
+    )
+    suggested_slot: SlotRef | None = Field(
+        default=None,
+        description=(
+            "Only for intent='suggest_placement': where a hypothetical item "
+            "should go. Computed in memory — nothing is persisted, so the UI "
+            "offers a CTA into the real add-item flow."
+        ),
+    )
+    suggested_reason: str = Field(
+        default="", max_length=512, description="Why that slot was suggested."
+    )
+    suggested_item_name: str = Field(
+        default="",
+        max_length=128,
+        description="The item the suggestion is about; the UI prefills it into /items/new.",
+    )
+    conversation_id: uuid.UUID = Field(
+        description=(
+            "The chat this turn was recorded in. Send it back on the next "
+            "request to continue the same conversation."
+        ),
     )
     trace_id: uuid.UUID | None = Field(
         default=None, description="AgentTrace row id for debugging."

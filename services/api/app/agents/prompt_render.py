@@ -1,7 +1,12 @@
 """Prompt builder for the Rank step (LLM Decision).
 
-Composes the recommend.v1.md template with item / candidates / rules /
+Composes the recommend.v2.md template with item / candidates / rules /
 preferences / history / last_failure. Pure function — no I/O, no DB.
+
+v2 (append-only: v1 kept) only tightens the ``reason`` instructions — it must
+be written in Chinese and must not quote slot ``code``s / English field names,
+because the reason is rendered straight into the UI (see
+``recommend.v2.md`` §「reason 的写法」).
 """
 from __future__ import annotations
 
@@ -29,10 +34,10 @@ def build_rank_prompt(
     history: list[dict[str, Any]],
     last_failure: str | None = None,
 ) -> str:
-    """Render ``prompts/recommend.v1.md`` with the candidate decision inputs."""
+    """Render ``prompts/recommend.v2.md`` with the candidate decision inputs."""
     return render(
         "recommend",
-        version=1,
+        version=2,
         item_json=_safe_json(item),
         candidates_json=_safe_json(candidates),
         rules_json=_safe_json(rules),

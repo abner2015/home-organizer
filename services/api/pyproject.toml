@@ -55,11 +55,16 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B", "SIM", "RUF001", "RUF002"]
 # Search-agent modules surface Chinese-language user-facing strings (the
-# agent answers in CJK); RUF001/RUF002 would flag fullwidth punctuation.
-"app/agents/search/*" = ["RUF001", "RUF002"]
-"app/api/v1/search.py" = ["RUF001", "RUF002"]
-"app/schemas/search.py" = ["RUF001", "RUF002"]
-"app/services/search_service.py" = ["RUF001", "RUF002"]
+# agent answers in CJK); RUF001/RUF002/RUF003 would flag fullwidth punctuation.
+"app/agents/search/*" = ["RUF001", "RUF002", "RUF003"]
+"app/api/v1/search.py" = ["RUF001", "RUF002", "RUF003"]
+"app/schemas/search.py" = ["RUF001", "RUF002", "RUF003"]
+"app/services/search_service.py" = ["RUF001", "RUF002", "RUF003"]
+# Chat-memory service: docstrings quote the user's Chinese follow-up verbatim.
+"app/services/conversation_service.py" = ["RUF001", "RUF002", "RUF003"]
+# Verifier failure messages are user-facing (they land in
+# ``RecommendResponse.error``), so they are Chinese with fullwidth punctuation.
+"app/verification/checks.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.11"

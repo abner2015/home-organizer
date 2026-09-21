@@ -32,7 +32,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from app.agent.prompts import render
+from app.agents.search.history import render_history_block
 from app.agents.search.intent import ExtractedSearchIntent, SearchIntentKind
+from app.ai.errors import AIProviderError
+from app.ai.provider import AIProvider
 
 # ---------------------------------------------------------------------- helpers
 
@@ -188,6 +192,68 @@ def format_list_category(
     return ("answer", f"{head}：{body}。")
 
 
+def format_describe_storage(
+    intent: ExtractedSearchIntent, blueprint: str
+) -> tuple[str, str]:
+    """Format DESCRIBE_STORAGE — the home's storage structure.
+
+    Unlike the item intents there is no candidate list to render: the agent
+    hands over an already-rendered blueprint (see
+    :func:`app.agents.search.structure.build_home_blueprint`) and this only
+    picks the state. An empty blueprint means the home has no rooms and no
+    furniture at all, which is a genuine ``not_found`` — not a failure.
+    """
+    if not blueprint.strip():
+        return (
+            "not_found",
+            "您家里还没有录入任何房间和收纳空间，先去「我的家」里添加，之后我就能帮您统计了。",
+        )
+    return ("answer", blueprint)
+
+
+def format_suggest_placement(
+    intent: ExtractedSearchIntent,
+    *,
+    item_name: str,
+    item_category: str,
+    slot: dict[str, Any] | None,
+) -> tuple[str, str, str]:
+    """Format SUGGEST_PLACEMENT — ``(state, answer_text, reason)``.
+
+    ``slot`` is a *ranked slot dict* (the ranker's own output, which carries
+    ``active_count`` and ``allowed_categories``), not the API view. It is
+    ``None`` when the deterministic pipeline produced no candidate at all.
+
+    The reason only claims what the data supports: whether the slot's
+    ``allowed_categories`` genuinely admits the item, and whether it is
+    currently empty. It never shows a confidence — ranked candidates carry
+    ``det_score`` but no ``confidence``, so the shared projection would report
+    a misleading 0.0.
+    """
+    if slot is None:
+        return (
+            "not_found",
+            f"我暂时没找到适合放「{item_name}」的位置，请先补充收纳空间。",
+            "",
+        )
+
+    path = str(slot.get("full_path") or slot.get("label") or slot.get("code") or "")
+    where = "/".join(
+        str(p)
+        for p in (slot.get("room_name"), slot.get("unit_name"), slot.get("section_name"))
+        if p
+    )
+    allowed = [str(a).lower() for a in (slot.get("allowed_categories") or [])]
+    category_matched = bool(item_category) and item_category.lower() in allowed
+    is_empty = int(slot.get("active_count") or 0) == 0
+
+    reason = f"{where or path}"
+    reason += "的收纳类别与它匹配，" if category_matched else "可以收纳它，"
+    reason += "目前还有空位。" if is_empty else "目前已有同类物品，仍可放入。"
+
+    return ("answer", f"建议把「{item_name}」放在 {path}。", reason)
+
+
 # ---------------------------------------------------------------------- entry-point
 
 
@@ -215,16 +281,71 @@ def format_answer(
         return format_check_existence(intent, cands)
     if kind == SearchIntentKind.LIST_CATEGORY:
         return format_list_category(intent, cands)
+    if kind == SearchIntentKind.DESCRIBE_STORAGE:
+        # The handler owns this flow and short-circuits with the blueprint; a
+        # bare candidate list carries no structure, so say so rather than
+        # rendering a misleading "not found".
+        return ("not_found", "我没能读到您家的收纳空间信息。")
+    if kind == SearchIntentKind.SUGGEST_PLACEMENT:
+        # The handler owns this flow (it needs the ranked slot, which this
+        # signature has no room for). Reached only if the handler ever stops
+        # short-circuiting, so keep the message honest rather than crashing.
+        return ("not_found", "我没能找到合适的收纳位置。")
     # UNKNOWN / fallback — caller passes the question through.
     question = intent.question or "请告诉我您想找什么物品。"
     return ("needs_clarification", question)
 
 
+# ---------------------------------------------------------------------- compose
+
+
+async def compose_answer(
+    provider: AIProvider,
+    *,
+    user_query: str,
+    draft: str,
+    history: str = "",
+    timeout_s: float = 30.0,
+) -> str:
+    """Let the LLM phrase the final reply, grounded in the retrieved facts.
+
+    ``draft`` is the deterministic sentence :func:`format_answer` produced —
+    it already contains every fact we retrieved (item names, Chinese paths,
+    counts, or the honest "没找到"). The model's only job is to *say it
+    naturally* and to use the conversation history to interpret the follow-up.
+    It cannot invent locations: the prompt forbids it and the draft is the
+    sole input.
+
+    Best-effort by design. Any :class:`AIProviderError` (timeout, transport,
+    quota) returns ``draft`` unchanged, so a chat hiccup degrades the wording
+    but never the answer — the endpoint still returns 200 with real data.
+    """
+    if not draft.strip():
+        return draft
+    prompt = render(
+        "answer",
+        version=1,
+        user_query=user_query,
+        draft=draft,
+        history_block=render_history_block(history),
+    )
+    try:
+        text = await provider.chat(
+            [{"role": "user", "content": prompt}], timeout_s=timeout_s
+        )
+    except AIProviderError:
+        return draft
+    return text.strip() or draft
+
+
 __all__ = [
+    "compose_answer",
     "format_answer",
     "format_check_existence",
+    "format_describe_storage",
     "format_find_item",
     "format_find_items",
     "format_find_location",
     "format_list_category",
+    "format_suggest_placement",
 ]

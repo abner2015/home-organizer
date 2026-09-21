@@ -400,6 +400,185 @@ async def test_search_cross_home_returns_not_found(
     assert "贵重金条" not in str(body["matches"])
 
 
+# ---------------------------------------------------------------------- suggest_placement
+
+
+async def test_search_suggest_placement_returns_cta_fields(
+    seeded_actor: SeededActor,
+    db_engine,
+    storage_hierarchy: StorageHierarchy,
+    api_client: TestClient,
+) -> None:
+    """SUGGEST_PLACEMENT answers with a slot + reason and an empty match list."""
+    provider = MockAIProvider(
+        structured_output_responses=[
+            _intent_payload(
+                SearchIntentKind.SUGGEST_PLACEMENT, query="雨伞", category="decor"
+            )
+        ]
+    )
+    _override_provider(provider)
+    response = api_client.post(
+        "/api/v1/search",
+        json={"query": "我有一把雨伞适合放哪里"},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["state"] == "answer"
+    assert body["intent"] == "suggest_placement"
+    assert body["matches"] == []
+    assert body["suggested_item_name"] == "雨伞"
+    slot = body["suggested_slot"]
+    assert slot is not None
+    # The frontend parses this into a UUID before building the CTA link.
+    assert uuid.UUID(slot["slot_id"])
+    assert slot["full_path"]
+    assert "雨伞" in body["answer_text"]
+
+
+async def test_search_suggest_placement_no_candidate_still_200(
+    seeded_actor: SeededActor,
+    db_engine,
+    storage_hierarchy: StorageHierarchy,
+    api_client: TestClient,
+) -> None:
+    """A category no slot accepts → 200 with state='not_found', no slot."""
+    provider = MockAIProvider(
+        structured_output_responses=[
+            _intent_payload(
+                SearchIntentKind.SUGGEST_PLACEMENT, category="spaceship"
+            )
+        ]
+    )
+    _override_provider(provider)
+    response = api_client.post(
+        "/api/v1/search",
+        json={"query": "飞船适合放哪里"},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["state"] == "not_found"
+    assert body["suggested_slot"] is None
+    assert body["matches"] == []
+
+
+async def test_search_suggest_placement_persists_trace(
+    seeded_actor: SeededActor,
+    db_engine,
+    storage_hierarchy: StorageHierarchy,
+    api_client: TestClient,
+) -> None:
+    """The run is still traced, and the trace carries the new intent."""
+    from sqlalchemy import select
+
+    provider = MockAIProvider(
+        structured_output_responses=[
+            _intent_payload(
+                SearchIntentKind.SUGGEST_PLACEMENT, query="雨伞", category="decor"
+            )
+        ]
+    )
+    _override_provider(provider)
+    response = api_client.post(
+        "/api/v1/search",
+        json={"query": "我有一把雨伞适合放哪里"},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["trace_id"] is not None
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        rows = (
+            await session.execute(select(AgentTrace))
+        ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].final_status == "success"
+    assert any(
+        step.get("intent") == "suggest_placement" for step in rows[0].steps
+    )
+
+
+# ---------------------------------------------------------------------- describe_storage
+
+
+async def test_search_describe_storage_answers_with_the_hierarchy(
+    seeded_actor: SeededActor,
+    db_engine,
+    storage_hierarchy: StorageHierarchy,
+    api_client: TestClient,
+) -> None:
+    """「我家有几个柜子？」 — the answer must count furniture, not items.
+
+    Regression: this request used to be routed as FIND_ITEMS with ``query="柜子"``,
+    so the reply was whichever *item* happened to contain 柜子 in its name.
+    """
+    provider = MockAIProvider(
+        structured_output_responses=[
+            _intent_payload(SearchIntentKind.DESCRIBE_STORAGE)
+        ]
+    )
+    _override_provider(provider)
+    response = api_client.post(
+        "/api/v1/search",
+        json={"query": "我家有几个柜子？"},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["state"] == "answer"
+    assert body["intent"] == "describe_storage"
+    # A structure answer has no item matches by construction.
+    assert body["matches"] == []
+    assert body["suggested_slot"] is None
+    text = body["answer_text"]
+    assert "房间 3 个" in text
+    assert "收纳家具 3 件" in text
+    assert "柜子 2 件" in text
+    assert "抽屉柜 1 件" in text
+    # Chinese labels, never the ASCII machine identity.
+    assert "cabinet" not in text
+    assert "L1S1" not in text
+
+
+async def test_search_describe_storage_persists_a_trace(
+    seeded_actor: SeededActor,
+    db_engine,
+    storage_hierarchy: StorageHierarchy,
+    api_client: TestClient,
+) -> None:
+    """Still one traced turn, and the conversation memory records it."""
+    from sqlalchemy import select
+
+    provider = MockAIProvider(
+        structured_output_responses=[
+            _intent_payload(SearchIntentKind.DESCRIBE_STORAGE)
+        ]
+    )
+    _override_provider(provider)
+    response = api_client.post(
+        "/api/v1/search",
+        json={"query": "我家一共有几个房间？"},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["trace_id"] is not None
+    assert uuid.UUID(body["conversation_id"])
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        rows = (await session.execute(select(AgentTrace))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].final_status == "success"
+    assert any(
+        step.get("intent") == "describe_storage" for step in rows[0].steps
+    )
+
+
 # ---------------------------------------------------------------------- smoke: list_category
 
 
@@ -433,3 +612,165 @@ async def test_search_list_category_groups_results(
     assert len(body["matches"]) == 1
     assert body["matches"][0]["name"] == "马克杯"
     assert "厨房" in body["answer_text"]
+
+
+# ---------------------------------------------------------------------- conversation memory
+
+
+async def test_first_turn_returns_a_conversation_id(
+    seeded_actor: SeededActor,
+    db_engine,
+    storage_hierarchy: StorageHierarchy,
+    api_client: TestClient,
+) -> None:
+    provider = MockAIProvider(
+        structured_output_responses=[
+            _intent_payload(SearchIntentKind.FIND_ITEM, query="马克杯")
+        ]
+    )
+    _override_provider(provider)
+    response = api_client.post(
+        "/api/v1/search",
+        json={"query": "我的马克杯在哪里？"},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["conversation_id"]
+    # The turn is written down, so the next request can read it.
+    from sqlalchemy import select
+
+    from app.models import Message
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        rows = (
+            await session.execute(select(Message).order_by(Message.created_at))
+        ).scalars().all()
+    assert [r.role for r in rows] == ["user", "assistant"]
+    assert rows[0].content == "我的马克杯在哪里？"
+    assert rows[1].content == body["answer_text"]
+
+
+async def test_second_turn_sees_the_first_turn_in_its_prompt(
+    seeded_actor: SeededActor,
+    db_engine,
+    storage_hierarchy: StorageHierarchy,
+    api_client: TestClient,
+) -> None:
+    """The regression the user reported: a follow-up must not be parsed in
+    isolation. Turn 2's intent prompt has to contain turn 1."""
+    item_id = storage_hierarchy.items["马克杯"]
+    await _place(
+        db_engine,
+        item_id=item_id,
+        slot_id=storage_hierarchy.slots["L1S1"],
+        user_id=seeded_actor.user_id,
+    )
+    provider = MockAIProvider(
+        structured_output_responses=[
+            _intent_payload(SearchIntentKind.FIND_ITEM, query="马克杯"),
+            _intent_payload(SearchIntentKind.SUGGEST_PLACEMENT, query="马克杯"),
+        ]
+    )
+    _override_provider(provider)
+
+    first = api_client.post(
+        "/api/v1/search",
+        json={"query": "我的马克杯在哪里？"},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert first.status_code == 200, first.text
+    conversation_id = first.json()["conversation_id"]
+
+    second = api_client.post(
+        "/api/v1/search",
+        json={"query": "那它放哪儿好？", "conversation_id": conversation_id},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["conversation_id"] == conversation_id
+
+    # The second intent call carried the first exchange.
+    prompts = [
+        call[1]["prompt"]
+        for call in provider.recorded_calls
+        if call[0] == "structured_output"
+    ]
+    assert len(prompts) == 2
+    # Turn 1 knew no history; turn 2 did, and it included turn 1's answer.
+    assert "用户：我的马克杯在哪里？" not in prompts[0]
+    assert "用户：我的马克杯在哪里？" in prompts[1]
+    assert "马克杯在" in prompts[1]
+
+
+async def test_unknown_conversation_id_is_404(
+    seeded_actor: SeededActor, api_client: TestClient
+) -> None:
+    _override_provider(MockAIProvider(structured_output_responses=[]))
+    response = api_client.post(
+        "/api/v1/search",
+        json={"query": "你好", "conversation_id": str(uuid.uuid4())},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert response.status_code == 404, response.text
+
+
+async def test_composed_answer_text_is_what_the_user_sees(
+    seeded_actor: SeededActor,
+    db_engine,
+    storage_hierarchy: StorageHierarchy,
+    api_client: TestClient,
+) -> None:
+    """When the chat model phrases the reply, that phrasing is the response —
+    and it is what gets remembered for the next turn."""
+    item_id = storage_hierarchy.items["马克杯"]
+    await _place(
+        db_engine,
+        item_id=item_id,
+        slot_id=storage_hierarchy.slots["L1S1"],
+        user_id=seeded_actor.user_id,
+    )
+    provider = MockAIProvider(
+        chat_response="你的马克杯在厨房吊柜第一层第一格～",
+        structured_output_responses=[
+            _intent_payload(SearchIntentKind.FIND_ITEM, query="马克杯")
+        ],
+    )
+    _override_provider(provider)
+    response = api_client.post(
+        "/api/v1/search",
+        json={"query": "我的马克杯在哪里？"},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["answer_text"] == "你的马克杯在厨房吊柜第一层第一格～"
+    # The *structured* facts are untouched by the rewording.
+    assert body["matches"][0]["location"]["full_path"] == "厨房/厨房吊柜/第1层第1格"
+
+    from sqlalchemy import select
+
+    from app.models import Message
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        rows = (
+            await session.execute(
+                select(Message).where(Message.role == "assistant")
+            )
+        ).scalars().all()
+    assert [r.content for r in rows] == ["你的马克杯在厨房吊柜第一层第一格～"]
+
+
+async def test_search_request_rejects_unknown_fields(
+    seeded_actor: SeededActor, api_client: TestClient
+) -> None:
+    """``conversation_id`` is the only new field; extra="forbid" still holds."""
+    _override_provider(MockAIProvider(structured_output_responses=[]))
+    response = api_client.post(
+        "/api/v1/search",
+        json={"query": "你好", "chat_id": "nope"},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert response.status_code == 422
