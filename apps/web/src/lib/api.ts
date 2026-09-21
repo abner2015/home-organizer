@@ -5,23 +5,31 @@
 
 import type {
   AcceptRequest,
-  CandidateView,
+  AcceptResponse,
+  AssetRecognizeResponse,
+  AssetUploadResponse,
+  CandidateListResponse,
+  InferItemBody,
+  InferItemResponse,
   Item,
+  ItemCreateBody,
   ItemPlacement,
+  ItemUpsertBody,
+  ItemVisionResponse,
   PaginatedItems,
+  PatchRequest,
+  PatchResponse,
   PresignRequest,
   PresignResponse,
-  RecognizeResponse,
   RecommendResponse,
   RejectRequest,
-  PatchRequest,
+  RejectResponse,
   SearchRequestBody,
   SearchResponseBody,
   SpaceTree,
   StorageSlot,
   StorageUnit,
   UUID,
-  User,
   Home,
   Room,
 } from "./types";
@@ -70,6 +78,9 @@ async function request<T>(
     ...defaultHeaders(userId, homeId),
     ...overrideHeaders,
   };
+  // FormData must keep the browser-generated multipart boundary; the default
+  // `application/json` would make the server unable to parse the body.
+  if (rest.body instanceof FormData) delete headers["Content-Type"];
   const url = isBrowser ? path : `${process.env.NEXT_PUBLIC_API_BASE_URL ?? ""}${path}`;
   const res = await fetch(url, { ...rest, headers, cache: "no-store" });
   const text = await res.text();
@@ -94,9 +105,11 @@ async function request<T>(
 // ------------------------------------------------------------- identity
 
 export const api = {
-  async getMe(userId: UUID, homeId: UUID): Promise<User> {
-    return request<User>("/api/v1/auth/me", { method: "GET", userId, homeId });
-  },
+  // NOTE: there is deliberately no client method for GET /api/v1/auth/me.
+  // That route requires a JWT bearer token, while every other route this app
+  // calls authenticates with the stub X-User-Id / X-Home-Id headers (see
+  // `session.ts`). Adding a client method that could only ever 401 would be
+  // worse than omitting it. Wiring real JWTs is a separate piece of work.
 
   // ------------------------------------------------------------- homes
 
@@ -191,19 +204,27 @@ export const api = {
   },
 
   async createItem(
-    body: {
-      name: string;
-      description?: string;
-      category?: string;
-      subcategory?: string;
-      image_object_keys?: string[];
-      primary_image_object_key?: string;
-    },
+    body: ItemCreateBody,
     userId: UUID,
     homeId: UUID,
   ): Promise<Item> {
     return request<Item>("/api/v1/items", {
       method: "POST",
+      userId,
+      homeId,
+      body: JSON.stringify(body),
+    });
+  },
+
+  // PATCH is a sparse diff: omitted keys are left untouched server-side.
+  async updateItem(
+    itemId: UUID,
+    body: Partial<ItemUpsertBody>,
+    userId: UUID,
+    homeId: UUID,
+  ): Promise<Item> {
+    return request<Item>(`/api/v1/items/${itemId}`, {
+      method: "PATCH",
       userId,
       homeId,
       body: JSON.stringify(body),
@@ -216,20 +237,23 @@ export const api = {
     itemId: UUID,
     userId: UUID,
     homeId: UUID,
-  ): Promise<RecognizeResponse> {
-    return request<RecognizeResponse>(`/api/v1/items/${itemId}/vision`, {
+  ): Promise<ItemVisionResponse> {
+    return request<ItemVisionResponse>(`/api/v1/items/${itemId}/vision`, {
       method: "POST",
       userId,
       homeId,
     });
   },
 
+  // Vision on a bare uploaded asset. Not used by the item flow (which goes
+  // through `recognizeItem`) but kept because the endpoint exists and is the
+  // stricter ingest path.
   async recognizeImage(
     body: { asset_id: UUID; description?: string },
     userId: UUID,
     homeId: UUID,
-  ): Promise<RecognizeResponse> {
-    return request<RecognizeResponse>("/api/v1/items/recognize", {
+  ): Promise<AssetRecognizeResponse> {
+    return request<AssetRecognizeResponse>("/api/v1/items/recognize", {
       method: "POST",
       userId,
       homeId,
@@ -243,14 +267,12 @@ export const api = {
     itemId: UUID,
     userId: UUID,
     homeId: UUID,
-    body: { include_history?: boolean } = {},
+    body: Record<string, never> = {},
   ): Promise<RecommendResponse> {
-    return request<RecommendResponse>(`/api/v1/items/${itemId}/recommend`, {
-      method: "POST",
-      userId,
-      homeId,
-      body: JSON.stringify(body),
-    });
+    return request<RecommendResponse>(
+      `/api/v1/recommendations/items/${itemId}/recommend`,
+      { method: "POST", userId, homeId, body: JSON.stringify(body) },
+    );
   },
 
   async acceptRecommendation(
@@ -258,11 +280,13 @@ export const api = {
     body: AcceptRequest,
     userId: UUID,
     homeId: UUID,
-  ): Promise<{ placement: ItemPlacement }> {
-    return request<{ placement: ItemPlacement }>(
-      `/api/v1/recommendations/${recId}/accept`,
-      { method: "POST", userId, homeId, body: JSON.stringify(body) },
-    );
+  ): Promise<AcceptResponse> {
+    return request<AcceptResponse>(`/api/v1/recommendations/${recId}/accept`, {
+      method: "POST",
+      userId,
+      homeId,
+      body: JSON.stringify(body),
+    });
   },
 
   async rejectRecommendation(
@@ -270,8 +294,8 @@ export const api = {
     body: RejectRequest,
     userId: UUID,
     homeId: UUID,
-  ): Promise<{ ok: true }> {
-    return request<{ ok: true }>(`/api/v1/recommendations/${recId}/reject`, {
+  ): Promise<RejectResponse> {
+    return request<RejectResponse>(`/api/v1/recommendations/${recId}/reject`, {
       method: "POST",
       userId,
       homeId,
@@ -284,11 +308,13 @@ export const api = {
     body: PatchRequest,
     userId: UUID,
     homeId: UUID,
-  ): Promise<{ placement: ItemPlacement }> {
-    return request<{ placement: ItemPlacement }>(
-      `/api/v1/recommendations/${recId}/adjust`,
-      { method: "POST", userId, homeId, body: JSON.stringify(body) },
-    );
+  ): Promise<PatchResponse> {
+    return request<PatchResponse>(`/api/v1/recommendations/${recId}`, {
+      method: "PATCH",
+      userId,
+      homeId,
+      body: JSON.stringify(body),
+    });
   },
 
   async getRecommendation(
@@ -307,13 +333,8 @@ export const api = {
     itemId: UUID,
     userId: UUID,
     homeId: UUID,
-  ): Promise<{
-    vision?: unknown;
-    pre_filter?: Array<{ slot_id: UUID; score: number }>;
-    post_filter?: Array<{ slot_id: UUID; score: number }>;
-    final_candidates?: CandidateView[];
-  }> {
-    return request(`/api/v1/items/${itemId}/candidates`, {
+  ): Promise<CandidateListResponse> {
+    return request<CandidateListResponse>(`/api/v1/items/${itemId}/candidates`, {
       method: "GET",
       userId,
       homeId,
@@ -350,6 +371,42 @@ export const api = {
     });
   },
 
+  // Send the bytes through the API instead of direct-to-storage. Works with
+  // every storage backend (the presign path needs an object store the browser
+  // can reach).
+  async uploadAsset(
+    file: File,
+    userId: UUID,
+    homeId: UUID,
+  ): Promise<AssetUploadResponse> {
+    const form = new FormData();
+    form.append("file", file);
+    return request<AssetUploadResponse>("/api/v1/assets/upload", {
+      method: "POST",
+      userId,
+      homeId,
+      body: form,
+    });
+  },
+
+  // Fill an item's attributes from its name. Read-only server-side (one trace
+  // row), so calling it repeatedly while the user types is safe.
+  async inferItem(
+    body: InferItemBody,
+    userId: UUID,
+    homeId: UUID,
+  ): Promise<InferItemResponse> {
+    return request<InferItemResponse>("/api/v1/items/infer", {
+      method: "POST",
+      userId,
+      homeId,
+      body: JSON.stringify(body),
+    });
+  },
+
+  // `contentType` must be byte-identical to the one passed to `presignUpload`:
+  // the backend includes it in the signature, so a mismatch is a 403 from
+  // MinIO. Callers should compute it once and pass the same value to both.
   async putToPresignedUrl(url: string, file: File, contentType: string): Promise<void> {
     const res = await fetch(url, {
       method: "PUT",

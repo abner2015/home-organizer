@@ -6,8 +6,10 @@ existing rows are reused. Run via:
     python -m app.db.seed
 
 Creates:
-  * 1 demo user (email: demo@home.local, password: demo-pass — DO NOT USE IN PROD)
-  * 1 home ("我的家")
+  * 1 demo user (email: demo@home.local, password: demo1234 — DO NOT USE IN PROD)
+    with fixed id 00000000-0000-0000-0000-000000000001 (matches the web
+    app's stub-auth default)
+  * 1 home ("我的家") with fixed id ...-0002
   * 4 rooms: 客厅 / 厨房 / 主卧 / 儿童房
   * Storage hierarchy:
       - 客厅: 1 complex cabinet "客厅装饰柜":
@@ -26,15 +28,19 @@ import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator, Iterable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
+from app.db.base import utc_now
 from app.db.enums import (
     HomeRole,
     HomeRuleType,
+    PlacementSource,
     RoomType,
     StorageSectionType,
     StorageUnitType,
@@ -43,12 +49,15 @@ from app.models import (
     Home,
     HomeMembership,
     HomeRule,
+    Item,
+    ItemPlacement,
     Room,
     StorageSection,
     StorageSlot,
     StorageUnit,
     User,
 )
+from app.services.security import hash_password
 
 logger = get_logger(__name__)
 
@@ -56,6 +65,14 @@ logger = get_logger(__name__)
 SEED_USER_EMAIL = "demo@home.local"
 SEED_USER_NAME = "演示用户"
 SEED_HOME_NAME = "我的家"
+SEED_USER_PASSWORD = "demo1234"
+
+# Stable ids so the demo web app (which hardcodes these in
+# apps/web/src/lib/session.ts and apps/web/.env.example) can talk to the
+# seeded data without a login round-trip. 0001/0002 are the values the
+# frontend's stub-auth headers use.
+SEED_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+SEED_HOME_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
 
 
 async def _get_or_create_user(session: AsyncSession) -> User:
@@ -64,10 +81,10 @@ async def _get_or_create_user(session: AsyncSession) -> User:
     if user:
         logger.info("seed.user_exists", email=user.email, id=str(user.id))
         return user
-    # bcrypt-style placeholder hash; the dev login flow (Phase 4+) will replace it.
     user = User(
+        id=SEED_USER_ID,
         email=SEED_USER_EMAIL,
-        password_hash="seed-placeholder-not-a-real-hash",
+        password_hash=hash_password(SEED_USER_PASSWORD),
         display_name=SEED_USER_NAME,
     )
     session.add(user)
@@ -82,7 +99,7 @@ async def _get_or_create_home(session: AsyncSession, owner: User) -> Home:
     if home:
         logger.info("seed.home_exists", name=home.name, id=str(home.id))
         return home
-    home = Home(name=SEED_HOME_NAME, owner_id=owner.id)
+    home = Home(id=SEED_HOME_ID, name=SEED_HOME_NAME, owner_id=owner.id)
     session.add(home)
     await session.flush()
     # Membership: owner
@@ -253,7 +270,7 @@ async def _build_complex_cabinet(session: AsyncSession, room_id: uuid.UUID) -> S
             lower.id,
             code=code,
             label=f"下柜第{i}格",
-            allowed_categories=["misc"],
+            allowed_categories=["misc", "electronic"],
             sort=i,
         )
 
@@ -285,7 +302,7 @@ async def _build_kitchen_cabinet(session: AsyncSession, room_id: uuid.UUID) -> S
                 layer.id,
                 code=code,
                 label=f"第{layer_num}层第{slot_num}格",
-                allowed_categories=["food", "utensil"],
+                allowed_categories=["food", "utensil", "appliance"],
                 sort=slot_num,
             )
     return cabinet
@@ -427,6 +444,256 @@ async def _ensure_rules(session: AsyncSession, home_id: uuid.UUID) -> None:
     await session.flush()
 
 
+# --------------------------------------------------------------------- items
+
+
+@dataclass(slots=True)
+class _DemoItem:
+    """One seeded item plus where it should end up."""
+
+    name: str
+    category: str
+    subcategory: str
+    size: str
+    room: str
+    section: str
+    code: str
+    is_sensitive: bool = False
+    needs_lock: bool = False
+    description: str | None = None
+
+
+# Item → (room, section, slot code). Room/section/code are resolved to real
+# slot ids at seed time, so this table stays readable as the schema evolves.
+# The last two have no placement on purpose: the dashboard's "未放置" counter
+# and the item list both need un-placed rows to render.
+DEMO_ITEMS: tuple[_DemoItem, ...] = (
+    _DemoItem(
+        name="马克杯",
+        category="utensil",
+        subcategory="杯具",
+        size="small",
+        room="厨房",
+        section="第1层",
+        code="L1S1",
+        description="每天早晨用的陶瓷马克杯",
+    ),
+    _DemoItem(
+        name="玻璃花瓶",
+        category="decor",
+        subcategory="摆件",
+        size="medium",
+        room="客厅",
+        section="左玻璃柜",
+        code="L1",
+        description="朋友送的手工玻璃花瓶",
+    ),
+    _DemoItem(
+        name="纸巾收纳箱",
+        category="misc",
+        subcategory="杂物",
+        size="medium",
+        room="客厅",
+        section="下柜",
+        code="C1",
+    ),
+    _DemoItem(
+        name="处方药",
+        category="medicine",
+        subcategory="处方药",
+        size="small",
+        room="主卧",
+        section="带锁抽屉",
+        code="LK1",
+        is_sensitive=True,
+        needs_lock=True,
+        description="降压药，必须上锁并放在儿童接触不到的地方",  # noqa: RUF001
+    ),
+    _DemoItem(
+        name="儿童退烧药",
+        category="medicine",
+        subcategory="儿童用药",
+        size="small",
+        room="儿童房",
+        section="药品带锁抽屉",
+        code="MLK1",
+        is_sensitive=True,
+        needs_lock=True,
+    ),
+    _DemoItem(
+        name="儿童绘本",
+        category="books",
+        subcategory="绘本",
+        size="medium",
+        room="儿童房",
+        section="绘本架",
+        code="B1",
+    ),
+    _DemoItem(
+        name="羽绒服",
+        category="clothes",
+        subcategory="外套",
+        size="large",
+        room="主卧",
+        section="大衣区",
+        code="H1",
+    ),
+    _DemoItem(
+        name="数据线",
+        category="electronic",
+        subcategory="线材",
+        size="small",
+        room="",
+        section="",
+        code="",
+        description="还没有找到合适的收纳位置",
+    ),
+    _DemoItem(
+        name="空气炸锅",
+        category="appliance",
+        subcategory="厨电",
+        size="large",
+        room="",
+        section="",
+        code="",
+        description="体积较大，等待 AI 推荐位置",  # noqa: RUF001
+    ),
+)
+
+
+async def _ensure_item(
+    session: AsyncSession, *, home_id: uuid.UUID, created_by: uuid.UUID, demo: _DemoItem, created_at: datetime
+) -> Item:
+    result = await session.execute(
+        select(Item).where(Item.home_id == home_id, Item.name == demo.name)
+    )
+    item = result.scalar_one_or_none()
+    if item:
+        return item
+    item = Item(
+        home_id=home_id,
+        name=demo.name,
+        description=demo.description,
+        category=demo.category,
+        subcategory=demo.subcategory,
+        estimated_size=demo.size,
+        is_sensitive=demo.is_sensitive,
+        needs_lock=demo.needs_lock,
+        created_by=created_by,
+        created_at=created_at,
+    )
+    session.add(item)
+    await session.flush()
+    logger.info("seed.item_created", name=demo.name, category=demo.category)
+    return item
+
+
+async def _find_slot(
+    session: AsyncSession, *, home_id: uuid.UUID, room: str, section: str, code: str
+) -> StorageSlot | None:
+    """Resolve a (room, section, code) triple to a slot row."""
+    result = await session.execute(
+        select(StorageSlot)
+        .join(StorageSection, StorageSection.id == StorageSlot.section_id)
+        .join(StorageUnit, StorageUnit.id == StorageSection.unit_id)
+        .join(Room, Room.id == StorageUnit.room_id)
+        .where(
+            Room.home_id == home_id,
+            Room.name == room,
+            StorageSection.name == section,
+            StorageSlot.code == code,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def _ensure_placement(
+    session: AsyncSession,
+    *,
+    item: Item,
+    slot: StorageSlot,
+    user_id: uuid.UUID,
+    source: PlacementSource,
+    removed: bool = False,
+) -> None:
+    result = await session.execute(
+        select(ItemPlacement).where(
+            ItemPlacement.item_id == item.id, ItemPlacement.slot_id == slot.id
+        )
+    )
+    if result.scalars().first() is not None:
+        return
+    now = utc_now()
+    session.add(
+        ItemPlacement(
+            item_id=item.id,
+            slot_id=slot.id,
+            placed_by=user_id,
+            source=source.value,
+            removed_at=now if removed else None,
+        )
+    )
+    await session.flush()
+
+
+async def _seed_demo_items(
+    session: AsyncSession, *, home_id: uuid.UUID, user_id: uuid.UUID
+) -> None:
+    """Create the demo item list + placements (idempotent)."""
+    # Staggered timestamps so "最近添加" has a deterministic order.
+    base = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
+    for index, demo in enumerate(DEMO_ITEMS):
+        item = await _ensure_item(
+            session,
+            home_id=home_id,
+            created_by=user_id,
+            demo=demo,
+            created_at=base + timedelta(hours=index),
+        )
+        if not demo.room:
+            continue
+        slot = await _find_slot(
+            session, home_id=home_id, room=demo.room, section=demo.section, code=demo.code
+        )
+        if slot is None:
+            logger.warning(
+                "seed.item_slot_missing",
+                item=demo.name,
+                room=demo.room,
+                section=demo.section,
+                code=demo.code,
+            )
+            continue
+        await _ensure_placement(
+            session,
+            item=item,
+            slot=slot,
+            user_id=user_id,
+            source=PlacementSource.AI_RECOMMENDATION,
+        )
+
+    # One historical (removed) placement so the item detail page has a
+    # non-trivial history to render.
+    mug = (
+        await session.execute(
+            select(Item).where(Item.home_id == home_id, Item.name == "马克杯")
+        )
+    ).scalar_one_or_none()
+    if mug is not None:
+        old_slot = await _find_slot(
+            session, home_id=home_id, room="客厅", section="下柜", code="C2"
+        )
+        if old_slot is not None:
+            await _ensure_placement(
+                session,
+                item=mug,
+                slot=old_slot,
+                user_id=user_id,
+                source=PlacementSource.USER_MANUAL,
+                removed=True,
+            )
+
+
 @contextlib.asynccontextmanager
 async def _session_scope() -> AsyncIterator[AsyncSession]:
     """Open a session with commit/rollback semantics."""
@@ -466,6 +733,7 @@ async def seed() -> None:
         await _build_kids_cabinet(session, kids.id)
 
         await _ensure_rules(session, home.id)
+        await _seed_demo_items(session, home_id=home.id, user_id=user.id)
 
     logger.info("seed.done")
 

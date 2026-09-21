@@ -5,7 +5,7 @@ import Link from "next/link";
 import { api, APIError } from "@/lib/api";
 import { getSession } from "@/lib/session";
 import { Spinner } from "@/components/States";
-import { formatSlotPath, clsx } from "@/lib/format";
+import { formatSlotPath, formatCategory, clsx } from "@/lib/format";
 import type { SearchResponseBody } from "@/lib/types";
 
 interface ChatTurn {
@@ -39,6 +39,7 @@ const INTENT_LABEL: Record<string, string> = {
   find_location: "查找位置",
   check_existence: "确认存在",
   list_category: "分类列表",
+  suggest_placement: "收纳建议",
   unknown: "未理解",
 };
 
@@ -48,11 +49,15 @@ export function AssistantClient({ suggestions }: { suggestions: string[] }) {
     {
       id: "welcome",
       role: "assistant",
-      text: "你好！我是你的家庭收纳助手。试试问我：\n• 「我的数据线在哪里？」\n• 「客厅有哪些东西？」\n• 「我家还有没有电池？」",
+      text: "你好！我是你的家庭收纳助手，能记住我们聊过的内容，你可以接着追问。\n试试问我：\n• 「我的数据线在哪里？」\n• 「客厅有哪些东西？」\n• 「我家还有没有电池？」",
     },
   ]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  // The backend remembers a conversation for us: it replays the recent turns
+  // into the prompt, so 「那它放哪好？」 knows what 「它」 is. A ref rather than
+  // state because `send` reads it synchronously and never renders it.
+  const conversationId = useRef<string | undefined>(undefined);
   const endRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -77,7 +82,12 @@ export function AssistantClient({ suggestions }: { suggestions: string[] }) {
     setInput("");
     setBusy(true);
     try {
-      const r = await api.search({ query: trimmed }, session.userId, session.homeId);
+      const r = await api.search(
+        { query: trimmed, conversation_id: conversationId.current },
+        session.userId,
+        session.homeId,
+      );
+      conversationId.current = r.conversation_id;
       setTurns((prev) =>
         prev.map((t) =>
           t.id === pendingTurn.id
@@ -225,11 +235,32 @@ function AssistantBubble({ turn }: { turn: ChatTurn }) {
                       </span>
                     </div>
                     <p className="text-[11px] text-ink-400">
-                      {[m.category, m.subcategory].filter(Boolean).join(" · ") || "未分类"}
+                      {[formatCategory(m.category), m.subcategory]
+                        .filter(Boolean)
+                        .join(" · ")}
                     </p>
                   </li>
                 ))}
               </ul>
+            ) : null}
+            {r.suggested_slot ? (
+              <div className="rounded-lg border border-brand-200 bg-brand-50/60 px-3 py-2.5">
+                <p className="text-[11px] font-medium text-brand-700">建议位置</p>
+                <p className="mt-0.5 text-sm font-medium text-ink-900">
+                  📍 {formatSlotPath(r.suggested_slot)}
+                </p>
+                {r.suggested_reason ? (
+                  <p className="mt-1 text-[11px] text-ink-500">{r.suggested_reason}</p>
+                ) : null}
+                {r.suggested_item_name ? (
+                  <Link
+                    href={`/items/new?name=${encodeURIComponent(r.suggested_item_name)}`}
+                    className="btn-secondary mt-2 !px-3 !py-1.5 text-xs"
+                  >
+                    添加「{r.suggested_item_name}」并确认位置
+                  </Link>
+                ) : null}
+              </div>
             ) : null}
           </div>
         ) : null}

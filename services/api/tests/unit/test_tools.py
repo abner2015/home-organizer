@@ -148,7 +148,9 @@ async def test_get_storage_slots_enriched_and_active_count(
         indexed = slot_dicts_by_code(slots)
         # Spot-check enrichment
         l1 = indexed["L1"]
-        assert l1["full_path"] == "客厅/客厅装饰柜/左玻璃柜/L1"
+        # `full_path` is built from the Chinese label, never the ASCII code.
+        assert l1["full_path"] == "客厅/客厅装饰柜/左玻璃柜第1层"
+        assert l1["code"] == "L1"
         assert l1["room_name"] == "客厅"
         assert l1["unit_type"] == "cabinet"
         assert l1["section_type"] == "layer"

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { Item } from "@/lib/types";
-import { formatRelative, formatSlotPath } from "@/lib/format";
+import { formatRelative, formatSlotPath, formatCategory } from "@/lib/format";
 import { clsx } from "@/lib/format";
 
 export function ItemCard({ item, href }: { item: Item; href?: string }) {
@@ -13,10 +13,10 @@ export function ItemCard({ item, href }: { item: Item; href?: string }) {
           {item.is_sensitive ? <span className="badge">敏感</span> : null}
         </div>
         <p className="mt-0.5 truncate text-xs text-ink-500">
-          {[item.category, item.subcategory].filter(Boolean).join(" · ") || "未分类"}
+          {[formatCategory(item.category), item.subcategory].filter(Boolean).join(" · ")}
         </p>
         <p className="mt-1.5 truncate text-xs text-ink-600">
-          📍 {formatSlotPath(item.current_placement as never)}
+          📍 {formatSlotPath(item.current_placement)}
         </p>
         {item.created_at ? (
           <p className="mt-0.5 text-[11px] text-ink-400">添加于 {formatRelative(item.created_at)}</p>

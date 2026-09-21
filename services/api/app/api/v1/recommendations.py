@@ -1,9 +1,11 @@
 """Recommendation endpoints (Phase 5).
 
-Four endpoints:
+Five endpoints:
 
 - ``POST /api/v1/recommendations/items/{item_id}/recommend`` — run the 9-step
   pipeline, return top-3 candidates + chosen slot.
+- ``GET /api/v1/recommendations/{rec_id}`` — re-read a persisted
+  recommendation (the Web app's recommendation detail page).
 - ``POST /api/v1/recommendations/{rec_id}/accept`` — mark recommendation
   ``accepted`` and create an ItemPlacement row.
 - ``POST /api/v1/recommendations/{rec_id}/reject`` — mark recommendation
@@ -102,6 +104,35 @@ async def recommend(
     )
     await db.commit()
     return RecommendResponse(**outcome.to_dict())
+
+
+# -------------------------------------------------------------------- get one
+
+
+@router.get(
+    "/{rec_id}",
+    response_model=RecommendResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Fetch a persisted recommendation",
+)
+async def get_recommendation(
+    rec_id: uuid.UUID,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RecommendResponse:
+    """Re-read a recommendation persisted by a previous ``POST /recommend``.
+
+    Candidate location metadata is refreshed from the live slot rows (a slot
+    may have been renamed) and ``is_recommended`` is computed against the
+    current ``chosen_slot_id``, so a PATCHed recommendation renders correctly.
+
+    Failures:
+    - ``404 not_found`` — unknown id, or the item belongs to another home.
+    """
+    view = await recommendation_service.get_recommendation_view(
+        db, home_id=actor.home_id, recommendation_id=rec_id
+    )
+    return RecommendResponse(**view)
 
 
 # ---------------------------------------------------------------------- accept
@@ -204,31 +235,25 @@ async def patch(
         reason=payload.reason,
     )
     await db.commit()
-    # Re-build the candidate view list so the patched slot surfaces first.
-    candidates = list(outcome.recommendation.candidates or [])
-    view_candidates: list[dict[str, object]] = []
+    # Re-build the candidate view list so the patched slot surfaces first and
+    # carries the `is_recommended` flag.
     patched_str = str(payload.chosen_slot_id)
+    candidates = [
+        c for c in (outcome.recommendation.candidates or []) if isinstance(c, dict)
+    ]
     front = [c for c in candidates if str(c.get("slot_id")) == patched_str]
     rest = [c for c in candidates if str(c.get("slot_id")) != patched_str]
-    for c in front + rest:
-        view_candidates.append(
-            {
-                "slot_id": str(c.get("slot_id")),
-                "code": c.get("code") or "",
-                "label": c.get("label") or "",
-                "full_path": c.get("full_path") or "",
-                "room_name": c.get("room_name") or "",
-                "unit_name": c.get("unit_name") or "",
-                "score": int(c.get("det_score") or 0),
-                "confidence": float(c.get("confidence") or 0.0),
-                "reason": c.get("reason") or "",
-            }
+    view_candidates = [
+        recommendation_service.candidate_view_from_slot(
+            c, is_recommended=str(c.get("slot_id")) == patched_str
         )
+        for c in front + rest
+    ]
     return PatchResponse(
         recommendation_id=outcome.recommendation.id,
         status=outcome.recommendation.status,
-        chosen_slot_id=outcome.recommendation.chosen_slot_id,  # type: ignore[arg-type]
-        candidates=view_candidates,  # type: ignore[arg-type]
+        chosen_slot_id=outcome.recommendation.chosen_slot_id,
+        candidates=view_candidates,
     )
 
 

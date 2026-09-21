@@ -342,7 +342,7 @@ async def test_scenario_3_insufficient_capacity_fails_after_two_retries(
     await holder.__aexit__()
     assert result.state == RecommendationState.FAILED
     assert result.retries_used == 2
-    assert "already holds" in (result.error or "")
+    assert "容量上限" in (result.error or "")
     assert mock.call_count == 3  # initial + 2 retries
 
 
@@ -373,7 +373,7 @@ async def test_scenario_4_safety_conflict(
     await holder.__aexit__()
     assert result.state == RecommendationState.FAILED
     assert result.retries_used == 2
-    assert "drawer_cabinet" in (result.error or "")
+    assert "带锁" in (result.error or "")
     assert mock.call_count == 3
 
 

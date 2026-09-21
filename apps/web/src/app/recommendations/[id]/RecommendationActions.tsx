@@ -23,13 +23,9 @@ export function RecommendationActions({
     setBusy(`accept:${c.slot_id}`);
     setError(null);
     try {
-      await api.acceptRecommendation(
-        recId,
-        { slot_id: c.slot_id },
-        session.userId,
-        session.homeId,
-      );
+      await api.acceptRecommendation(recId, {}, session.userId, session.homeId);
       router.push("/items");
+      router.refresh();
     } catch (err) {
       setError(extract(err, "保存失败"));
     } finally {
@@ -37,16 +33,17 @@ export function RecommendationActions({
     }
   }
 
-  async function reject(c: CandidateView) {
-    setBusy(`reject:${c.slot_id}`);
+  async function reject() {
+    setBusy("reject");
     setError(null);
     try {
       await api.rejectRecommendation(
         recId,
-        { reason: "用户拒绝" },
+        { note: "用户拒绝" },
         session.userId,
         session.homeId,
       );
+      router.refresh();
     } catch (err) {
       setError(extract(err, "操作失败"));
     } finally {
@@ -70,7 +67,7 @@ export function RecommendationActions({
           </button>
           <button
             className="btn-secondary"
-            onClick={() => reject(recommended)}
+            onClick={reject}
             disabled={busy !== null}
           >
             不合适

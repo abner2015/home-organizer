@@ -1,4 +1,9 @@
-import type { SlotRef } from "./types";
+import type { PlacementRefView, SlotRef } from "./types";
+
+// Two shapes reach the UI for "where an item is":
+//   - SlotRef        — the search/candidate shape, with room/unit/section parts.
+//   - PlacementRefView — the item read API's shape, already resolved to a path.
+export type SlotLocation = SlotRef | PlacementRefView;
 
 export function formatDateTime(iso?: string): string {
   if (!iso) return "—";
@@ -25,12 +30,49 @@ export function formatRelative(iso?: string): string {
   return formatDateTime(iso);
 }
 
-export function formatSlotPath(loc?: SlotRef | null): string {
+// The backend builds `full_path` from the slot's Chinese `label`
+// ("客厅/客厅装饰柜/左玻璃柜第1层") — `code` is ASCII (`L1` / `L1S1`) and is
+// machine identity only, never shown to the user.
+export function formatSlotPath(loc?: SlotLocation | null): string {
   if (!loc) return "未放置";
-  if (loc.full_path) return loc.full_path;
-  return [loc.room_name, loc.unit_name, loc.section_name, loc.code]
-    .filter(Boolean)
-    .join(" / ");
+  if ("full_path" in loc && loc.full_path) return loc.full_path;
+  if ("slot_path" in loc && loc.slot_path) return loc.slot_path;
+  if ("room_name" in loc) {
+    return [loc.room_name, loc.unit_name, loc.section_name, loc.label]
+      .filter(Boolean)
+      .join(" / ");
+  }
+  return "未放置";
+}
+
+// The backend's `Item.category` is a controlled English vocabulary
+// (app/db/enums.py); these are the labels the UI shows for it.
+export const CATEGORY_LABEL: Record<string, string> = {
+  appliance: "家电",
+  books: "书籍",
+  clothes: "衣物",
+  decor: "装饰",
+  electronic: "数码",
+  food: "食品",
+  misc: "杂物",
+  medicine: "药品",
+  utensil: "餐具",
+};
+
+export function formatCategory(category?: string | null): string {
+  if (!category) return "未分类";
+  return CATEGORY_LABEL[category] ?? category;
+}
+
+export const SIZE_LABEL: Record<string, string> = {
+  small: "小",
+  medium: "中",
+  large: "大",
+};
+
+export function formatSize(size?: string | null): string {
+  if (!size) return "未指定";
+  return SIZE_LABEL[size] ?? size;
 }
 
 export function formatConfidence(c?: number): string {

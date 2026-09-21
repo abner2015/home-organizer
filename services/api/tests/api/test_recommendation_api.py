@@ -85,6 +85,15 @@ async def test_recommend_endpoint_happy_path(
     assert len(body["candidates"]) >= 1
     assert body["candidates"][0]["slot_id"] == str(slot_id)
     assert "马克杯" in body["candidates"][0]["reason"]
+    # Regression: the chosen candidate must be flagged, otherwise the UI
+    # has to guess and silently falls back to candidates[0].
+    assert body["candidates"][0]["is_recommended"] is True
+    assert not any(
+        c["is_recommended"] for c in body["candidates"][1:]
+    ), "only the chosen slot may be flagged"
+    # Regression: the location trio the UI renders must be populated.
+    assert body["candidates"][0]["section_name"]
+    assert body["candidates"][0]["full_path"]
 
     # Verify DB rows.
     rec_id = uuid.UUID(body["recommendation_id"])

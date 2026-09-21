@@ -64,6 +64,7 @@ async def upload_asset(
     )
     return AssetUploadResponse(
         asset_id=result.asset.id,
+        object_key=result.asset.object_key,
         url=result.url,
         content_type=result.asset.content_type,
         size=result.asset.size_bytes,

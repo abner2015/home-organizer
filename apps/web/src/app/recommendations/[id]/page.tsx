@@ -6,10 +6,25 @@ import { PageHeader } from "@/components/PageHeader";
 import { ErrorState } from "@/components/States";
 import { RecommendationActions } from "./RecommendationActions";
 import { formatConfidence, formatSlotPath } from "@/lib/format";
-import type { RecommendResponse, SpaceTree, StorageUnit } from "@/lib/types";
+import type {
+  RecommendationStatus,
+  RecommendResponse,
+  StorageUnit,
+} from "@/lib/types";
 import { RecommendationTree } from "@/components/RecommendationTree";
 
 export const dynamic = "force-dynamic";
+
+const STATUS_LABELS: Record<RecommendationStatus, string> = {
+  pending: "待确认",
+  accepted: "已采纳",
+  rejected: "已拒绝",
+  superseded: "已被取代",
+};
+
+function statusLabel(status: RecommendationStatus): string {
+  return STATUS_LABELS[status] ?? status;
+}
 
 interface PageData {
   rec: RecommendResponse | null;
@@ -53,7 +68,7 @@ export default async function RecommendationDetail({ params }: { params: { id: s
     <div className="space-y-6">
       <PageHeader
         title="AI 推荐"
-        description={recommended ? formatSlotPath(recommended as never) : "暂无候选"}
+        description={recommended ? formatSlotPath(recommended) : "暂无候选"}
         actions={
           <Link href="/items" className="btn-ghost">
             ← 返回物品列表
@@ -63,7 +78,7 @@ export default async function RecommendationDetail({ params }: { params: { id: s
 
       {rec.error ? (
         <div className="card border-amber-200 bg-amber-50/50 p-4 text-sm text-amber-800">
-          ⚠️ {rec.error.message}
+          ⚠️ {rec.error}
         </div>
       ) : null}
 
@@ -71,9 +86,7 @@ export default async function RecommendationDetail({ params }: { params: { id: s
         <div className="card p-5 lg:col-span-2">
           <p className="text-xs font-semibold uppercase tracking-wide text-brand-600">⭐ 推荐位置</p>
           <h2 className="mt-1 text-lg font-semibold text-ink-900">
-            {recommended
-              ? `${recommended.room_name} · ${recommended.unit_name} · ${recommended.section_name} · ${recommended.code}`
-              : "—"}
+            {recommended ? formatSlotPath(recommended) : "—"}
           </h2>
           <p className="mt-2 text-sm text-ink-700">{recommended?.reason}</p>
           <div className="mt-3 flex flex-wrap gap-2 text-xs text-ink-500">
@@ -84,9 +97,10 @@ export default async function RecommendationDetail({ params }: { params: { id: s
             <span className="badge">候选 {rec.candidates.length}</span>
             <span className="badge">预过滤 {rec.pre_filter_count}</span>
             <span className="badge">后过滤 {rec.post_filter_count}</span>
-            {rec.retry_count > 0 ? <span className="badge">重试 {rec.retry_count}</span> : null}
+            {rec.retries_used > 0 ? <span className="badge">重试 {rec.retries_used}</span> : null}
+            <span className="badge">状态 {statusLabel(rec.status)}</span>
           </div>
-          {rec.recommendation_id ? (
+          {rec.recommendation_id && rec.status === "pending" ? (
             <RecommendationActions
               recId={rec.recommendation_id}
               candidates={rec.candidates}
@@ -103,9 +117,7 @@ export default async function RecommendationDetail({ params }: { params: { id: s
                   key={c.slot_id}
                   className="rounded-lg bg-ink-50 p-3 text-sm"
                 >
-                  <p className="font-medium text-ink-800">
-                    {c.room_name} · {c.unit_name} · {c.section_name} · {c.code}
-                  </p>
+                  <p className="font-medium text-ink-800">{formatSlotPath(c)}</p>
                   <p className="mt-0.5 line-clamp-2 text-xs text-ink-500">{c.reason}</p>
                   <p className="mt-1 text-xs text-ink-400">
                     置信度 {formatConfidence(c.confidence)}

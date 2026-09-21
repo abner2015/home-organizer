@@ -11,7 +11,8 @@ class AssetUploadResponse(BaseModel):
     """Response body for POST /api/v1/assets/upload."""
 
     asset_id: UUID
-    url: str = Field(description="Presigned GET URL (default TTL 1h)")
+    object_key: str = Field(description="Storage key; used to attach to an item")
+    url: str = Field(description="Signed GET URL (default TTL 1h)")
     content_type: str
     size: int = Field(description="Uploaded body size in bytes")
     width: int | None = None

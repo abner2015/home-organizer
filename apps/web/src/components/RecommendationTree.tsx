@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { clsx } from "@/lib/format";
 import type { CandidateView, StorageUnit, StorageSection, StorageSlot } from "@/lib/types";
-import { formatConfidence } from "@/lib/format";
+import { formatConfidence, formatSlotPath } from "@/lib/format";
 
 // ------------------------------------------------------------- tree builder
 
@@ -113,7 +113,7 @@ export function RecommendationTree({
             <span className="badge-brand">⭐ 推荐</span>
             <div className="min-w-0">
               <p className="text-sm font-semibold text-ink-900">
-                {recommended.room_name} · {recommended.unit_name} · {recommended.section_name} · {recommended.code}
+                {formatSlotPath(recommended)}
               </p>
               <p className="mt-1 text-sm text-ink-700">{recommended.reason}</p>
               <p className="mt-2 text-xs text-ink-500">

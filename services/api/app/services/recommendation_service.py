@@ -31,6 +31,7 @@ from app.core.exceptions import NotFoundError
 from app.db.enums import RecommendationStatus
 from app.models import AgentTrace, Item, Recommendation
 from app.tools import get_default_registry
+from app.tools.home_tools import get_storage_slots
 
 # --------------------------------------------------------------------------- value objects
 
@@ -68,20 +69,37 @@ async def _ensure_item_in_home(
     return item
 
 
-def _candidate_to_view(c: dict[str, Any]) -> dict[str, Any]:
-    """Project one ranked-candidate dict into the API view shape."""
-    sid = c.get("id") or c.get("slot_id")
+def candidate_view_from_slot(
+    slot: dict[str, Any], *, is_recommended: bool = False
+) -> dict[str, Any]:
+    """Project one slot dict into the ``CandidateView`` shape.
+
+    Shared by the recommendation endpoints (whose candidates carry a
+    ``det_score`` / ``confidence`` / ``reason`` from the pipeline) and
+    ``GET /items/{id}/candidates`` (whose candidates are the raw ranker
+    output).
+    """
+    sid = slot.get("id") or slot.get("slot_id")
     return {
         "slot_id": str(sid) if sid else str(uuid.uuid4()),
-        "code": c.get("code") or "",
-        "label": c.get("label") or "",
-        "full_path": c.get("full_path") or "",
-        "room_name": c.get("room_name") or "",
-        "unit_name": c.get("unit_name") or "",
-        "score": int(c.get("det_score") or 0),
-        "confidence": float(c.get("confidence") or 0.0),
-        "reason": c.get("reason") or "",
+        "code": slot.get("code") or "",
+        "label": slot.get("label") or "",
+        "full_path": slot.get("full_path") or "",
+        "room_name": slot.get("room_name") or "",
+        "unit_name": slot.get("unit_name") or "",
+        "section_name": slot.get("section_name") or "",
+        "score": int(slot.get("det_score") or 0),
+        "confidence": float(slot.get("confidence") or 0.0),
+        "reason": slot.get("reason") or "",
+        "matched_rules": [str(x) for x in (slot.get("matched_rules") or [])],
+        "evidence_item_ids": [str(x) for x in (slot.get("evidence_item_ids") or [])],
+        "is_recommended": is_recommended,
     }
+
+
+def _candidate_to_view(c: dict[str, Any], *, is_recommended: bool = False) -> dict[str, Any]:
+    """Project one ranked-candidate dict into the API view shape."""
+    return candidate_view_from_slot(c, is_recommended=is_recommended)
 
 
 def _top3(result: AgentRunResult) -> list[dict[str, Any]]:
@@ -106,11 +124,11 @@ def _top3(result: AgentRunResult) -> list[dict[str, Any]]:
         ordered = list(ranked)
     out = []
     for c in ordered[:3]:
-        view = _candidate_to_view(c)
+        is_chosen = chosen_uuid is not None and str(c.get("id")) == str(chosen_uuid)
+        view = _candidate_to_view(c, is_recommended=is_chosen)
         if (
             llm_reason
-            and chosen_uuid is not None
-            and str(view.get("slot_id")) == str(chosen_uuid)
+            and is_chosen
             and not view.get("reason")
         ):
             view["reason"] = llm_reason
@@ -136,6 +154,7 @@ def _to_response_dict(
     return {
         "recommendation_id": str(rec.id),
         "item_id": str(rec.item_id),
+        "trace_id": str(rec.agent_trace_id),
         "chosen_slot_id": (
             str(rec.chosen_slot_id) if rec.chosen_slot_id else None
         ),
@@ -208,6 +227,7 @@ def _build_recommendation_candidates(
                 "full_path": c.get("full_path") or "",
                 "room_name": c.get("room_name") or "",
                 "unit_name": c.get("unit_name") or "",
+                "section_name": c.get("section_name") or "",
                 "det_score": int(c.get("det_score") or 0),
             }
         )
@@ -292,4 +312,102 @@ async def run_recommendation(
     return RecommendOutcome(recommendation=rec, result=result)
 
 
-__all__ = ["RecommendOutcome", "run_recommendation"]
+# ------------------------------------------------------------------- read-back
+
+
+def _merge_live_slot(
+    candidate: dict[str, Any], live_slots: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Overlay a persisted candidate with the slot's *current* display fields.
+
+    Snapshot values (``confidence`` / ``reason`` / ``det_score``) win; only
+    location metadata is refreshed, because a slot can be renamed after the
+    recommendation ran.
+    """
+    live = live_slots.get(str(candidate.get("slot_id")))
+    if not live:
+        return candidate
+    merged = dict(candidate)
+    for key in ("code", "label", "full_path", "room_name", "unit_name", "section_name"):
+        if live.get(key):
+            merged[key] = live[key]
+    return merged
+
+
+async def get_recommendation_view(
+    db: AsyncSession,
+    *,
+    home_id: uuid.UUID,
+    recommendation_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Load a persisted recommendation and project it into the
+    ``RecommendResponse`` shape.
+
+    ``retries_used`` is not a column on ``recommendations`` — it is recovered
+    from the AgentTrace's RETRY steps, and the failure message from the
+    trace's ``error`` column.
+
+    Raises:
+        NotFoundError: unknown id, or the recommendation's item belongs to
+            another home (404 rather than 403, so existence never leaks).
+    """
+    rec = (
+        await db.execute(
+            select(Recommendation).where(Recommendation.id == recommendation_id)
+        )
+    ).scalar_one_or_none()
+    if rec is None:
+        raise NotFoundError("Recommendation not found")
+    item = (
+        await db.execute(select(Item).where(Item.id == rec.item_id))
+    ).scalar_one_or_none()
+    if item is None or item.home_id != home_id:
+        raise NotFoundError("Recommendation not found")
+
+    trace = (
+        await db.execute(select(AgentTrace).where(AgentTrace.id == rec.agent_trace_id))
+    ).scalar_one_or_none()
+    live_slots = {s["id"]: s for s in await get_storage_slots(db=db, home_id=home_id)}
+    chosen = str(rec.chosen_slot_id) if rec.chosen_slot_id else None
+    candidates = [
+        candidate_view_from_slot(
+            _merge_live_slot(c, live_slots), is_recommended=str(c.get("slot_id")) == chosen
+        )
+        for c in (rec.candidates or [])
+        if isinstance(c, dict)
+    ]
+    steps = (trace.steps if trace else None) or []
+    retries_used = sum(
+        1
+        for step in steps
+        if isinstance(step, dict) and step.get("state") == RecommendationState.RETRY.value
+    )
+    return {
+        "recommendation_id": str(rec.id),
+        "item_id": str(rec.item_id),
+        "trace_id": str(rec.agent_trace_id),
+        "chosen_slot_id": chosen,
+        "status": rec.status,
+        "state": (
+            RecommendationState.ANSWER.value
+            if chosen
+            else RecommendationState.FAILED.value
+        ),
+        "retries_used": retries_used,
+        "pre_filter_count": rec.pre_filter_count,
+        "post_filter_count": rec.post_filter_count,
+        "candidates": candidates,
+        "error": (
+            None
+            if chosen
+            else ((trace.error if trace else None) or "无符合硬规则的位置")
+        ),
+    }
+
+
+__all__ = [
+    "RecommendOutcome",
+    "candidate_view_from_slot",
+    "get_recommendation_view",
+    "run_recommendation",
+]

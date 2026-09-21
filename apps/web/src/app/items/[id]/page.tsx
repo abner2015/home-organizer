@@ -4,7 +4,7 @@ import { api } from "@/lib/api";
 import { getSession } from "@/lib/session";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorState, Loading } from "@/components/States";
-import { formatDateTime, formatSlotPath } from "@/lib/format";
+import { formatDateTime, formatSlotPath, formatCategory, formatSize } from "@/lib/format";
 import type { Item, ItemPlacement } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -48,7 +48,10 @@ export default async function ItemDetail({ params }: { params: { id: string } })
     <div className="space-y-6">
       <PageHeader
         title={item.name}
-        description={[item.category, item.subcategory].filter(Boolean).join(" · ") || undefined}
+        description={
+          [formatCategory(item.category), item.subcategory].filter(Boolean).join(" · ") ||
+          undefined
+        }
         actions={
           <Link href="/items" className="btn-ghost">
             ← 返回列表
@@ -83,13 +86,13 @@ export default async function ItemDetail({ params }: { params: { id: string } })
             <div>
               <dt className="text-ink-500">分类</dt>
               <dd className="font-medium text-ink-900">
-                {item.category ?? "—"}
+                {formatCategory(item.category)}
                 {item.subcategory ? ` · ${item.subcategory}` : ""}
               </dd>
             </div>
             <div>
               <dt className="text-ink-500">尺寸</dt>
-              <dd className="font-medium text-ink-900">{item.estimated_size ?? "—"}</dd>
+              <dd className="font-medium text-ink-900">{formatSize(item.estimated_size)}</dd>
             </div>
             <div>
               <dt className="text-ink-500">敏感</dt>
@@ -99,7 +102,7 @@ export default async function ItemDetail({ params }: { params: { id: string } })
               <dt className="text-ink-500">当前放置</dt>
               <dd className="mt-1 flex items-center gap-2">
                 <span className="badge-brand">
-                  📍 {placement ? formatSlotPath(placement as never) : "未放置"}
+                  📍 {formatSlotPath(placement)}
                 </span>
               </dd>
             </div>

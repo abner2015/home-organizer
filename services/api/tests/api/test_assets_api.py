@@ -31,6 +31,8 @@ async def test_upload_png_returns_201(api_client, seeded_actor) -> None:  # type
     assert data["deduplicated"] is False
     assert data["asset_id"]
     assert data["url"].startswith("http")
+    # The Web app attaches the key to a new item, so it must come back here.
+    assert data["object_key"].startswith(f"home/{seeded_actor.home_id}/")
 
 
 async def test_upload_jpeg_returns_201(api_client, seeded_actor) -> None:  # type: ignore[no-untyped-def]

@@ -1,26 +1,55 @@
 "use client";
 
-import { Suspense, useState, useTransition, useRef } from "react";
+import { Suspense, useEffect, useState, useTransition, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api, APIError } from "@/lib/api";
 import { getSession } from "@/lib/session";
 import { PageHeader } from "@/components/PageHeader";
 import { Spinner, ErrorState, Loading } from "@/components/States";
 import { RecommendationTree } from "@/components/RecommendationTree";
-import { formatConfidence, clsx } from "@/lib/format";
+import { formatConfidence, formatSlotPath, CATEGORY_LABEL, clsx } from "@/lib/format";
 import type {
   CandidateView,
+  EstimatedSize,
   Item,
+  ItemUpsertBody,
+  ItemVision,
   RecommendResponse,
   StorageUnit,
-  VisionOutput,
 } from "@/lib/types";
 
 type Step = "upload" | "preview" | "recognize" | "confirm" | "recommend" | "save" | "done";
 
-interface CreateItemResult {
-  item: Item;
-  vision?: VisionOutput;
+type FormState = {
+  name: string;
+  category: string;
+  subcategory: string;
+  description: string;
+  estimated_size: EstimatedSize | "";
+  is_sensitive: boolean;
+  needs_lock: boolean;
+};
+
+const EMPTY_FORM: FormState = {
+  name: "",
+  category: "",
+  subcategory: "",
+  description: "",
+  estimated_size: "",
+  is_sensitive: false,
+  needs_lock: false,
+};
+
+function toUpsertBody(form: FormState): ItemUpsertBody {
+  return {
+    name: form.name.trim(),
+    description: form.description.trim() || null,
+    category: form.category.trim() || null,
+    subcategory: form.subcategory.trim() || null,
+    estimated_size: form.estimated_size || null,
+    is_sensitive: form.is_sensitive,
+    needs_lock: form.needs_lock,
+  };
 }
 
 const STEP_LABEL: Record<Step, string> = {
@@ -56,20 +85,32 @@ function NewItemPageInner() {
   const router = useRouter();
   const params = useSearchParams();
   const recommendFor = params.get("recommend_for");
+  // The assistant's suggestion card links here with a name so the user lands
+  // on the manual confirm step with the field already filled.
+  const prefillName = params.get("name") ?? "";
   const session = getSession();
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const [step, setStep] = useState<Step>(recommendFor ? "recommend" : "upload");
+  const [step, setStep] = useState<Step>(
+    recommendFor ? "recommend" : prefillName ? "confirm" : "upload",
+  );
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [objectKey, setObjectKey] = useState<string | null>(null);
   const [item, setItem] = useState<Item | null>(null);
-  const [vision, setVision] = useState<VisionOutput | null>(null);
-  const [form, setForm] = useState({ name: "", category: "", subcategory: "", description: "" });
+  const [vision, setVision] = useState<ItemVision | null>(null);
+  const [form, setForm] = useState<FormState>(() =>
+    prefillName ? { ...EMPTY_FORM, name: prefillName } : EMPTY_FORM,
+  );
   const [rec, setRec] = useState<RecommendResponse | null>(null);
   const [units, setUnits] = useState<StorageUnit[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pending, startTransition] = useTransition();
+  const [inferring, setInferring] = useState(false);
+  const [inferNote, setInferNote] = useState<string | null>(null);
+  // The name we last ran inference for. Guards React StrictMode's double
+  // invocation and repeated blurs from re-billing the model for one name.
+  const inferredFor = useRef<string | null>(null);
 
   // If we came from a "获取推荐位置" link on an existing item, load it
   // directly into the recommend step.
@@ -81,10 +122,14 @@ function NewItemPageInner() {
         const it = await api.getItem(recommendFor, session.userId, session.homeId);
         setItem(it);
         setForm({
+          ...EMPTY_FORM,
           name: it.name,
           category: it.category ?? "",
           subcategory: it.subcategory ?? "",
           description: it.description ?? "",
+          estimated_size: (it.estimated_size as EstimatedSize | null) ?? "",
+          is_sensitive: it.is_sensitive ?? false,
+          needs_lock: it.needs_lock ?? false,
         });
         await runRecommendFor(it);
       } catch (err) {
@@ -94,6 +139,70 @@ function NewItemPageInner() {
       }
     })();
   });
+
+  // Merge a model-produced patch into the form. Blank strings are skipped so a
+  // partial answer never wipes something the user already typed; the booleans
+  // are applied as-is (the form starts false, so a `false` is a no-op).
+  function applyInferred(patch: {
+    name?: string;
+    category?: string;
+    subcategory?: string;
+    description?: string;
+    estimated_size?: EstimatedSize | "";
+    is_sensitive?: boolean;
+    needs_lock?: boolean;
+  }) {
+    setForm((prev) => ({
+      ...prev,
+      name: patch.name?.trim() ? patch.name : prev.name,
+      category: patch.category?.trim() ? patch.category : prev.category,
+      subcategory: patch.subcategory?.trim() ? patch.subcategory : prev.subcategory,
+      description: patch.description?.trim() ? patch.description : prev.description,
+      estimated_size: patch.estimated_size || prev.estimated_size,
+      is_sensitive: patch.is_sensitive ?? prev.is_sensitive,
+      needs_lock: patch.needs_lock ?? prev.needs_lock,
+    }));
+  }
+
+  // Ask the model to fill the rest of the form from the name alone. Used by
+  // the manual (photo-free) path, including entries from the assistant's
+  // suggestion card (`?name=…`). A failure is NOT fatal — the user can still
+  // type everything by hand, which is why this never calls `setError`.
+  async function runInfer(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || inferredFor.current === trimmed) return;
+    inferredFor.current = trimmed;
+    setInferring(true);
+    setInferNote(null);
+    try {
+      const r = await api.inferItem(
+        { name: trimmed },
+        session.userId,
+        session.homeId,
+      );
+      setVision(r.vision);
+      applyInferred({
+        name: r.vision.name,
+        category: r.vision.category,
+        subcategory: r.vision.subcategory,
+        description: r.vision.description,
+        estimated_size: r.vision.estimated_size ?? "",
+        is_sensitive: r.vision.is_sensitive,
+        needs_lock: r.vision.needs_lock,
+      });
+    } catch (err) {
+      setInferNote(`AI 补全失败，请手动填写：${extractError(err, "未知错误")}`);
+    } finally {
+      setInferring(false);
+    }
+  }
+
+  // Landing here from the assistant's "放哪里" CTA carries the name in the
+  // query string, so the form can be filled before the user does anything.
+  useEffect(() => {
+    if (prefillName) void runInfer(prefillName);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillName]);
 
   function onPickFile(f: File) {
     setFile(f);
@@ -106,35 +215,35 @@ function NewItemPageInner() {
     setBusy(true);
     setError(null);
     try {
-      // 1) presign
-      const presign = await api.presignUpload(
-        { file_name: file.name, content_type: file.type || "application/octet-stream" },
-        session.userId,
-        session.homeId,
-      );
-      // 2) PUT to presigned URL
-      await api.putToPresignedUrl(presign.upload_url, file, file.type);
-      setObjectKey(presign.object_key);
+      // 1) upload the bytes through the API (works with any storage backend —
+      //    the direct-to-storage presign flow needs an object store the
+      //    browser can reach).
+      const uploaded = await api.uploadAsset(file, session.userId, session.homeId);
+      setObjectKey(uploaded.object_key);
       setStep("recognize");
-      // 3) create the item record (no vision yet)
+      // 2) create the item record (no vision yet)
       const created = await api.createItem(
         {
           name: "未命名物品",
-          image_object_keys: [presign.object_key],
-          primary_image_object_key: presign.object_key,
+          image_object_keys: [uploaded.object_key],
+          primary_image_object_key: uploaded.object_key,
         },
         session.userId,
         session.homeId,
       );
       setItem(created);
-      // 4) trigger vision recognition
+      // 3) trigger vision recognition — it also writes the result onto the
+      //    item, so the values below are already persisted.
       const r = await api.recognizeItem(created.id, session.userId, session.homeId);
       setVision(r.vision);
-      setForm({
+      applyInferred({
         name: r.vision.name,
         category: r.vision.category,
-        subcategory: r.vision.subcategory ?? "",
-        description: r.vision.description ?? "",
+        subcategory: r.vision.subcategory,
+        description: r.vision.description,
+        estimated_size: r.vision.estimated_size ?? "",
+        is_sensitive: r.vision.is_sensitive,
+        needs_lock: r.vision.needs_lock,
       });
       setStep("confirm");
     } catch (err) {
@@ -146,15 +255,20 @@ function NewItemPageInner() {
   }
 
   async function requestRecommend() {
-    if (!item) return;
     setBusy(true);
     setError(null);
     setStep("recommend");
     try {
-      // Persist user-edited fields by PATCHing (we keep the API minimal here
-      // and re-use createItem to overwrite is not supported — so we just
-      // keep the local name and pass it into the recommend call).
-      const r = await api.recommend(item.id, session.userId, session.homeId);
+      // Persist the (possibly user-edited) fields before recommending: create
+      // when this is the manual, photo-free path, otherwise PATCH the item
+      // vision already created.
+      const body = toUpsertBody(form);
+      const target = item
+        ? await api.updateItem(item.id, body, session.userId, session.homeId)
+        : await api.createItem(body, session.userId, session.homeId);
+      setItem(target);
+
+      const r = await api.recommend(target.id, session.userId, session.homeId);
       setRec(r);
       // Load the storage tree so we can visualise cabinet → layer → slot
       try {
@@ -198,7 +312,7 @@ function NewItemPageInner() {
     try {
       await api.acceptRecommendation(
         rec.recommendation_id,
-        { slot_id: c.slot_id },
+        {},
         session.userId,
         session.homeId,
       );
@@ -218,7 +332,7 @@ function NewItemPageInner() {
     try {
       await api.rejectRecommendation(
         rec.recommendation_id,
-        { reason: "用户选择了其他位置" },
+        { note: "用户选择了其他位置" },
         session.userId,
         session.homeId,
       );
@@ -255,7 +369,7 @@ function NewItemPageInner() {
         <UploadCard
           onPick={onPickFile}
           fileRef={fileRef}
-          onContinue={uploadAndRecognize}
+          onManual={() => setStep("confirm")}
           busy={busy}
         />
       ) : null}
@@ -283,6 +397,10 @@ function NewItemPageInner() {
           previewUrl={previewUrl}
           onBack={() => setStep("upload")}
           onContinue={requestRecommend}
+          onInfer={() => void runInfer(form.name)}
+          onNameBlur={() => void runInfer(form.name)}
+          inferring={inferring}
+          inferNote={inferNote}
           busy={busy}
         />
       ) : null}
@@ -366,12 +484,12 @@ function Stepper({ current }: { current: Step }) {
 function UploadCard({
   onPick,
   fileRef,
-  onContinue,
+  onManual,
   busy,
 }: {
   onPick: (f: File) => void;
   fileRef: React.MutableRefObject<HTMLInputElement | null>;
-  onContinue: () => void;
+  onManual: () => void;
   busy: boolean;
 }) {
   return (
@@ -398,13 +516,18 @@ function UploadCard({
           if (f) onPick(f);
         }}
       />
-      <button
-        className="btn-primary"
-        onClick={() => fileRef.current?.click()}
-        disabled={busy}
-      >
-        选择照片
-      </button>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <button
+          className="btn-primary"
+          onClick={() => fileRef.current?.click()}
+          disabled={busy}
+        >
+          选择照片
+        </button>
+        <button className="btn-ghost" onClick={onManual} disabled={busy}>
+          跳过照片，手动填写
+        </button>
+      </div>
     </div>
   );
 }
@@ -454,53 +577,98 @@ function ConfirmCard({
   previewUrl,
   onBack,
   onContinue,
+  onInfer,
+  onNameBlur,
+  inferring,
+  inferNote,
   busy,
 }: {
-  form: { name: string; category: string; subcategory: string; description: string };
-  setForm: (f: { name: string; category: string; subcategory: string; description: string }) => void;
-  vision: VisionOutput | null;
+  form: FormState;
+  setForm: React.Dispatch<React.SetStateAction<FormState>>;
+  vision: ItemVision | null;
   previewUrl: string | null;
   onBack: () => void;
   onContinue: () => void;
+  onInfer: () => void;
+  onNameBlur: () => void;
+  inferring: boolean;
+  inferNote: string | null;
   busy: boolean;
 }) {
   return (
     <div className="card p-5">
       <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-400">
-        AI 识别结果 — 请确认或修改
+        {vision ? "AI 识别结果 — 请确认或修改" : "填写物品信息"}
       </h2>
       <div className="mt-4 grid gap-4 md:grid-cols-[200px,1fr]">
         <div className="overflow-hidden rounded-xl bg-ink-100">
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={previewUrl} alt="预览" className="aspect-square w-full object-cover" />
-          ) : null}
+          ) : (
+            <div className="grid aspect-square w-full place-items-center text-xs text-ink-400">
+              未上传照片
+            </div>
+          )}
         </div>
         <div className="space-y-3">
           {vision ? (
+            // No confidence chip: the Phase 4 Vision schema doesn't emit a
+            // score, and the backend returns null rather than invent one.
             <div className="rounded-lg bg-brand-50/60 p-3 text-xs text-brand-700">
-              识别置信度 <strong>{formatConfidence(vision.confidence)}</strong>
-              {vision.attributes && vision.attributes.length > 0 ? (
-                <span> · 属性：{vision.attributes.join("、")}</span>
-              ) : null}
+              AI 已识别：<strong>{vision.name}</strong>
+              {vision.description ? <span> · {vision.description}</span> : null}
             </div>
           ) : null}
           <div>
             <label className="label">名称</label>
-            <input
-              className="input"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-            />
+            <div className="flex gap-2">
+              <input
+                className="input"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                onBlur={onNameBlur}
+                placeholder="例如：雨伞"
+              />
+              <button
+                type="button"
+                className="btn-secondary shrink-0 text-xs"
+                onClick={onInfer}
+                disabled={inferring || !form.name.trim()}
+                title="让 AI 根据名称补全其余字段"
+              >
+                {inferring ? <Spinner className="h-4 w-4" /> : null}
+                AI 补全
+              </button>
+            </div>
+            {inferNote ? (
+              <p className="mt-1 text-xs text-amber-700">{inferNote}</p>
+            ) : null}
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
+              {/* The 9 values in CATEGORY_LABEL are the backend's whole
+                  `Item.category` vocabulary (app/db/enums.py). A free-text
+                  input let the user (and the model) type a value no storage
+                  slot accepts, which dead-ends the recommendation with
+                  `pre_filter_count == 0`. A select makes that impossible and
+                  shows Chinese instead of "decor". */}
               <label className="label">分类</label>
-              <input
+              <select
                 className="input"
                 value={form.category}
                 onChange={(e) => setForm({ ...form, category: e.target.value })}
-              />
+              >
+                <option value="">未分类</option>
+                {Object.entries(CATEGORY_LABEL).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+                {form.category && !(form.category in CATEGORY_LABEL) ? (
+                  <option value={form.category}>{form.category}</option>
+                ) : null}
+              </select>
             </div>
             <div>
               <label className="label">子分类</label>
@@ -512,6 +680,21 @@ function ConfirmCard({
             </div>
           </div>
           <div>
+            <label className="label">尺寸</label>
+            <select
+              className="input"
+              value={form.estimated_size}
+              onChange={(e) =>
+                setForm({ ...form, estimated_size: e.target.value as EstimatedSize | "" })
+              }
+            >
+              <option value="">未知</option>
+              <option value="small">小</option>
+              <option value="medium">中</option>
+              <option value="large">大</option>
+            </select>
+          </div>
+          <div>
             <label className="label">描述（可选）</label>
             <textarea
               className="input min-h-[60px]"
@@ -519,11 +702,32 @@ function ConfirmCard({
               onChange={(e) => setForm({ ...form, description: e.target.value })}
             />
           </div>
+          {/* Model-filled (vision.v2.md / infer) but user-overridable: these
+              two drive the hard-safety verifier, and the model is told to
+              prefer false when unsure, so the user is the tie-breaker. */}
+          <div className="flex flex-wrap gap-4 rounded-lg bg-ink-50 p-3 text-xs text-ink-700">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={form.is_sensitive}
+                onChange={(e) => setForm({ ...form, is_sensitive: e.target.checked })}
+              />
+              敏感物品（药品 / 证件 / 贵重品）
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={form.needs_lock}
+                onChange={(e) => setForm({ ...form, needs_lock: e.target.checked })}
+              />
+              需要上锁存放
+            </label>
+          </div>
         </div>
       </div>
       <div className="mt-5 flex justify-between">
         <button className="btn-ghost" onClick={onBack} disabled={busy}>
-          ← 重新拍照
+          {previewUrl ? "← 重新拍照" : "← 返回"}
         </button>
         <button
           className="btn-primary"
@@ -557,7 +761,7 @@ function SaveCard({
   const alternatives = rec.candidates.filter((c) => c !== recommended);
   return (
     <div className="space-y-5">
-      {!rec.verifier_passed ? (
+      {rec.state === "failed" ? (
         <div className="card border-amber-200 bg-amber-50/50 p-4 text-sm text-amber-800">
           ⚠️ AI 推荐未通过硬规则验证，显示的为兜底结果。
         </div>
@@ -566,7 +770,7 @@ function SaveCard({
         <div className="card border-brand-200 p-5">
           <p className="text-xs font-semibold uppercase tracking-wide text-brand-600">⭐ 推荐位置</p>
           <h2 className="mt-1 text-lg font-semibold text-ink-900">
-            {recommended.room_name} · {recommended.unit_name} · {recommended.section_name} · {recommended.code}
+            {formatSlotPath(recommended)}
           </h2>
           <p className="mt-2 text-sm text-ink-700">{recommended.reason}</p>
           <div className="mt-3 flex items-center gap-2 text-xs text-ink-500">
@@ -611,7 +815,7 @@ function SaveCard({
               <div key={c.slot_id} className="card flex items-center justify-between p-3">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium text-ink-800">
-                    {c.room_name} · {c.unit_name} · {c.section_name} · {c.code}
+                    {formatSlotPath(c)}
                   </p>
                   <p className="mt-0.5 truncate text-xs text-ink-500">{c.reason}</p>
                 </div>

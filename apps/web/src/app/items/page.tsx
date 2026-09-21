@@ -4,6 +4,7 @@ import { getSession } from "@/lib/session";
 import { PageHeader } from "@/components/PageHeader";
 import { ItemGrid } from "@/components/Items";
 import { EmptyState, ErrorState } from "@/components/States";
+import { CATEGORY_LABEL } from "@/lib/format";
 import type { Item } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -54,12 +55,21 @@ export default async function ItemsPage({
           placeholder="搜索物品名称…"
           className="input flex-1"
         />
-        <input
+        <select
           name="category"
           defaultValue={searchParams.category ?? ""}
-          placeholder="分类（可选）"
           className="input sm:w-48"
-        />
+        >
+          <option value="">全部分类</option>
+          {Object.entries(CATEGORY_LABEL).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+          {searchParams.category && !(searchParams.category in CATEGORY_LABEL) ? (
+            <option value={searchParams.category}>{searchParams.category}</option>
+          ) : null}
+        </select>
         <button className="btn-primary" type="submit">
           搜索
         </button>

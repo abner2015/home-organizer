@@ -73,6 +73,12 @@ def _slot_dict(slot: StorageSlot) -> dict[str, Any]:
     section = slot.section
     unit = section.unit
     room = unit.room
+    # Human-facing path. Slot `code`s are ASCII (`L1`, `L1S1`, `LK1`) and used to
+    # end every path — which is the English the recommendation UI showed the
+    # user. The Chinese `label` ("左玻璃柜第1层") says the same thing readably,
+    # so prefer it; `code` stays a separate field for machine identity (the
+    # location-hint matcher keys off it).
+    leaf = slot.label or f"{section.name}/{slot.code}"
     return {
         "id": str(slot.id),
         "section_id": str(slot.section_id),
@@ -91,7 +97,7 @@ def _slot_dict(slot: StorageSlot) -> dict[str, Any]:
         "unit_type": unit.unit_type,
         "section_name": section.name,
         "section_type": section.section_type,
-        "full_path": f"{room.name}/{unit.name}/{section.name}/{slot.code}",
+        "full_path": f"{room.name}/{unit.name}/{leaf}",
     }
 
 

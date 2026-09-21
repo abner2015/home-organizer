@@ -27,35 +27,50 @@ class RecommendRequest(BaseModel):
 
 class CandidateView(BaseModel):
     """One candidate slot in the RecommendResponse — what the UI uses to draw
-    a top-3 list and a primary "recommended" highlight."""
+    a top-3 list and a primary "recommended" highlight.
+
+    ``code`` is not required: a slot the user PATCHed onto a recommendation
+    that the LLM never surfaced has no code until it is joined back to the
+    live slot row.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     slot_id: uuid.UUID
-    code: str = Field(min_length=1, max_length=64)
+    code: str = Field(default="", max_length=64)
     label: str = Field(default="", max_length=128)
     full_path: str = Field(default="", max_length=256)
     room_name: str = Field(default="", max_length=64)
     unit_name: str = Field(default="", max_length=64)
+    section_name: str = Field(default="", max_length=64)
     score: int = Field(ge=0)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = Field(default="", max_length=512)
+    matched_rules: list[str] = Field(default_factory=list)
+    evidence_item_ids: list[str] = Field(default_factory=list)
+    is_recommended: bool = Field(
+        default=False,
+        description="True for the slot the agent (or the user's PATCH) chose.",
+    )
 
 
 class RecommendResponse(BaseModel):
-    """Response body for ``POST /recommend``."""
+    """Response body for ``POST /recommend`` and ``GET /recommendations/{id}``."""
 
     model_config = ConfigDict(extra="forbid")
 
     recommendation_id: uuid.UUID
     item_id: uuid.UUID
+    trace_id: uuid.UUID = Field(
+        description="AgentTrace id of the run that produced this recommendation."
+    )
     chosen_slot_id: uuid.UUID | None = Field(
         default=None,
         description="None when the pipeline ended in FAILED (no safe candidate).",
     )
     status: str = Field(
-        description="Recommendation status — 'pending' on success, 'pending' "
-        "with chosen_slot_id=null on FAILED.",
+        description="Recommendation lifecycle status: 'pending', 'accepted', "
+        "'rejected' or 'superseded'.",
     )
     state: str = Field(description="Final pipeline state: 'answer' or 'failed'.")
     retries_used: int = Field(ge=0, le=10)
