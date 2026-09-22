@@ -33,6 +33,9 @@ class AgentContext:
     rules: list[dict[str, Any]] = field(default_factory=list)
     preferences: list[dict[str, Any]] = field(default_factory=list)
     history: list[dict[str, Any]] = field(default_factory=list)
+    # Slots this item's user has rejected before (P0.4 feedback loop). Derived
+    # from rejected Recommendation rows; applied at the FILTER step.
+    excluded_slot_ids: frozenset[uuid.UUID] = frozenset()
 
     pre_filter_count: int = 0
     candidates: list[dict[str, Any]] = field(default_factory=list)
@@ -43,6 +46,10 @@ class AgentContext:
     last_failure: str | None = None
     retries_used: int = 0
     last_decision_reason: str | None = None
+    # Only the LLM reasons that passed the no-code/no-English gate, keyed by
+    # slot id. Slots the model left unnamed fall back to the deterministic
+    # reason attached by ``rank_slots``.
+    llm_reasons: dict[str, str] = field(default_factory=dict)
 
     # For the verifier; built once after retrieval.
     verification_ctx: VerificationContext | None = None

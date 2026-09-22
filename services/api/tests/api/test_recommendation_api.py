@@ -444,6 +444,174 @@ async def test_patch_cross_home_slot_is_404(
     assert resp.json()["error"]["code"] == "not_found"
 
 
+# ------------------------------------------------------- reasons + feedback (P0.4)
+
+
+def _has_ascii_letter(text: str) -> bool:
+    return any("A" <= ch <= "z" for ch in text)
+
+
+def _has_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
+async def test_every_returned_candidate_has_a_chinese_reason(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """P0.4 acceptance: every candidate carries a non-empty, code-free,
+    English-free Chinese reason — not just the chosen one."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    slot_id = storage_hierarchy.slots["L1S1"]
+    _override_provider(
+        MockAIProvider(ranking_response=_cup_payload(str(slot_id)))
+    )
+    resp = api_client.post(
+        f"/api/v1/recommendations/items/{cup_id}/recommend",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    candidates = resp.json()["candidates"]
+    assert candidates
+    for c in candidates:
+        assert c["reason"], c
+        assert _has_cjk(c["reason"])
+        assert not _has_ascii_letter(c["reason"]), c["reason"]
+
+
+async def test_rejected_slot_is_excluded_from_the_next_recommendation(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    rejected = storage_hierarchy.slots["L1S1"]
+    fallback = storage_hierarchy.slots["L1S2"]
+    cup_id = storage_hierarchy.items["马克杯"]
+
+    _override_provider(
+        MockAIProvider(ranking_response=_cup_payload(str(rejected)))
+    )
+    rec_id = _recommend(api_client, seeded_actor, cup_id)
+
+    reject = api_client.post(
+        f"/api/v1/recommendations/{rec_id}/reject",
+        json={"note": "位置太远"},
+        headers=seeded_actor.headers(),
+    )
+    assert reject.status_code == 200, reject.text
+
+    _override_provider(
+        MockAIProvider(ranking_response=_cup_payload(str(fallback)))
+    )
+    resp = api_client.post(
+        f"/api/v1/recommendations/items/{cup_id}/recommend",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["chosen_slot_id"] == str(fallback)
+    assert str(rejected) not in [c["slot_id"] for c in body["candidates"]]
+
+
+async def test_accepting_boosts_the_slot_for_a_same_category_item(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """P0.4 acceptance, over HTTP: after accepting, another item of the same
+    category sees that slot score exactly 10 higher and rank higher.
+
+    Uses a *different* item (the same item would also gain a history signal)
+    and both utensil slots pre-occupied, so the only variable is the
+    preference row.
+    """
+    from sqlalchemy import delete
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.models import Item
+    from app.models.preference import UserPreference
+
+    l1s1 = storage_hierarchy.slots["L1S1"]
+    l1s2 = storage_hierarchy.slots["L1S2"]
+    cup_id = storage_hierarchy.items["马克杯"]
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async with factory() as session:
+        spare = Item(
+            id=uuid.uuid4(),
+            home_id=seeded_actor.home_id,
+            name="备用杯",
+            category="utensil",
+            estimated_size="small",
+            created_by=seeded_actor.user_id,
+        )
+        other = Item(
+            id=uuid.uuid4(),
+            home_id=seeded_actor.home_id,
+            name="另一个杯子",
+            category="utensil",
+            estimated_size="small",
+            created_by=seeded_actor.user_id,
+        )
+        session.add_all([spare, other])
+        await session.commit()
+        other_id = other.id
+
+    from app.tools.write_tools import save_placement
+
+    async with factory() as session:
+        await save_placement(
+            db=session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            item_id=spare.id,
+            slot_id=l1s1,
+        )
+
+    # Accept a recommendation for the cup that lands in L1S2.
+    _override_provider(
+        MockAIProvider(ranking_response=_cup_payload(str(l1s2)))
+    )
+    rec_id = _recommend(api_client, seeded_actor, cup_id)
+    accept = api_client.post(
+        f"/api/v1/recommendations/{rec_id}/accept",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    assert accept.status_code == 200, accept.text
+
+    def _scores() -> dict[str, int]:
+        """slot_id → det_score for one run's returned candidates.
+
+        The response is `_top3`-ordered (chosen first), so an index here is
+        not a score rank; the positional claim is asserted in
+        ``tests/unit/test_feedback_loop.py`` against the true ranked list.
+        """
+        assert resp.status_code == 200, resp.text
+        return {c["slot_id"]: int(c["score"]) for c in resp.json()["candidates"]}
+
+    _override_provider(MockAIProvider(ranking_response=_cup_payload(str(l1s1))))
+    resp = api_client.post(
+        f"/api/v1/recommendations/items/{other_id}/recommend",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    with_pref = _scores()
+
+    async with factory() as session:
+        await session.execute(delete(UserPreference))
+        await session.commit()
+
+    resp = api_client.post(
+        f"/api/v1/recommendations/items/{other_id}/recommend",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    without_pref = _scores()
+
+    assert with_pref[str(l1s2)] - without_pref[str(l1s2)] == 10
+    # The boost is enough to overtake the sibling slot it used to tie with.
+    assert with_pref[str(l1s2)] > with_pref[str(l1s1)]
+    assert without_pref[str(l1s2)] == without_pref[str(l1s1)]
+
+
 # ---------------------------------------------------------------------- helpers
 
 

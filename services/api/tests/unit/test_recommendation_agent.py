@@ -507,14 +507,22 @@ async def test_scenario_8_retry_once_succeeds(
 async def test_scenario_9_retry_twice_still_fails(
     seeded_actor, db_engine, storage_hierarchy
 ) -> None:
-    """Three bad attempts (max_retries=2 → 1 initial + 2 retries = 3 calls)."""
+    """Three bad attempts (max_retries=2 → 1 initial + 2 retries = 3 calls).
+
+    The failure is a *hallucinated* slot id — one the model never saw in its
+    candidate list. It used to be driven by an ASCII reason ("a"/"b"/"c")
+    failing ``check_reason_consistent``, but P0.4 makes an unacceptable LLM
+    reason fall back to the deterministic Chinese reason (which always names
+    the item), so that lever no longer fails. An unknown slot is unfixable by
+    any reason text and still exercises retry exhaustion.
+    """
     cup_id = storage_hierarchy.items["马克杯"]
-    slot_id = storage_hierarchy.slots["L1S1"]
+    bogus_slot = str(uuid.uuid4())
     mock = MockAIProvider(
         ranking_responses=[
-            _candidate_payload(slot_id, reason="a"),
-            _candidate_payload(slot_id, reason="b"),
-            _candidate_payload(slot_id, reason="c"),
+            _candidate_payload(bogus_slot, reason="马克杯放在厨房吊柜"),
+            _candidate_payload(bogus_slot, reason="马克杯放在厨房吊柜"),
+            _candidate_payload(bogus_slot, reason="马克杯放在厨房吊柜"),
         ]
     )
     agent, holder = await _build_agent(db_engine, mock, max_retries=2)
@@ -529,6 +537,38 @@ async def test_scenario_9_retry_twice_still_fails(
     assert result.retries_used == 2
     assert mock.call_count == 3
     assert result.error
+
+
+async def test_scenario_11_ascii_reason_falls_back_and_passes(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """An LLM reason that fails the P0.4 gate is replaced by the deterministic
+    Chinese reason, so the run succeeds on the first attempt instead of
+    burning retries on ``check_reason_consistent``.
+
+    (Scenario 10 is the API-level PATCH-then-accept test in
+    ``tests/api/test_recommendation_api.py``.)
+    """
+    cup_id = storage_hierarchy.items["马克杯"]
+    slot_id = storage_hierarchy.slots["L1S1"]
+    mock = MockAIProvider(
+        ranking_responses=[_candidate_payload(slot_id, reason="slot L1S1 is fine")]
+    )
+    agent, holder = await _build_agent(db_engine, mock, max_retries=2)
+    result = await agent.run(
+        home_id=seeded_actor.home_id,
+        user_id=seeded_actor.user_id,
+        item_id=cup_id,
+    )
+    await holder.__aexit__()
+    assert result.ok, result.error
+    assert result.retries_used == 0
+    assert mock.call_count == 1
+    decide = next(s for s in result.steps if s.state == RecommendationState.DECIDE)
+    reason = decide.payload["reason"]
+    assert reason
+    assert "马克杯" in reason
+    assert not any("A" <= ch <= "z" for ch in reason)
 
 
 # Silence unused-import warning — Sequence is handy for future scenarios.

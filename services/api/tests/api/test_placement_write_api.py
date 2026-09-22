@@ -155,6 +155,21 @@ async def test_place_item_happy_path(
     assert item.json()["current_placement"]["slot_id"] == str(slot_id)
 
 
+async def test_place_item_has_an_empty_reason(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """A manual placement has nothing to explain; the item page's
+    「为什么放这里」 stays hidden (P0.4)."""
+    resp = _place(
+        api_client,
+        seeded_actor,
+        storage_hierarchy.items["马克杯"],
+        storage_hierarchy.slots["L1S1"],
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["reason"] == ""
+
+
 async def test_place_item_makes_no_llm_call(
     api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
 ) -> None:

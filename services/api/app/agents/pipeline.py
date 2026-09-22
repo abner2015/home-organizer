@@ -28,8 +28,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.candidate_gen import generate_candidates, hard_filter
 from app.agents.context import AgentContext
 from app.agents.ranking import rank_slots
+from app.agents.reason import build_reason, is_acceptable_llm_reason
 from app.agents.state import AgentStepResult, RecommendationState
 from app.ai.provider import AIProvider, RankingOutput
+from app.tools.recommendation_tools import get_rejected_slot_ids
 from app.tools.registry import ToolRegistry
 from app.verification.context import VerificationContext
 from app.verification.verifier import run_verifier
@@ -120,13 +122,21 @@ class RecommendationAgent:
         filt_step = await self._step_filter(ctx)
         steps.append(filt_step)
         if not ctx.candidates:
+            # Distinguish "nothing fits" from "you vetoed everything" — the
+            # latter tells the user the way out is to stop rejecting, not to
+            # add storage.
+            error = (
+                "该物品的候选位置均已被你排除"
+                if ctx.excluded_slot_ids
+                else "无符合硬规则的位置"
+            )
             return AgentRunResult(
                 state=RecommendationState.FAILED,
                 chosen_slot_id=None,
                 candidates=[],
                 retries_used=0,
                 steps=steps,
-                error="无符合硬规则的位置",
+                error=error,
             )
 
         # 6) RANK (deterministic)
@@ -204,12 +214,16 @@ class RecommendationAgent:
             ctx.tools.get_home_rules(home_id=ctx.home_id),
             ctx.tools.get_item_placements(home_id=ctx.home_id, item_id=ctx.item_id),
         )
+        excluded = await get_rejected_slot_ids(
+            db=self.db, home_id=ctx.home_id, item_id=ctx.item_id
+        )
         ctx.home = home
         ctx.rooms = rooms
         ctx.raw_slots = slots
         ctx.preferences = prefs
         ctx.rules = rules
         ctx.history = history
+        ctx.excluded_slot_ids = excluded
         return AgentStepResult(
             state=RecommendationState.RETRIEVE,
             started_at=start,
@@ -221,6 +235,7 @@ class RecommendationAgent:
                 "rules": len(rules),
                 "preferences": len(prefs),
                 "history": len(history),
+                "excluded": len(excluded),
             },
         )
 
@@ -239,7 +254,11 @@ class RecommendationAgent:
     async def _step_filter(self, ctx: AgentContext) -> AgentStepResult:
         start = self._now()
         item = ctx.item or {}
-        raw_candidates = generate_candidates(ctx.raw_slots, item)
+        raw_candidates = [
+            c
+            for c in generate_candidates(ctx.raw_slots, item)
+            if uuid_mod.UUID(str(c["id"])) not in ctx.excluded_slot_ids
+        ]
         hard_rules = [r for r in ctx.rules if r.get("rule_type") == "hard"]
         active_count = {
             uuid_mod.UUID(s["id"]): int(s.get("active_count", 0))
@@ -257,7 +276,7 @@ class RecommendationAgent:
             state=RecommendationState.FILTER,
             started_at=start,
             ended_at=self._now(),
-            payload={"count": len(filtered)},
+            payload={"count": len(filtered), "excluded_count": len(ctx.excluded_slot_ids)},
         )
 
     async def _step_rank(self, ctx: AgentContext) -> AgentStepResult:
@@ -298,7 +317,31 @@ class RecommendationAgent:
             if output.candidates:
                 top_pick = max(output.candidates, key=lambda c: c.confidence)
                 ctx.chosen_slot_id = top_pick.slot_id
-                ctx.last_decision_reason = top_pick.reason
+                # Keep every *gated* reason, not just the winner's — the other
+                # 1-2 candidates are surfaced as alternatives and deserve the
+                # model's own words too. A reason that names a slot code or
+                # writes English is dropped here; those candidates keep the
+                # deterministic reason `rank_slots` attached.
+                ctx.llm_reasons = {
+                    str(c.slot_id): c.reason
+                    for c in output.candidates
+                    if is_acceptable_llm_reason(c.reason)
+                }
+                chosen_row = next(
+                    (
+                        c
+                        for c in ctx.ranked_candidates
+                        if uuid_mod.UUID(str(c["id"])) == top_pick.slot_id
+                    ),
+                    None,
+                )
+                ctx.last_decision_reason = ctx.llm_reasons.get(
+                    str(top_pick.slot_id)
+                ) or build_reason(
+                    chosen_row or {"id": str(top_pick.slot_id)},
+                    item,
+                    score_terms=(chosen_row or {}).get("score_terms"),
+                )
                 chosen = {**top_pick.model_dump(mode="json")}
         except Exception as exc:
             # Provider blew up — treat as a transient failure.
@@ -310,6 +353,7 @@ class RecommendationAgent:
             payload={
                 "chosen_slot_id": str(ctx.chosen_slot_id) if ctx.chosen_slot_id else None,
                 "reason": ctx.last_decision_reason,
+                "reasons_by_slot": dict(ctx.llm_reasons),
                 "last_failure_was": ctx.last_failure,
                 "raw_pick": chosen,
             },

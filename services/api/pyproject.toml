@@ -74,6 +74,9 @@ ignore = ["E501"]
 # rendered in the confirm step), as is the proposal prompt.
 "app/agents/structure/*" = ["RUF001", "RUF002", "RUF003"]
 "app/services/structure_proposal_service.py" = ["RUF001", "RUF002", "RUF003"]
+# Deterministic reason text (P0.4): every candidate reason is user-facing
+# Chinese, joined with fullwidth punctuation, so RUF001 flags the separators.
+"app/agents/reason.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -22,8 +22,13 @@ from app.db.enums import (
 )
 from app.models.item import Item
 from app.models.placement import ItemPlacement
+from app.models.preference import UserPreference
 from app.models.recommendation import Recommendation
 from app.models.trace import AgentTrace
+
+# The single preference key the ranking feedback loop writes/reads. One row per
+# (user, home, key); the individual slots live inside the JSON `value`.
+PREFERENCE_KEY_PREFERRED_SLOTS = "preferred_slots"
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -316,9 +321,86 @@ async def save_placement(
     return _placement_dict(placement)
 
 
+async def record_preferred_slot(
+    *,
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    home_id: uuid.UUID,
+    item_id: uuid.UUID,
+    slot_id: uuid.UUID,
+    **_: Any,
+) -> None:
+    """Reinforce (item category → slot) as a positive signal for this user.
+
+    Called on accept and on manual placement — both are the user saying "this
+    item belongs here". The category is stored alongside the slot so the
+    ranker only boosts the slot for *similar* items: accepting a slot for a mug
+    should not push medicine into the same drawer.
+
+    Flush-level only; the caller owns the commit, so the accept path keeps
+    placement + status flip + preference in one transaction.
+
+    Select-then-update rather than a blind insert: the unique index
+    ``uq_user_preferences_user_home_key`` is a *plain* unique index, so SQLite
+    (the test DB) enforces it just like Postgres and a second insert for the
+    same (user, home, key) would raise ``IntegrityError``.
+    """
+    category = (
+        await db.execute(select(Item.category).where(Item.id == item_id))
+    ).scalar_one_or_none()
+
+    pref = (
+        await db.execute(
+            select(UserPreference).where(
+                UserPreference.user_id == user_id,
+                UserPreference.home_id == home_id,
+                UserPreference.key == PREFERENCE_KEY_PREFERRED_SLOTS,
+            )
+        )
+    ).scalar_one_or_none()
+
+    entry: dict[str, object] = {
+        "category": (category or "").strip().lower(),
+        "count": 1,
+    }
+    if pref is None:
+        created: dict[str, object] = {"slots": {str(slot_id): entry}}
+        db.add(
+            UserPreference(
+                user_id=user_id,
+                home_id=home_id,
+                key=PREFERENCE_KEY_PREFERRED_SLOTS,
+                value=created,
+            )
+        )
+    else:
+        # Reassign a *new* dict: JSONBCompat has no mutable tracking, so an
+        # in-place edit would never mark the row dirty and would be silently
+        # dropped (on SQLite the value is just stored text).
+        raw: dict[str, object] = pref.value if isinstance(pref.value, dict) else {}
+        raw_slots = raw.get("slots")
+        slots: dict[str, object] = (
+            {str(k): v for k, v in raw_slots.items()}
+            if isinstance(raw_slots, dict)
+            else {}
+        )
+        previous = slots.get(str(slot_id))
+        count = 1
+        if isinstance(previous, dict):
+            raw_count = previous.get("count")
+            if isinstance(raw_count, int):
+                count = raw_count + 1
+        slots[str(slot_id)] = {**entry, "count": count}
+        updated: dict[str, object] = {**raw, "slots": slots}
+        pref.value = updated
+    await db.flush()
+
+
 __all__ = [
+    "PREFERENCE_KEY_PREFERRED_SLOTS",
     "close_active_placements",
     "create_recommendation",
+    "record_preferred_slot",
     "save_placement",
     "verify_recommendation",
 ]

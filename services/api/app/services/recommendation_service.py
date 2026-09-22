@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.pipeline import AgentRunResult, RecommendationAgent
+from app.agents.reason import build_reason
 from app.agents.state import RecommendationState
 from app.ai.provider import AIProvider
 from app.core.exceptions import NotFoundError
@@ -111,10 +112,11 @@ def _top3(result: AgentRunResult) -> list[dict[str, Any]]:
     if not ranked:
         return []
     chosen_uuid = result.chosen_slot_id if result.ok else None
-    # The agent records the LLM's chosen-slot reason on the DECIDE step's
-    # payload. Pluck it out so the chosen candidate's view row carries the
-    # same human-readable justification the user saw during accept.
-    llm_reason = _extract_decide_reason(result)
+    # The agent records every *gated* LLM reason on the DECIDE step's payload.
+    # Overlay them so each of the top-3 carries what the model said about it;
+    # the ones the model did not name keep the deterministic reason the ranker
+    # attached.
+    llm_reasons = _extract_llm_reasons(result)
     if chosen_uuid is not None:
         chosen_str = str(chosen_uuid)
         front = [c for c in ranked if str(c.get("id")) == chosen_str]
@@ -126,26 +128,23 @@ def _top3(result: AgentRunResult) -> list[dict[str, Any]]:
     for c in ordered[:3]:
         is_chosen = chosen_uuid is not None and str(c.get("id")) == str(chosen_uuid)
         view = _candidate_to_view(c, is_recommended=is_chosen)
-        if (
-            llm_reason
-            and is_chosen
-            and not view.get("reason")
-        ):
+        llm_reason = llm_reasons.get(str(c.get("id")))
+        if llm_reason:
             view["reason"] = llm_reason
         out.append(view)
     return out
 
 
-def _extract_decide_reason(result: AgentRunResult) -> str:
-    """Pull the LLM-chosen slot's reason from the last DECIDE step's payload."""
+def _extract_llm_reasons(result: AgentRunResult) -> dict[str, str]:
+    """Gated LLM reasons from the last DECIDE step, keyed by slot id."""
     for step in reversed(result.steps):
         if step.state == RecommendationState.DECIDE:
             payload = step.payload or {}
-            reason = payload.get("reason")
-            if isinstance(reason, str) and reason:
-                return reason
-            return ""
-    return ""
+            reasons = payload.get("reasons_by_slot")
+            if isinstance(reasons, dict):
+                return {str(k): str(v) for k, v in reasons.items()}
+            return {}
+    return {}
 
 
 def _to_response_dict(
@@ -204,15 +203,12 @@ def _build_recommendation_candidates(
     We deliberately keep the agent's `det_score` on the JSONB blob so
     downstream UI code can sort / filter without re-running the ranker.
     """
-    llm_reason = _extract_decide_reason(result)
-    chosen_uuid = result.chosen_slot_id if result.ok else None
+    llm_reasons = _extract_llm_reasons(result)
     out: list[dict[str, Any]] = []
     for c in _top3_full(result):
         sid = c.get("id") or c.get("slot_id")
         sid_str = str(sid) if sid else str(uuid.uuid4())
-        reason = c.get("reason") or ""
-        if not reason and llm_reason and sid_str == str(chosen_uuid):
-            reason = llm_reason
+        reason = llm_reasons.get(sid_str) or c.get("reason") or ""
         out.append(
             {
                 "slot_id": sid_str,
@@ -369,13 +365,25 @@ async def get_recommendation_view(
     ).scalar_one_or_none()
     live_slots = {s["id"]: s for s in await get_storage_slots(db=db, home_id=home_id)}
     chosen = str(rec.chosen_slot_id) if rec.chosen_slot_id else None
-    candidates = [
-        candidate_view_from_slot(
-            _merge_live_slot(c, live_slots), is_recommended=str(c.get("slot_id")) == chosen
+    item_dict = {
+        "name": item.name,
+        "category": item.category,
+        "subcategory": item.subcategory,
+        "is_sensitive": item.is_sensitive,
+    }
+    candidates = []
+    for c in rec.candidates or []:
+        if not isinstance(c, dict):
+            continue
+        merged = _merge_live_slot(c, live_slots)
+        # Rows persisted before P0.4 (and PATCH-appended synthetic candidates)
+        # can carry an empty reason. Fill it *after* the merge and only when
+        # empty, so a real LLM reason is never overwritten.
+        if not merged.get("reason"):
+            merged = {**merged, "reason": build_reason(merged, item_dict)}
+        candidates.append(
+            candidate_view_from_slot(merged, is_recommended=str(c.get("slot_id")) == chosen)
         )
-        for c in (rec.candidates or [])
-        if isinstance(c, dict)
-    ]
     steps = (trace.steps if trace else None) or []
     retries_used = sum(
         1

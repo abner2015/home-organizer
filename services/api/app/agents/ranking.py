@@ -15,11 +15,14 @@ received no ordering signal at all.
 Returns the top-20 candidates sorted by descending score. Ties break on
 ``full_path`` (then ``id``) so the output is fully deterministic, as §4.4
 requires. The LLM rank step picks from this truncated list (the "top
-candidates" payload).
+candidates" payload). Each row also carries ``score_terms`` (the 0/1 breakdown
+above) and a deterministic Chinese ``reason`` built from it (P0.4).
 """
 from __future__ import annotations
 
 from typing import Any
+
+from app.agents.reason import build_reason
 
 # docs/AGENT.md §4.2 — built-in cold-start table mapping an item category to
 # the room types it belongs in. The doc's rows are in the domain vocabulary
@@ -115,14 +118,32 @@ def _capacity_fit(slot: dict[str, Any]) -> int:
     return 1 if (slot.get("active_count") or 0) == 0 else 0
 
 
-def _preference_match(slot: dict[str, Any], preferences: list[dict[str, Any]]) -> int:
+def _preference_match(
+    slot: dict[str, Any], item: dict[str, Any], preferences: list[dict[str, Any]]
+) -> int:
+    """1 if a stored positive preference covers this slot for this item.
+
+    Preferences are written by the feedback loop (P0.4) as
+    ``{"slots": {"<slot_id>": {"category": ..., "count": ...}}}`` and are
+    **category-scoped**: accepting a slot for a mug must not boost it for
+    medicine. A preference with no stored category matches any item, and the
+    legacy ``preferred_slot_ids`` shape (no category at all) is still honoured.
+    """
     sid = str(slot["id"])
+    category = (item.get("category") or "").strip().lower()
     for pref in preferences:
         value = pref.get("value") or {}
         if not isinstance(value, dict):
             continue
-        preferred = value.get("preferred_slot_ids") or []
-        if sid in {str(a) for a in preferred}:
+        slots = value.get("slots")
+        if isinstance(slots, dict):
+            entry = slots.get(sid)
+            if isinstance(entry, dict):
+                entry_category = str(entry.get("category") or "").strip().lower()
+                if not entry_category or entry_category == category:
+                    return 1
+        legacy = value.get("preferred_slot_ids") or []
+        if sid in {str(a) for a in legacy}:
             return 1
     return 0
 
@@ -163,6 +184,39 @@ def _soft_rule_match(slot: dict[str, Any], soft_rules: list[dict[str, Any]]) -> 
     return 0
 
 
+# Weight per scoring term. Kept as data (not inlined into the sum) so the
+# score can be broken into its parts — the reason builder reads those parts.
+_WEIGHTS: dict[str, int] = {
+    "category": 25,
+    "room": 20,
+    "path": 15,
+    "capacity": 15,
+    "preference": 10,
+    "history": 10,
+    "soft_rule": 5,
+}
+
+
+def score_terms(
+    slot: dict[str, Any],
+    *,
+    item: dict[str, Any],
+    preferences: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    soft_rules: list[dict[str, Any]],
+) -> dict[str, int]:
+    """The per-term 0/1 breakdown behind :func:`deterministic_score`."""
+    return {
+        "category": _category_match(slot, item),
+        "room": _room_match(slot, item),
+        "path": _path_match(slot, item),
+        "capacity": _capacity_fit(slot),
+        "preference": _preference_match(slot, item, preferences),
+        "history": _history_match(slot, history),
+        "soft_rule": _soft_rule_match(slot, soft_rules),
+    }
+
+
 def deterministic_score(
     slot: dict[str, Any],
     *,
@@ -172,15 +226,14 @@ def deterministic_score(
     soft_rules: list[dict[str, Any]],
 ) -> int:
     """Return the weighted score for one slot."""
-    return (
-        25 * _category_match(slot, item)
-        + 20 * _room_match(slot, item)
-        + 15 * _path_match(slot, item)
-        + 15 * _capacity_fit(slot)
-        + 10 * _preference_match(slot, preferences)
-        + 10 * _history_match(slot, history)
-        + 5 * _soft_rule_match(slot, soft_rules)
+    terms = score_terms(
+        slot,
+        item=item,
+        preferences=preferences,
+        history=history,
+        soft_rules=soft_rules,
     )
+    return sum(_WEIGHTS[term] * value for term, value in terms.items())
 
 
 def rank_slots(
@@ -200,30 +253,39 @@ def rank_slots(
     which ties for many real and synthetic slots). §4.4 requires the ranker to
     be fully deterministic.
     """
-    scored = [
-        (
-            deterministic_score(
-                c,
-                item=item,
-                preferences=preferences,
-                history=history,
-                soft_rules=soft_rules,
-            ),
+    scored = []
+    for c in candidates:
+        terms = score_terms(
             c,
+            item=item,
+            preferences=preferences,
+            history=history,
+            soft_rules=soft_rules,
         )
-        for c in candidates
-    ]
+        score = sum(_WEIGHTS[term] * value for term, value in terms.items())
+        scored.append((score, terms, c))
     scored.sort(
-        key=lambda pair: (
-            -pair[0],
-            str(pair[1].get("full_path") or ""),
-            str(pair[1].get("id") or ""),
+        key=lambda triple: (
+            -triple[0],
+            str(triple[2].get("full_path") or ""),
+            str(triple[2].get("id") or ""),
         )
     )
     out: list[dict[str, Any]] = []
-    for score, c in scored[:limit]:
-        out.append({**c, "det_score": score})
+    for score, terms, c in scored[:limit]:
+        # Every ranked slot carries a deterministic reason. The LLM may later
+        # overlay a better one for the candidates it actually names (pipeline
+        # DECIDE step); anything it does not name — and the whole no-LLM
+        # `GET /items/{id}/candidates` path — keeps this one.
+        out.append(
+            {
+                **c,
+                "det_score": score,
+                "score_terms": terms,
+                "reason": build_reason(c, item, score_terms=terms),
+            }
+        )
     return out
 
 
-__all__ = ["deterministic_score", "rank_slots"]
+__all__ = ["deterministic_score", "rank_slots", "score_terms"]

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import func, select
@@ -26,6 +26,7 @@ from app.core.exceptions import NotFoundError, ValidationFailedError
 from app.db.session import get_db
 from app.models.item import Item, ItemImage
 from app.models.placement import ItemPlacement
+from app.models.recommendation import Recommendation
 from app.schemas.item import (
     CandidateListResponse,
     InferItemRequest,
@@ -52,6 +53,7 @@ from app.storage.backend import get_storage
 from app.tools.context_tools import get_home_rules, get_user_preferences
 from app.tools.home_tools import get_storage_slots
 from app.tools.item_tools import get_item_placements
+from app.tools.recommendation_tools import get_rejected_slot_ids
 
 router = APIRouter(prefix="/items", tags=["items"])
 
@@ -98,6 +100,39 @@ async def _slot_paths(db: AsyncSession, *, home_id: uuid.UUID) -> dict[str, str]
     """``slot_id → "room/unit/section/code"`` for the whole home."""
     slots = await get_storage_slots(db=db, home_id=home_id)
     return {s["id"]: str(s.get("full_path") or "") for s in slots}
+
+
+async def _placement_reasons(
+    db: AsyncSession, rows: list[dict[str, Any]]
+) -> dict[str, str]:
+    """``placement_id → the reason recorded when it was placed``.
+
+    Resolved through ``placement.recommendation_id``: the reason lives on the
+    candidate entry of the recommendation that produced the placement. One
+    batched ``IN`` query rather than a lookup per row.
+    """
+    rec_ids = {
+        uuid.UUID(str(row["recommendation_id"]))
+        for row in rows
+        if row.get("recommendation_id")
+    }
+    if not rec_ids:
+        return {}
+    recs = (
+        await db.execute(select(Recommendation).where(Recommendation.id.in_(rec_ids)))
+    ).scalars().all()
+    by_rec: dict[str, dict[str, str]] = {}
+    for rec in recs:
+        by_rec[str(rec.id)] = {
+            str(c.get("slot_id")): str(c.get("reason") or "")
+            for c in (rec.candidates or [])
+            if isinstance(c, dict)
+        }
+    return {
+        row["id"]: by_rec.get(str(row["recommendation_id"]), {}).get(row["slot_id"], "")
+        for row in rows
+        if row.get("recommendation_id")
+    }
 
 
 async def _active_placement_by_item(
@@ -467,10 +502,17 @@ async def list_item_placements(
     actor: Annotated[Actor, Depends(get_actor)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[ItemPlacementView]:
-    """Every placement ever recorded for the item, newest first."""
+    """Every placement ever recorded for the item, newest first.
+
+    An ``ai_recommendation`` placement carries the reason the model gave at the
+    time (P0.4's "为什么放这里"): the slot's entry in the originating
+    recommendation's candidate list. A manual placement has none, and its
+    ``reason`` stays empty.
+    """
     await _load_item(db, item_id=item_id, home_id=actor.home_id)
     paths = await _slot_paths(db, home_id=actor.home_id)
     rows = await get_item_placements(db=db, home_id=actor.home_id, item_id=item_id)
+    reasons = await _placement_reasons(db, rows)
     return [
         ItemPlacementView(
             id=row["id"],
@@ -481,6 +523,7 @@ async def list_item_placements(
             placed_at=row["placed_at"],
             removed_at=row.get("removed_at"),
             note=row.get("note"),
+            reason=reasons.get(row["id"], ""),
         )
         for row in rows
     ]
@@ -501,6 +544,10 @@ async def list_item_candidates(
     Same pure functions the agent uses, so the result is exactly the ranked
     list the LLM would be shown — useful for debugging a recommendation and
     for a UI that wants candidates without paying for a model call.
+
+    Slots the user has rejected for this item are dropped here too (P0.4), so
+    this endpoint agrees with the agent's own FILTER step. Every candidate
+    carries a deterministic Chinese ``reason`` built by the ranker.
     """
     item = await _load_item(db, item_id=item_id, home_id=actor.home_id)
     slots = await get_storage_slots(db=db, home_id=actor.home_id)
@@ -511,6 +558,9 @@ async def list_item_candidates(
     history = await get_item_placements(
         db=db, home_id=actor.home_id, item_id=item_id
     )
+    excluded = await get_rejected_slot_ids(
+        db=db, home_id=actor.home_id, item_id=item_id
+    )
 
     item_dict = {
         "id": str(item.id),
@@ -519,7 +569,11 @@ async def list_item_candidates(
         "estimated_size": item.estimated_size,
         "is_sensitive": item.is_sensitive,
     }
-    generated = generate_candidates(slots, item_dict)
+    generated = [
+        c
+        for c in generate_candidates(slots, item_dict)
+        if uuid.UUID(str(c["id"])) not in excluded
+    ]
     filtered = hard_filter(
         generated,
         item=item_dict,

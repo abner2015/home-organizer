@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.enums import PlacementSource
-from app.models import ItemPlacement
+from app.models import AgentTrace, ItemPlacement, Recommendation
 
 pytestmark = pytest.mark.asyncio
 
@@ -278,6 +278,132 @@ async def test_candidates_unknown_item_is_404(
         f"/api/v1/items/{uuid.uuid4()}/candidates", headers=seeded_actor.headers()
     )
     assert resp.status_code == 404
+
+
+# ------------------------------------------------- reasons + feedback (P0.4)
+
+
+async def test_ai_placement_carries_a_reason_and_manual_one_is_blank(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """The item page's 「为什么放这里」 comes from the placement's originating
+    recommendation — a manual placement has nothing to explain."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    ai_slot = storage_hierarchy.slots["L1S1"]
+    manual_slot = storage_hierarchy.slots["L1S2"]
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async with factory() as session:
+        trace = AgentTrace(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            item_id=cup_id,
+            steps=[],
+            final_status="success",
+            total_duration_ms=1,
+        )
+        session.add(trace)
+        await session.flush()
+        rec = Recommendation(
+            item_id=cup_id,
+            agent_trace_id=trace.id,
+            candidates=[
+                {
+                    "slot_id": str(ai_slot),
+                    "confidence": 0.9,
+                    "reason": "马克杯放在厨房吊柜第1层",
+                    "matched_rules": [],
+                    "evidence_item_ids": [],
+                }
+            ],
+            chosen_slot_id=ai_slot,
+            status="accepted",
+        )
+        session.add(rec)
+        await session.flush()
+        session.add_all(
+            [
+                ItemPlacement(
+                    item_id=cup_id,
+                    slot_id=ai_slot,
+                    source=PlacementSource.AI_RECOMMENDATION.value,
+                    recommendation_id=rec.id,
+                    placed_by=seeded_actor.user_id,
+                ),
+                ItemPlacement(
+                    item_id=cup_id,
+                    slot_id=manual_slot,
+                    source=PlacementSource.USER_MANUAL.value,
+                    placed_by=seeded_actor.user_id,
+                ),
+            ]
+        )
+        await session.commit()
+
+    resp = api_client.get(
+        f"/api/v1/items/{cup_id}/placements", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 200, resp.text
+    rows = {r["source"]: r for r in resp.json()}
+    assert rows[PlacementSource.AI_RECOMMENDATION.value]["reason"] == (
+        "马克杯放在厨房吊柜第1层"
+    )
+    assert rows[PlacementSource.USER_MANUAL.value]["reason"] == ""
+
+
+async def test_candidates_endpoint_excludes_a_rejected_slot(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """The no-LLM candidate route shares the agent's exclusion set."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    rejected = storage_hierarchy.slots["L1S1"]
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        trace = AgentTrace(
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            item_id=cup_id,
+            steps=[],
+            final_status="success",
+            total_duration_ms=1,
+        )
+        session.add(trace)
+        await session.flush()
+        session.add(
+            Recommendation(
+                item_id=cup_id,
+                agent_trace_id=trace.id,
+                candidates=[{"slot_id": str(rejected), "reason": ""}],
+                chosen_slot_id=rejected,
+                status="rejected",
+            )
+        )
+        await session.commit()
+
+    resp = api_client.get(
+        f"/api/v1/items/{cup_id}/candidates", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert str(rejected) not in [c["slot_id"] for c in body["final_candidates"]]
+    # Every remaining candidate still explains itself (P0.4).
+    for c in body["final_candidates"]:
+        assert c["reason"]
+
+
+async def test_candidates_endpoint_fills_a_reason_for_every_row(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    cup_id = storage_hierarchy.items["马克杯"]
+    resp = api_client.get(
+        f"/api/v1/items/{cup_id}/candidates", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 200, resp.text
+    for c in resp.json()["final_candidates"]:
+        assert c["reason"]
+        assert any("\u4e00" <= ch <= "\u9fff" for ch in c["reason"])
+        assert not any("A" <= ch <= "z" for ch in c["reason"])
 
 
 # ------------------------------------------------------------------------ auth

@@ -38,6 +38,7 @@ from app.models import Item, ItemPlacement, Recommendation
 from app.tools.write_tools import (
     _create_placement,
     _ensure_slot_in_home,
+    record_preferred_slot,
 )
 
 # --------------------------------------------------------------------------- value objects
@@ -156,6 +157,11 @@ async def accept_recommendation(
     ``user_manual`` if the row was PATCHed before accept, else
     ``ai_recommendation``.
 
+    Accepting is also a *positive signal* (P0.4): it reinforces
+    ``rec.chosen_slot_id`` for items of the same category. The preference write
+    is flushed inside the same transaction as the placement and the status
+    flip.
+
     Raises:
         NotFoundError: recommendation not found or wrong home.
         ConflictError: recommendation is not in ``pending`` status.
@@ -194,6 +200,16 @@ async def accept_recommendation(
         ),
         note=note,
     )
+    # Positive feedback: the user's actual choice (post-PATCH) is reinforced
+    # for items of the same category. Flush-level — the single commit below
+    # keeps placement + status + preference atomic.
+    await record_preferred_slot(
+        db=db,
+        user_id=user_id,
+        home_id=home_id,
+        item_id=rec.item_id,
+        slot_id=rec.chosen_slot_id,
+    )
     rec.status = RecommendationStatus.ACCEPTED.value
     await _supersede_previous_pending(db, rec.item_id, rec.id)
     await db.commit()
@@ -222,6 +238,9 @@ async def place_item(
     "resolve" a pending AI suggestion, which the user may still accept or
     reject afterwards (accepting then closes this manual placement).
 
+    It does count as positive feedback (P0.4) — the user picked this slot by
+    hand, which is at least as strong a signal as accepting a suggestion.
+
     Raises:
         NotFoundError: item or slot missing, or owned by another home.
         ValidationFailedError: source not a known PlacementSource.
@@ -234,6 +253,13 @@ async def place_item(
         slot_id=slot_id,
         source=PlacementSource.USER_MANUAL.value,
         note=note,
+    )
+    await record_preferred_slot(
+        db=db,
+        user_id=user_id,
+        home_id=home_id,
+        item_id=item_id,
+        slot_id=slot_id,
     )
     await db.commit()
     await db.refresh(placement)
@@ -271,7 +297,13 @@ async def reject_recommendation(
     home_id: uuid.UUID,
     note: str | None = None,
 ) -> RejectOutcome:
-    """Mark the recommendation ``rejected``. No placement is created."""
+    """Mark the recommendation ``rejected``. No placement is created.
+
+    ``chosen_slot_id`` is deliberately **left in place**: the rejected row *is*
+    the record of "the user vetoed this slot for this item", and the next
+    recommendation derives its exclusion set from it (P0.4). Nothing is written
+    here — the veto takes effect when the pipeline reads it back.
+    """
     rec = await _load_recommendation_in_home(db, recommendation_id, home_id)
     await _ensure_pending(rec)
     if note is not None:

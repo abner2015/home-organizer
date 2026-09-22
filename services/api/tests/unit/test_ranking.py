@@ -11,7 +11,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.agents.ranking import _CATEGORY_ROOM_TYPES, deterministic_score, rank_slots
+from app.agents.ranking import (
+    _CATEGORY_ROOM_TYPES,
+    _WEIGHTS,
+    deterministic_score,
+    rank_slots,
+    score_terms,
+)
 
 
 def _slot(
@@ -136,3 +142,92 @@ def test_rank_slots_discriminates_where_it_used_to_be_flat() -> None:
     ranked = rank_slots(slots, item=item, preferences=[], history=[], soft_rules=[])
     assert ranked[0]["full_path"] == "厨房/吊柜/第1层/S-1"
     assert len({r["det_score"] for r in ranked}) > 1
+
+
+# ------------------------------------------------------------- preference (P0.4)
+
+
+def _pref(slot_id: str, category: str, count: int = 1) -> dict[str, Any]:
+    return {"value": {"slots": {slot_id: {"category": category, "count": count}}}}
+
+
+def test_preference_boost_is_exactly_ten() -> None:
+    item = _item("utensil")
+    liked = _slot(room_type="kitchen", path="厨房/吊柜/第1层/S-1", slot_id="a")
+    other = _slot(room_type="kitchen", path="厨房/吊柜/第1层/S-2", slot_id="b")
+    prefs = [_pref("a", "utensil")]
+    liked_score = deterministic_score(
+        liked, item=item, preferences=prefs, history=[], soft_rules=[]
+    )
+    other_score = deterministic_score(
+        other, item=item, preferences=prefs, history=[], soft_rules=[]
+    )
+    assert liked_score - other_score == 10
+
+
+def test_preference_does_not_boost_a_different_category() -> None:
+    """Accepting a mug's slot must not push medicine into that same drawer."""
+    item = _item("medicine")
+    slot = _slot(room_type="kitchen", path="厨房/吊柜/第1层/S-1", slot_id="a")
+    boosted = deterministic_score(
+        slot, item=item, preferences=[_pref("a", "utensil")], history=[], soft_rules=[]
+    )
+    baseline = deterministic_score(
+        slot, item=item, preferences=[], history=[], soft_rules=[]
+    )
+    assert boosted == baseline
+
+
+def test_preference_with_no_stored_category_matches_any_item() -> None:
+    item = _item("medicine")
+    slot = _slot(room_type="kitchen", path="厨房/吊柜/第1层/S-1", slot_id="a")
+    boosted = deterministic_score(
+        slot, item=item, preferences=[_pref("a", "")], history=[], soft_rules=[]
+    )
+    baseline = deterministic_score(
+        slot, item=item, preferences=[], history=[], soft_rules=[]
+    )
+    assert boosted - baseline == 10
+
+
+def test_legacy_preferred_slot_ids_shape_is_still_honoured() -> None:
+    item = _item("utensil")
+    slot = _slot(room_type="kitchen", path="厨房/吊柜/第1层/S-1", slot_id="a")
+    legacy = [{"value": {"preferred_slot_ids": ["a"]}}]
+    assert deterministic_score(
+        slot, item=item, preferences=legacy, history=[], soft_rules=[]
+    ) - deterministic_score(
+        slot, item=item, preferences=[], history=[], soft_rules=[]
+    ) == 10
+
+
+def test_score_equals_the_weighted_sum_of_its_terms() -> None:
+    """The reason builder reads ``score_terms``; the sum must reproduce the
+    score exactly or the explanation would not match the ranking."""
+    item = _item("utensil")
+    slot = _slot(
+        room_type="kitchen",
+        path="厨房/吊柜/第1层/S-1",
+        allowed_categories=["utensil"],
+    )
+    prefs = [_pref("厨房/吊柜/第1层/S-1", "utensil")]
+    history = [{"slot_id": "厨房/吊柜/第1层/S-1"}]
+    terms = score_terms(
+        slot, item=item, preferences=prefs, history=history, soft_rules=[]
+    )
+    assert deterministic_score(
+        slot, item=item, preferences=prefs, history=history, soft_rules=[]
+    ) == sum(_WEIGHTS[k] * v for k, v in terms.items())
+
+
+def test_every_ranked_row_carries_a_chinese_reason() -> None:
+    item = _item("food", name="空气炸锅")
+    slots = [
+        _slot(room_type="kitchen", path="厨房/吊柜/第1层/S-1"),
+        _slot(room_type="living", path="客厅/装饰柜/第1层/S-1"),
+    ]
+    ranked = rank_slots(slots, item=item, preferences=[], history=[], soft_rules=[])
+    for row in ranked:
+        assert row["reason"]
+        assert "空气炸锅" in row["reason"]
+        assert not any("A" <= ch <= "z" for ch in row["reason"])

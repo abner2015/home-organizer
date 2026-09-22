@@ -158,7 +158,14 @@ class PaginatedItemsView(BaseModel):
 
 
 class ItemPlacementView(BaseModel):
-    """One row of an item's placement history, with its slot path."""
+    """One row of an item's placement history, with its slot path.
+
+    ``reason`` is the "为什么放这里" text (P0.4). It is populated for a placement
+    that came from an AI recommendation — the reason recorded on that
+    recommendation's candidate. A manual placement has nothing to explain and
+    leaves it empty, which is why the field defaults to ``""`` rather than
+    being required.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -170,6 +177,7 @@ class ItemPlacementView(BaseModel):
     placed_at: str
     removed_at: str | None = None
     note: str | None = None
+    reason: str = Field(default="", max_length=512)
 
 
 class PlaceItemRequest(BaseModel):
@@ -190,8 +198,10 @@ class PlaceItemRequest(BaseModel):
 class CandidateListResponse(BaseModel):
     """``GET /items/{id}/candidates`` — the deterministic pre-LLM view.
 
-    No DECIDE step runs, so there is no ``chosen`` candidate and no reason
-    text; callers get the ranked list plus the filter counts.
+    No DECIDE step runs, so there is no *chosen* candidate — callers get the
+    ranked list plus the filter counts. Each candidate still carries a
+    ``reason``: since it is built by the ranker rather than the model, it is
+    available without an LLM call at all.
     """
 
     model_config = ConfigDict(extra="forbid")
