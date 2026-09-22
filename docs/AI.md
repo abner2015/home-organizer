@@ -62,6 +62,7 @@ class AIProvider(Protocol):
         prompt: str,
         schema: type[BaseModel],
         *,
+        image_url: str | None = None,   # P0.2：一次调用可以带一张图
         timeout_s: float = 30.0,
     ) -> BaseModel: ...
 
@@ -85,6 +86,15 @@ class AIProvider(Protocol):
   也可以是 `data:` URI。当前生产路径用 `data:` URI（见 §6.4），因为远端模型 fetch 不到家里的对象存储。
 - `structured_output` 是通用逃生口：`search`、`infer`、结构提议都走它，而不是给每个任务
   在 Protocol 上加一个方法。
+- **`structured_output` 的 `image_url` 是 P0.2 加的（2026-09-22）。** 此前它只收纯文本
+  `prompt` 且写死 `chat_model`，所以"拍照即建模"根本无法实现 —— 设计稿说的"拍照支路只是
+  Step 1 不同"是错的，图片要进**同一次**调用就必须扩 Protocol。契约：
+  - 非空 ⇒ 用 `vision_model` + 多模态 content（`openai_compatible` 复用
+    `_build_vision_body`；`anthropic` 用 image block）。
+  - `None`（缺省）⇒ 请求与 P0.2 之前**逐字节相同**，所以 `rank_candidates` 等既有调用点
+    一个字都不用改。
+  - **带图必须换模型**：文本模型收到图片会 400。`mock` 记录 `last_model` / `last_image_url`，
+    测试据此断言拍照支路真的走了视觉模型。
 - 候选列表保证是**白名单**：LLM 只能从中选，不能编造新 slot_id。
 - Provider 选择由 `AI_PROVIDER` 环境变量绑定，`app/ai/factory.py:get_provider()` 是 `lru_cache` 单例
   （测试用 `reset_provider()` 清缓存）。

@@ -2,8 +2,9 @@
 
 > FastAPI，OpenAPI 自动生成。所有路径以 `/api/v1` 开头。
 >
-> 最后更新：2026-09-21 —— 补实现状态总览（§0），订正 4 处与代码不符的事实
-> （recommend 路径、accept 请求体、adjust 端点已废弃、object_key 前缀）。
+> 最后更新：2026-09-22 —— §3–§5 的写接口随 P0.2 落地，§7 补 `POST /structures/propose`。
+> （上一版 2026-09-21：补实现状态总览（§0），订正 4 处与代码不符的事实
+> —— recommend 路径、accept 请求体、adjust 端点已废弃、object_key 前缀。）
 
 ---
 
@@ -18,14 +19,14 @@
 | 节 | 内容 | 状态 |
 | --- | --- | --- |
 | §2 认证 | signup / login / refresh / me | ✅ |
-| §3 家庭 | `GET /homes`、`GET /homes/{id}` | ✅ 读 |
-| | 创建 home、改名、加 / 移除成员 | ⏳ P0.2（成员管理未排期） |
+| §3 家庭 | `GET /homes`、`GET /homes/{id}`、**`PATCH /homes/{id}`（改名，仅 owner）** | ✅ |
+| | 创建 home、加 / 移除成员 | ⏳ 未排期（成员管理） |
 | §4 房间 | `GET /homes/{id}/rooms`、`GET /rooms/{id}/storage-units` | ✅ 读 |
-| | 创建 / 编辑 / 删除 room | ⏳ P0.2 |
+| | **`POST /homes/{id}/rooms`、`PATCH`/`DELETE /rooms/{id}`** | ✅ 写（P0.2） |
 | §5 存储 | `GET /homes/{id}/space-tree`、`GET /homes/{id}/slots` | ✅ 读 |
-| | 创建 / 编辑 / 删除 unit / section / slot | ⏳ P0.2 |
+| | **`POST`/`PATCH`/`DELETE` unit / section / slot** | ✅ 写（P0.2） |
 | §6 物品 | presign、assets、files、items（创建 / 查询 / 改 / placements / candidates）、recognize | ✅ |
-| §7 AI | vision、infer、recommend、accept、reject、PATCH、search | ✅ |
+| §7 AI | vision、infer、recommend、accept、reject、PATCH、search、**`POST /structures/propose`** | ✅ |
 | | ~~`/recommendations/{recId}/adjust`~~ | ❌ **已废弃**，见 §7 |
 | §8 摆放 | `POST /placements`（直接落位，不经 LLM） | ⏳ P0.3「反向录入」 |
 | §9 规则与偏好 | 规则 / 偏好的 CRUD | 📋 设计稿 |
@@ -33,8 +34,12 @@
 | §11 请求示例 | —— | ✅ 已订正 |
 | §12 版本与兼容 | —— | —— |
 
-**当前最大的缺口是 §3–§5 的写接口**（P0.2）：没有它们，新账号的家是一棵空树，
-推荐永远候选为空。详见 `docs/PRD.md` §2.2 旅程 A。
+**§3–§5 的写接口已于 2026-09-22 随 P0.2 落地**（`app/api/v1/structure.py` +
+`app/services/structure_service.py`）。在此之前新账号的家是一棵空树、推荐永远候选为空
+（详见 `docs/PRD.md` §2.2 旅程 A）；现在用户可以在浏览器里从零搭出第一个 slot。
+
+**仍未实现的 §3 写接口**：`POST /homes` 与成员管理。注册时自动 provision 一个「我的家」
+（见 §2），所以当前没有任何接口需要创建 home。
 
 ---
 
@@ -151,18 +156,20 @@ GET /api/v1/items?page=1&page_size=20
 
 ## 3. 家庭与成员
 
-> **已实现（2026-09-21）**：`GET /homes`、`GET /homes/{homeId}`、
+> **已实现（2026-09-21 读 / 2026-09-22 写）**：`GET /homes`、`GET /homes/{homeId}`、
 > `GET /homes/{homeId}/rooms`、`GET /homes/{homeId}/space-tree`、
-> `GET /homes/{homeId}/slots`、`GET /rooms/{roomId}/storage-units`。
-> 本节其余接口（创建 home、改名、加成员、建房间/柜子/层/格）**仍是设计稿，尚未实现** ——
-> 当前没有 Home 创建接口，所以注册时自动 provision 一个（见 §2），而收纳结构只能通过 seed 建立。
-> 这正是 P0.2「拍照即建模」要补的口子。
+> `GET /homes/{homeId}/slots`、`GET /rooms/{roomId}/storage-units`（读，`app/api/v1/homes.py`），
+> 加上 P0.2 的 `PATCH /homes/{homeId}`、`POST /homes/{homeId}/rooms`、
+> `PATCH`/`DELETE /rooms/{roomId}`（写，`app/api/v1/structure.py`）。
+> **仍未实现**：`POST /homes`、成员管理 —— 分别见下方标注。
 
 ### GET /api/v1/homes
 
 返回当前用户所属的 Home 列表。**不需要 `X-Home-Id`** —— 它的职责恰恰是告诉你该选哪个 home。
 
-### POST /api/v1/homes
+### POST /api/v1/homes ⏳
+
+> **尚未实现。** 注册时自动 provision 一个 home（见 §2），当前没有创建 home 的路径。
 
 ```json
 { "name": "我的家", "timezone": "Asia/Shanghai" }
@@ -174,15 +181,22 @@ GET /api/v1/items?page=1&page_size=20
 
 详情 + 当前用户的角色 + 房间数 + 物品数 + 规则数。
 
-### PATCH /api/v1/homes/{homeId}
+### PATCH /api/v1/homes/{homeId} ✅
 
 ```json
+// request（仅 name，extra="forbid"）
 { "name": "新名字" }
+// response 200
+{ "id": "uuid", "name": "新名字", "timezone": "Asia/Shanghai", "owner_id": "uuid" }
 ```
 
-仅 owner。
+**仅 owner**。这是全代码库里唯一返回 **403** 的业务接口：非成员仍由 `get_actor` 拦成 404
+（见 §1.2），403 留给「确实在这个家里，但不是管理员」。现实中注册者即 owner、
+且成员管理未实现，所以这条分支目前只在测试里走到。
 
-### POST /api/v1/homes/{homeId}/members
+### POST /api/v1/homes/{homeId}/members ⏳
+
+> **尚未实现（未排期）。**
 
 ```json
 { "email": "bob@example.com", "role": "member" }
@@ -190,7 +204,9 @@ GET /api/v1/items?page=1&page_size=20
 
 仅 owner；自动给对方账号发邀请（第一版：如果对方无账号，返回"待注册链接"）。
 
-### DELETE /api/v1/homes/{homeId}/members/{userId}
+### DELETE /api/v1/homes/{homeId}/members/{userId} ⏳
+
+> **尚未实现（未排期）。**
 
 仅 owner；不能移除自己。
 
@@ -198,7 +214,7 @@ GET /api/v1/items?page=1&page_size=20
 
 ## 4. 房间
 
-### GET /api/v1/homes/{homeId}/rooms
+### GET /api/v1/homes/{homeId}/rooms ✅
 
 ```json
 [
@@ -206,72 +222,139 @@ GET /api/v1/items?page=1&page_size=20
 ]
 ```
 
-### POST /api/v1/homes/{homeId}/rooms
+### POST /api/v1/homes/{homeId}/rooms ✅
 
 ```json
-{ "name": "厨房", "room_type": "kitchen" }
+// request（extra="forbid"）
+{ "name": "厨房", "room_type": "kitchen", "sort_order": null }
+// response 201
+{ "id": "uuid", "name": "厨房", "room_type": "kitchen", "sort_order": 0, "unit_count": 0 }
 ```
 
-### PATCH /api/v1/rooms/{roomId}
+**新家第一个房间就走这个接口** —— P0.2 之前没有任何路径能创建 room。
+`sort_order` 省略时取同家 `max + 1`（不是 0，否则树序退化成按名字排）。
+`room_type` 取值见 `app/db/enums.py:RoomType`（`bedroom`/`kitchen`/`bathroom`/`study`/
+`living`/`storage`/`other`）；传中文（`"厨房"`）→ **422**，不是 500。
 
-### DELETE /api/v1/rooms/{roomId}
+### PATCH /api/v1/rooms/{roomId} ✅
 
-禁止：房间下还有 storage unit。
+稀疏 PATCH：只改请求里出现的字段。可改 `name` / `room_type` / `sort_order`。
+响应是带真实 `unit_count` 的 `RoomView`。
+
+### DELETE /api/v1/rooms/{roomId} ✅
+
+成功 **204**；**房间下还有 storage unit → 409**：
+
+```json
+{ "error": { "code": "conflict", "message": "该房间下还有 2 件收纳家具，不能删除",
+             "details": { "unit_count": 2 } } }
+```
+
+逐级删除，不级联 —— 每一级用自己那句话拒绝，而不是默默扔掉整棵子树。
 
 ---
 
 ## 5. 存储（Unit / Section / Slot）
 
-### GET /api/v1/rooms/{roomId}/storage-units
+四级 create 都返回 **201** + 对应的 Phase 10 view（`RoomView` / `StorageUnitView` /
+`StorageSectionView` / `StorageSlotView`），形状与 `GET /space-tree` 里的节点一致。
+父级不存在或**属于别的家 → 404**（不是 403，见 §1.2）。
 
-### POST /api/v1/rooms/{roomId}/storage-units
+### GET /api/v1/rooms/{roomId}/storage-units ✅
+
+### POST /api/v1/rooms/{roomId}/storage-units ✅
 
 ```json
-{ "name": "衣柜 A", "unit_type": "cabinet" }
+// request（extra="forbid"）
+{ "name": "衣柜 A", "unit_type": "cabinet", "description": null, "sort_order": null }
+// response 201
+{ "id": "uuid", "name": "衣柜 A", "unit_type": "cabinet",
+  "description": null, "sort_order": 0, "sections": [] }
 ```
 
-### GET /api/v1/storage-units/{unitId}
+`unit_type` ∈ `cabinet` / `shelf` / `drawer_cabinet` / `box` / `other`（`app/db/enums.py`）。
+
+### GET /api/v1/storage-units/{unitId} ⏳
+
+> **尚未实现。** 需要详情时用 `GET /homes/{homeId}/space-tree`（一次拉全）。
 
 详情（含 sections）。
 
-### PATCH /api/v1/storage-units/{unitId}
+### PATCH /api/v1/storage-units/{unitId} ✅
 
-### DELETE /api/v1/storage-units/{unitId}
+可改 `name` / `unit_type` / `description` / `sort_order`。响应含真实 `sections`。
 
-禁止：unit 下还有 section。
+### DELETE /api/v1/storage-units/{unitId} ✅
 
-### POST /api/v1/storage-units/{unitId}/sections
+成功 **204**；**unit 下还有 section → 409**（`details.section_count`）。
+
+### POST /api/v1/storage-units/{unitId}/sections ✅
 
 ```json
-{ "name": "第二层", "section_type": "layer" }
+// request（extra="forbid"）
+{ "name": "第二层", "section_type": "layer", "sort_order": null }
 ```
 
-### GET /api/v1/sections/{sectionId}
+`section_type` ∈ `layer` / `drawer` / `box` / `compartment` / `other`。
+
+### GET /api/v1/sections/{sectionId} ⏳
+
+> **尚未实现。** 同上，用 `GET /homes/{homeId}/space-tree`。
 
 详情（含 slots）。
 
-### PATCH /api/v1/sections/{sectionId}
+### PATCH /api/v1/sections/{sectionId} ✅
 
-### DELETE /api/v1/sections/{sectionId}
+可改 `name` / `section_type` / `sort_order`。响应含真实 `slots`。
 
-禁止：section 下还有 slot。
+### DELETE /api/v1/sections/{sectionId} ✅
 
-### POST /api/v1/sections/{sectionId}/slots
+成功 **204**；**section 下还有 slot → 409**（`details.slot_count`）。
+
+### POST /api/v1/sections/{sectionId}/slots ✅
 
 ```json
+// request（extra="forbid"）
 {
   "code": "A-2-1",
   "label": "左侧",
   "capacity_hint": "small / 衣物",
-  "allowed_categories": ["衣物"]
+  "allowed_categories": ["衣物"],
+  "sort_order": null
 }
+// response 201
+{ "id": "uuid", "code": "A-2-1", "label": "左侧",
+  "capacity_hint": "small / 衣物", "allowed_categories": ["衣物"],
+  "sort_order": 0, "active_count": 0 }
 ```
 
-### PATCH /api/v1/slots/{slotId}
+- **`capacity_hint` 是自由文本，不是枚举。** `app/verification/checks.py:_parse_capacity` 与
+  `app/agents/candidate_gen.py:_parse_capacity` 都刻意解析中文（小/中/大/少量/中等/大量）
+  **和裸数字**（数字直接当容量个数用），所以 `"6"` 是合法且被支持的值。收成
+  `Literal["small","medium","large"]` 会让 API 表达不出这个能力。
+  （只有 **AI 侧** 的 `ProposedSlot.capacity_hint` 用 Literal —— 那是模型的输出契约。）
+- `(section_id, code)` 唯一；**同分区内重复 code → 409**（预检，不靠捕获唯一索引的
+  `IntegrityError`）。`details.code` 回带冲突的 code。
+- `code` ≤50、`name`/`description`/`capacity_hint` ≤100、`label` ≤200。
 
-### DELETE /api/v1/slots/{slotId}
+### PATCH /api/v1/slots/{slotId} ✅
 
-禁止：slot 上有 active placement。
+可改 `code` / `label` / `capacity_hint` / `allowed_categories` / `sort_order`。
+改 `code` 时会重新做唯一性预检。
+
+### DELETE /api/v1/slots/{slotId} ✅
+
+成功 **204**；**只要该 slot 上有任何 placement 记录（含已 removed）→ 409**：
+
+```json
+{ "error": { "code": "conflict", "message": "该收纳位上还有物品记录，不能删除",
+             "details": { "active_count": 1, "historical_count": 2 } } }
+```
+
+**为什么不只拦 active**：`item_placements.slot_id` 是 `ondelete="RESTRICT"`
+（`app/models/placement.py`），数据库约束不管那条 placement 后来是否 removed。
+只数 active 的话应用层检查会通过、`DELETE` 再抛 `IntegrityError` → **500**。
+历史也是一种保留位置的理由，所以两个数目分开给，UI 才能说清「该位置有 2 条历史记录」。
 
 ### GET /api/v1/homes/{homeId}/space-tree
 
@@ -615,6 +698,70 @@ PATCH 之后 `status` 仍是 `pending` —— 直到 accept 才落 `ItemPlacemen
 
 `status = rejected`；`note` 记录拒绝原因（`P0.4` 会把这条反馈回灌到偏好）。
 
+### POST /api/v1/structures/propose ✅ P0.2
+
+「拍照即建模」的入口：把一张照片 / 一句话交给 AI，拿回一份**结构提议**，
+用户确认后由 §3–§5 的普通写接口逐节点落库。
+
+```json
+// request（extra="forbid"；两个字段都可以不传）
+{ "asset_id": "uuid?", "description": "我家厨房有个三层吊柜" }
+```
+
+| 传入 | `source` | 行为 |
+| --- | --- | --- |
+| `asset_id`（+ 可选 `description` 当提示） | `photo` | 图片内联成 `data:` URI 随同一次调用送给 **vision model** |
+| 只有 `description` | `text` | 纯文本一次 LLM 调用 |
+| 都不传 | `template` | **完全不调 LLM**，返回服务端模板提议（零成本兜底） |
+
+```json
+// response 200
+{
+  "proposal": {
+    "rooms": [
+      { "name": "厨房", "room_type": "kitchen",
+        "units": [
+          { "name": "吊柜", "unit_type": "cabinet",
+            "sections": [
+              { "name": "第1层", "section_type": "layer",
+                "slots": [ { "code": "K1", "label": "左侧",
+                             "allowed_categories": ["utensil"],
+                             "capacity_hint": "medium" } ] } ] } ] } ],
+    "rationale": "描述里提到厨房的三层吊柜",
+    "confidence": 0.8
+  },
+  "warnings": [],
+  "source": "text",
+  "trace_id": "uuid"
+}
+```
+
+- **不落库。** 四张存储表（`rooms` / `storage_units` / `storage_sections` / `storage_slots`）
+  一行都不写；唯一副作用是一行 `AgentTrace`（`template` 支连这个也没有，`trace_id = null`）。
+  这条有测试断言四表行数 + `agent_traces` 恰好 +1（`tests/api/test_structure_proposal_api.py`）。
+- **`warnings` 不是装饰。** Step 4（`app/agents/structure/validate.py`）会**静默改写**模型输出
+  —— 超限截断、丢掉同分区内重复的 `code`、清掉不在用户词表里的 `allowed_categories`
+  —— 不告诉用户，就等于让他确认一份和模型说的不一样的东西。`kind` 是封闭集合：
+
+  | `kind` | 含义 |
+  | --- | --- |
+  | `truncated` | 某个列表超产品上限，已截断（6 房间 / 12 柜 / 12 层 / 20 格） |
+  | `duplicate_code` | 同一分区内 `code` 重复，保留先出现的、丢掉后者 |
+  | `category_cleared` | 该类别不在用户家的词表里，已从该格清掉 |
+  | `possible_duplicate` | 与新家既有的 room / unit **重名**（不拒绝，只提示） |
+  | `empty_vocabulary` | 用户家还没有任何类别词表，所以所有 `allowed_categories` 都会被清空 |
+
+- **`empty_vocabulary` 是对的，不是 bug。** 词表 = `item.category` ∪ `slot.allowed_categories`
+  （`app/agents/search/context.py:home_category_vocabulary`）。全新账号两者皆空 ⇒
+  每个格的 `allowed_categories` 都被清空 —— 而 `candidate_gen` 把空列表当「不限制」，
+  所以首轮推荐反而有候选（这正是 P0.2 验收要的 `pre_filter_count > 0`）。
+  若哪天有人「优化」成给新家塞一份默认词表，推荐会在新家上立刻坏掉。
+- 只有**枚举违法**（比如 `room_type` 传中文）才值得重试：那是 `AIOutputParseError`，
+  按 `vision_service` 的策略 parse ×2 / transport ×1；其余一律在这里修掉，不退回给 LLM。
+- **`asset_id` 属于别的家 → 404**（与 §6 的 vision 路径同口径）；provider 失败 → 503。
+- 路径用 `/structures/propose` 而非 `/structure-proposals`：后者暗示存在一张
+  `structure_proposals` 表，而这个设计**明确拒绝了持久化提议**（`docs/AGENT.md` §14.2）。
+
 ---
 
 ## 8. 摆放（Placement）
@@ -691,11 +838,10 @@ PATCH 之后 `status` 仍是 `pending` —— 直到 accept 才落 `ItemPlacemen
 | `bad_request` | 400 | 语义错误：`X-Home-Id` 不是合法 UUID；`image_object_key` 前缀不属于本 home | ✅ |
 | `unauthenticated` | 401 | 缺少 / 失效 token | ✅ |
 | `not_found` | 404 | 资源不存在，**或已认证但不是该 home 的成员** | ✅ |
-| `forbidden` | 403 | 权限不足 | ⚠️ **当前没有路由返回它** |
-| `conflict` | 409 | 唯一约束冲突 / 状态冲突（邮箱已注册） | ✅ |
+| `forbidden` | 403 | 权限不足（**仅** `PATCH /homes/{id}` 非 owner） | ✅ P0.2 |
+| `conflict` | 409 | 状态冲突：邮箱已注册、删节点时有子级、slot 上有 placement 记录、同分区重复 `code` | ✅ |
 | `presign_unsupported` | 409 | `STORAGE_BACKEND=local` 下调 `POST /uploads/presign` | ✅ |
 | `rule_violation` | 422 | 硬规则被违反 | ✅（经 `verifier_failed`） |
-| `slot_in_use` | 409 | 删除 slot 时有 active placement | ⏳ P0.2 |
 | `item_in_use` | 409 | 删除 item 时有 active placement | ⏳ 未排期 |
 | `verifier_failed` | 422 | AI 推荐无法满足硬规则 | ✅ |
 | `ai_provider_unavailable` | 503 | AI 服务不可用 | ✅ |
@@ -705,7 +851,9 @@ PATCH 之后 `status` 仍是 `pending` —— 直到 accept 才落 `ItemPlacemen
 
 > **`forbidden` / 403 与跨 home 访问无关。** 访问别人的 home 返回 **404**（§1.2）——
 > 403 等于承认"这个家存在但不属于你"，这本身就是不该泄露的信息。
-> 表里保留 `forbidden` 只是为了未来的"同一 home 内权限细分"（如 member 改规则），当前无人返回它。
+> 403 只用于「**确实在这个家里，但角色不够**」：目前唯一一处是 `PATCH /homes/{id}`
+> 改名（成员非 owner）。删除 slot 的 409 用的是 `conflict`（`details` 里给
+> `active_count` / `historical_count`），不是历史上的 `slot_in_use`。
 
 ---
 

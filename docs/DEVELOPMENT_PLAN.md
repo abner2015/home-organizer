@@ -23,8 +23,8 @@
 | 计划稿 Phase 0–13 | 本文件原稿 | **开工前的设想**，与实际交付顺序不同 |
 
 **归一结论：以项目史编号为准。** 上篇按项目史列已交付批次，并附「对应计划稿 Phase」做交叉引用；
-原稿里唯一仍然重要的一条计划稿内容 —— **「家庭空间 CRUD」** —— 从未交付，它不是历史，
-**它就是 P0.2 的缺口本身**，已移入下篇。
+原稿里唯一仍然重要的一条计划稿内容 —— **「家庭空间 CRUD」** —— 在 Phase 1–13 期间从未交付，
+它不是历史，**它就是 P0.2 的缺口本身**；现已随 P0.2 补齐（见下篇）。
 
 ---
 
@@ -50,7 +50,7 @@
 
 **当前基线**（任何改动都不得使其上升/下降）：
 
-- `services/api`：**534 passed / 1 skipped**
+- `services/api`：**600 passed / 1 skipped**
 - `ruff check app/ tests/`：**32**（历史遗留，不得上升）
 - `mypy app/`：**20**（历史遗留，不得上升）
 - `apps/web`：`npx tsc --noEmit` 与 `npx next lint` **干净**
@@ -168,12 +168,13 @@ P0 是「**让一个真人第一次用起来，能走完一遍并觉得有用**�
 
 ```
 P0.1 真实账号 ✅  ──┐
-                    ├──► P0.2 拍照即建模 ──┬──► P0.3 反向录入
-                    │                      └──► P0.4 闭环 + 讲理由
-                    └──► （P0.1 尾巴：token 续期）
+                    ├──► P0.2 拍照即建模 ✅ ──┬──► P0.3 反向录入
+                    │                         └──► P0.4 闭环 + 讲理由
+                    └──► （P0.1 尾巴：token 续期 ✅）
 ```
 
 P0.2 是硬前提：**没有真实的 slot，推荐、反向录入、闭环全都无从谈起。**
+现在这条前提已经成立 —— 全新账号可以在浏览器里从空树搭出第一个可用 slot。
 
 ---
 
@@ -221,28 +222,44 @@ P0.2 是硬前提：**没有真实的 slot，推荐、反向录入、闭环全�
 
 ---
 
-## P0.2 — 拍照即建模 ⏳
+## P0.2 — 拍照即建模 ✅ 已交付（2026-09-22）
 
-**为什么**：目前收纳结构**只能靠 `python -m app.db.seed` 建立** —— 没有任何创建
+**为什么**：此前收纳结构**只能靠 `python -m app.db.seed` 建立** —— 没有任何创建
 room / unit / section / slot 的接口。新注册的账号拿到的是一个空树，于是推荐永远
-`pre_filter_count == 0`。这是产品当前最大的断点：**用户根本没法把自己的家告诉系统。**
+`pre_filter_count == 0`。这是产品当时最大的断点：**用户根本没法把自己的家告诉系统。**
 
 **交付物**
 
-1. **结构写接口**：落地 `docs/API.md` §3–§5 的设计稿 —— rooms / storage-units /
-   sections / slots 的创建、改名、删除。
-   - 删除有子级或有 active placement 的节点 → **409**
-   - 非成员 → **404**（不是 403）—— `AGENTS.md` §3 与 P0.1 已确立的口径
-2. **AI 提议结构 + 用户确认**（`AGENTS.md` §3.3）：AI 可以提议新建房间 / 柜 / 层 / 格，
-   但**必须经用户显式确认才写入数据库**；未确认的提议不得落库。
-3. **Web**：从空树开始搭建空间的最小交互（拍照 / 描述 → AI 提议 → 用户确认 → 落库）。
+1. ✅ **结构写接口**（`app/api/v1/structure.py` + `app/services/structure_service.py`）：
+   rooms / storage-units / sections / slots 的创建、改名、删除；`PATCH /homes/{id}` 改名。
+   - 删除有子级的节点 → **409**；删除 slot 时**只要有任何 placement 记录（含已 removed）**
+     就 409 —— `item_placements.slot_id` 是 `ondelete="RESTRICT"`，只数 active 会让
+     数据库抛 `IntegrityError`（500）。`details` 分开给 `active_count` / `historical_count`。
+   - 非成员 → **404**（不是 403）；`PATCH /homes/{id}` 非 owner → 403（全库唯一一处 403）。
+   - 枚举字段在边界校验（`room_type="厨房"` → 422，不是 DB CHECK 的 500）。
+2. ✅ **AI 提议结构 + 用户确认**（`docs/AGENT.md` §14）：一次 LLM 调用（照片内联成 data URI
+   走 vision model）→ 纯函数校验（`app/agents/structure/validate.py`）→ 用户勾选确认 →
+   普通写接口逐节点落库。**提议本身绝不落库**，唯一副作用是一行 `AgentTrace`；
+   `{}` 空请求走服务端模板，零成本、不调模型。
+3. ✅ **Web**：`/home/setup`（`StructureBuilder` = 提议流 + 手动搭建），空状态 CTA 指向它。
+   提议的每一步改写都通过 `warnings` 告诉用户（截断 / 丢重复 code / 清类别 / 重名 / 空词表）。
 
 **验收**
 
-- [ ] 全新账号能在浏览器里从**空树**建出至少 1 个可用 slot，全程不碰命令行
-- [ ] 未确认的 AI 提议在数据库中**不存在**（有测试断言行数，不靠 code review）
-- [ ] 新建出的 slot 能进入推荐候选（`pre_filter_count > 0`，不再 `state=failed`）
-- [ ] 基线下滑即视为未完成：534 passed / 1 skipped，ruff 32，mypy 20 不上升
+- [x] 全新账号能在浏览器里从**空树**建出至少 1 个可用 slot，全程不碰命令行
+- [x] 未确认的 AI 提议在数据库中**不存在**（`tests/api/test_structure_proposal_api.py`
+      断言四张存储表行数不变、`agent_traces` 恰好 +1）
+- [x] 新建出的 slot 能进入推荐候选（实测 `pre_filter_count = 13`，不再是 `state=failed`）
+- [x] 基线：**600 passed / 1 skipped**，ruff 32，mypy 20 —— 相对上一批只增测试、不增告警
+
+**落地位置**：后端 `app/{api/v1/structure.py, services/structure_service.py,
+services/structure_proposal_service.py, agents/structure/*, schemas/structure.py}`；
+prompt `app/agent/prompts/structure.v1.md`；前端 `apps/web/src/app/home/setup/*`。
+`AIProvider.structured_output` 新增可选 `image_url`（`docs/AI.md` §2）—— 缺省 `None` 时行为
+与改动前逐字节相同，既有调用点零改动。
+
+**本批不做**（留 ⏳）：`POST /homes`、成员管理、`GET /storage-units/{id}` /
+`GET /sections/{id}` 详情路由、`structure_proposals` 持久化、完整的结构编辑器。
 
 ---
 

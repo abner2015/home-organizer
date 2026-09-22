@@ -74,20 +74,23 @@ home-organizer/
 - **后端**：JWT 认证、Home/Room/Unit/Section/Slot 层级、物品 CRUD + 图片上传、
   Vision 识别、9 步推荐 pipeline（含 Verifier + Retry）、自然语言搜索助手（含多轮记忆）、
   可切换存储后端（`STORAGE_BACKEND=local|minio`）。
-- **前端**：`/` 首页、`/login`、`/signup`、`/home`（含 rooms / storage）、`/items`（含详情、新增）、
-  `/recommendations/[id]`、`/assistant`。认证走 cookie + `Authorization: Bearer`，
-  未登录由 `src/middleware.ts` 重定向到 `/login`。
-- **测试基线**：`services/api` 534 passed / 1 skipped；ruff 32 / mypy 20（均为历史遗留，不得上升）；
+- **前端**：`/` 首页、`/login`、`/signup`、`/home`（含 rooms / storage / setup）、
+  `/items`（含详情、新增）、`/recommendations/[id]`、`/assistant`。认证走 cookie +
+  `Authorization: Bearer`，未登录由 `src/middleware.ts` 重定向到 `/login`。
+- **测试基线**：`services/api` 600 passed / 1 skipped；ruff 32 / mypy 20（均为历史遗留，不得上升）；
   `apps/web` 的 `npx tsc --noEmit` 与 `npx next lint` 必须干净。
 
 已知缺口（完整路线图与验收标准见 `docs/DEVELOPMENT_PLAN.md` 下篇「P0 路线图」）：
 
-1. **P0.2 拍照即建模** —— **当前最大的断点**。收纳结构只能靠 `python -m app.db.seed` 建立，
-   没有任何创建 room / unit / section / slot 的接口（见 `docs/API.md` §3 的实现状态注记）。
-   新注册的账号拿到的是空树，于是推荐永远候选为空。交付物含「AI 提议结构 + 用户确认」。
-2. **P0.3 反向录入** —— 已有物品直接落位，不经 LLM。
-3. **P0.4 闭环 + 讲理由** —— 接受 / 拒绝反馈回灌偏好；推荐给出人话理由。
-4. **P0.1 的尾巴** —— `jwt_access_ttl = 3600` 而 web 从不调 `/auth/refresh`，一小时后静默掉线。
+1. **P0.3 反向录入** —— 已有物品直接落位，不经 LLM。
+2. **P0.4 闭环 + 讲理由** —— 接受 / 拒绝反馈回灌偏好；推荐给出人话理由。
+3. **P0.2 的尾巴** —— `POST /homes`、成员管理、`GET /storage-units/{id}` /
+   `GET /sections/{id}` 详情路由、完整的结构编辑器（见 `docs/DEVELOPMENT_PLAN.md` P0.2「本批不做」）。
+
+> **P0.2 拍照即建模 ✅ 已交付（2026-09-22）**：结构写接口
+> （`app/api/v1/structure.py`）+ AI 提议（`POST /api/v1/structures/propose`，
+> `docs/AGENT.md` §14）+ Web `/home/setup`。全新账号现在能在浏览器里从空树搭出第一个
+> 可用 slot，推荐不再恒为 `state=failed`。**曾经的「当前最大断点」已关闭。**
 
 产品层面的定位、核心价值（放 / 理 / 找）、三段旅程、权限模型、使用指引见 `docs/PRD.md` §1–§2。
 

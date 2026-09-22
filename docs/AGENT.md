@@ -483,13 +483,38 @@ class RecommendationState(StrEnum):
 
 ## 14. 结构提议 pipeline（拍照即建模 · P0.2）
 
-> ⏳ **本节是设计，尚未实现。** 它要回答的是当前最致命的一个事实：
+> ✅ **已交付（2026-09-22）。** 它要回答的是当时最致命的一个事实：
 > **收纳结构只能靠 `python -m app.db.seed` 建立。** 没有任何接口能创建
 > room / unit / section / slot，所以新注册账号的家是一棵空树，推荐永远
 > `pre_filter_count == 0`、`state = failed`。用户根本没机会把自己的家告诉系统。
 >
 > 见 `AGENTS.md` §3.3（2026-09-21 修订：AI 可以**提议**结构，但必须用户显式确认才落库）、
 > `docs/PRD.md` §2.2 旅程 A、`docs/DEVELOPMENT_PLAN.md` 下篇 P0.2。
+
+**落地位置**
+
+| 设计稿里的东西 | 代码里对应 |
+| --- | --- |
+| 上下文构造（Step 2） | `app/agents/structure/context.py:build_structure_context` |
+| 提议 prompt（Step 1+3） | `app/agent/prompts/structure.v1.md` |
+| 输出 schema | `app/ai/provider.py:StructureProposalOutput` |
+| 确定性校验（Step 4） | `app/agents/structure/validate.py:validate_proposal` |
+| 零输入模板 | `app/agents/structure/template.py:build_template_proposal` |
+| 编排 + 重试 + trace | `app/services/structure_proposal_service.py:propose_structure` |
+| Step 5 出口 | `POST /api/v1/structures/propose`（`app/api/v1/structure.py`） |
+| Step 6–7 确认与落库 | Web `/home/setup` + 本批的四个写接口 |
+
+**两处设计稿修正（实现时才发现，已按修正后的方案交付）**
+
+- **D1 —— `structured_output` 原本没有图片入参。** 原文 §14.6 说拍照支路「只是 Step 1 不同」，
+  但 `AIProvider.structured_output` 当时只收一个纯文本 `prompt`，且写死用 `chat_model`。
+  照片要进同一次调用，**必须扩 Protocol**：新增可选 `image_url`，非空时改用 `vision_model`
+  与多模态 content。缺省 `None` 让既有调用点（`rank_candidates` 等）一字未改。
+  见 `docs/AI.md` §2。
+- **D4 —— 删 slot 的判据不能只看 active placement。** `ItemPlacement.slot_id` 是
+  `ondelete="RESTRICT"`，对**已 removed** 的行同样生效；按「只有 active 才拦」实现会让应用层
+  检查通过、`DELETE` 抛 `IntegrityError` → 500。现在**任何 placement 记录（含 removed）都 409**，
+  `details` 分开给出 `active_count` / `historical_count`。见 `docs/API.md` §5。
 
 ### 14.1 与推荐 pipeline 的关系
 
@@ -508,17 +533,23 @@ class RecommendationState(StrEnum):
 
 ### 14.2 状态机
 
+设计时的 7 步在实现时**收敛成三件东西**（D2 修正）：Step 1 与 Step 3 合并为**一次** LLM 调用
+（图片随同一次调用走，不是两次往返），Step 2 是一次 DB 读，Step 4 是纯函数，Step 5 是响应，
+Step 6–7 就是本批的普通写接口。**代码里没有 7 值 step 枚举** —— 为一个只有一条路径的线性流程
+建状态机只会多出一份需要同步维护的枚举。
+
 ```
-Step 1  Intake        (LLM)      照片 / 一句话 → 观察到的结构要素
-Step 2  Context       (DB)       该 home 的现有空间树（避免重复提议）
-Step 3  Proposal      (LLM)      → StructureProposalOutput (Pydantic)
-Step 4  Validation    (确定性)   枚举合法性 / 上限 / 重名 / code 去重
-Step 5  Present       (API)      返回给前端 —— **到此为止，不落库**
-Step 6  Confirmation  (用户)     逐项确认 / 改名 / 删掉不存在的 / 补上漏掉的
-Step 7  Materialize   (DB)       只把被确认的节点写成真实的 Room/Unit/Section/Slot
+一次 LLM 调用   (provider.structured_output, 可带 image_url)  → StructureProposalOutput
+一次 DB 读      (build_structure_context)                     → 接地块 + 词表 + 现有名称
+一个纯函数      (validate_proposal)                           → 改写后的提议 + warnings
+一次响应        (POST /structures/propose)                    → **到此为止，不落库**
 ```
 
+对应到设计稿的编号：Step 1+3 = 那次调用，Step 2 = DB 读，Step 4 = 纯函数，Step 5 = 响应，
+Step 6 = Web `/home/setup` 的确认界面，Step 7 = 逐节点调用写接口。
+
 **Step 5 → Step 7 之间没有任何数据库写入。** 提议不是一个资源，它是**一次响应的 payload**。
+（唯一的行是 `AgentTrace`：它记录这次调用发生了什么，不是提议本身。）
 
 > **取舍（需确认）**：代价是提议**不能跨页面刷新保留** —— 用户关掉页面就重新提议一次。
 > 替代方案是建一张 `structure_proposals` 表（`status=pending`）持久化待确认提议，
@@ -531,29 +562,29 @@ Step 7  Materialize   (DB)       只把被确认的节点写成真实的 Room/Un
 ```python
 class ProposedSlot(BaseModel):
     code: str = Field(min_length=1, max_length=32)
-    label: str | None = None
-    allowed_categories: list[str] = Field(default_factory=list)
+    label: str | None = Field(default=None, max_length=200)
+    allowed_categories: list[str] = Field(default_factory=list, max_length=64)
     capacity_hint: Literal["small", "medium", "large"] | None = None
 
 class ProposedSection(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=100)
     section_type: StorageSectionType          # layer | drawer | box | compartment | other
-    slots: list[ProposedSlot] = Field(default_factory=list, max_length=20)
+    slots: list[ProposedSlot] = Field(default_factory=list, max_length=64)
 
 class ProposedUnit(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=100)
     unit_type: StorageUnitType                # cabinet | shelf | drawer_cabinet | box | other
-    sections: list[ProposedSection] = Field(default_factory=list, max_length=12)
+    sections: list[ProposedSection] = Field(default_factory=list, max_length=32)
 
 class ProposedRoom(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=100)
     room_type: RoomType                       # bedroom | kitchen | bathroom | study | living | storage | other
-    units: list[ProposedUnit] = Field(default_factory=list, max_length=12)
+    units: list[ProposedUnit] = Field(default_factory=list, max_length=32)
 
 class StructureProposalOutput(BaseModel):
-    rooms: list[ProposedRoom] = Field(min_length=1, max_length=6)
-    rationale: str
-    confidence: float = Field(ge=0.0, le=1.0)
+    rooms: list[ProposedRoom] = Field(min_length=1, max_length=32)
+    rationale: str = Field(default="", max_length=512)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 ```
 
 - schema 用 `extra="forbid"`，**不用 `strict=True`** —— 同样的教训在 §7.2 已经吃过一次
@@ -562,6 +593,14 @@ class StructureProposalOutput(BaseModel):
   时 Pydantic 当场拒绝并触发 parse-retry，而不是把脏值写进库再炸。
 - **四层深度由 schema 结构本身保证** —— `ProposedSlot` 里没有"再来一层"的字段，
   模型没有地方表达第五层。
+- **上面这些 `max_length` 是「失控保护」，不是产品上限。** 产品上限是 §14.4 的
+  6 / 12 / 12 / 20，由 `validate_proposal` 截断并回报。若把 schema 收到产品上限，
+  模型多写一个柜子就会让 Pydantic 抛错 → parse-retry → 请求失败，
+  而**人只要删掉那一行就好** —— 于是 `truncated` 这条 warning 永远不可达，
+  整个「截断而不整份拒绝」的策略也就无从测起。
+- **`capacity_hint` 只在 AI 侧收成三值。** 写接口那边它是自由文本：`checks._parse_capacity`
+  与 `candidate_gen._parse_capacity` 还认中文（小/中/大/少量/中等/大量）和裸数字
+  （`"6"` 直接当容量个数用）。收窄 API 会让系统刻意支持的一种表达无法输入。
 
 ### 14.4 确定性校验（Step 4）
 
@@ -574,32 +613,56 @@ LLM 的产物在返回给用户**之前**必须过一遍纯代码检查：
 | `code` 唯一性 | 同一 section 内 `code` 不得重复；重复的**丢弃** |
 | `allowed_categories` | 只能取自该 home 的**真实类别词表**；词表外的**清空**（清空＝不限制该 slot），不拒绝 |
 | 与现有结构重名 | 同名 room / unit **不拒绝**，标记为「可能重复」交给用户判断 |
+| 词表本身为空 | 每个 `allowed_categories` 都会被清空 —— 额外发一条 `empty_vocabulary` 说明原因 |
 
 **原则：能在 Step 4 修的就在 Step 4 修，不要退回给 LLM 重跑** —— 只有枚举违法才值得 retry，
 其余都是成本远高于收益的往返。
 
+**五种 warning 都会随响应返回**（`kind` / `path` / `message`），因为 Step 4 是在**静默改写**模型
+的输出：截断、丢弃重复 code、清空类别。不告诉用户，他确认的就是另一份东西。
+
+> **D3 —— 新家的类别词表本来就是空的，这是对的。** 词表 = `item.category` ∪
+> `slot.allowed_categories`（`agents/search/context.py:home_category_vocabulary`）。
+> 一个刚注册的家两者皆空，于是 Step 4 会清空**所有** `allowed_categories`。
+> 这**不是 bug**：`candidate_gen._category_matches` 把 `[]` 当"不限制"，`category=""`
+> 的物品也放行，所以新 slot 立刻可用 —— 验收要求的 `pre_filter_count > 0` 恰恰靠它成立。
+> 必须有 `empty_vocabulary` 这条 warning 把原因说清楚，否则读起来像坏了。
+> **反过来说：任何"体贴地给新家塞一份默认词表"的改动都会让新家上的推荐立刻变坏。**
+
 ### 14.5 确认与落库（Step 6–7）
 
-- 确认界面**可编辑**：用户能改名、删掉"其实没有"的那一层、补上漏掉的格子。
+界面在 Web 的 `/home/setup`（`StructureBuilder` → `ProposalFlow`）。
+
+- 确认界面**可编辑**：每一层都能勾选 / 改名 / 删除，`+ 加一格` 补上漏掉的格子。
 - 落库**复用 P0.2 的结构写接口**（`POST /homes/{id}/rooms`、`POST /rooms/{id}/storage-units` …），
   **不新增"落库整个提议"的批量端点** —— 每个节点一次请求，失败可以单独重试，
   也不会出现"柜子建到一半"的半成品。
-- **未被确认的节点永远不到达数据库。** 这一条必须有测试兜底
-  （断言 `rooms` / `storage_units` / `storage_sections` / `storage_slots` 的行数不增），
-  不能只靠 code review。
+- **未被勾选的节点永远不到达数据库。** 这一条有测试兜底
+  （`tests/api/test_structure_proposal_api.py` 断言 `rooms` / `storage_units` /
+  `storage_sections` / `storage_slots` 的行数不增，且 `agent_traces` 恰好 +1），
+  不只靠 code review。
+- 同一页还有「手动搭建」模式（`ManualBuilder`）：房间 → 柜 → 层 → 格的级联表单，
+  调用的是同一批写接口。**AI 不可用时用户仍能建出 slot**，这是验收的兜底。
 
 ### 14.6 同一套链路的三种输入
 
-只有 Step 1 不同：
+分支只影响**这一次调用怎么构造**，`structure.v1.md` 一份模板同时服务前两种
+（它只说"你会收到一张照片和/或一句描述"）：
 
-| 输入 | Step 1 | 备注 |
+| 输入 | 实际走向 | 备注 |
 | --- | --- | --- |
-| 一张柜子的照片 | `vision.v2.md`（内联 data URI） | 模型**数层数很容易错**，用户确认时重点核对 |
-| 一句话（"我家厨房有个三层吊柜"） | `infer.v1.md` 的纯文本接地块 | 最省 token，也最不容易错 |
-| 什么都没有（新账号） | **不调 LLM** | 直接给模板：卧室 / 厨房 / 客厅 + 各一个柜子，让用户改 |
+| 一张柜子的照片 | 图片内联成 `data:` URI，随**同一次** `structured_output(..., image_url=…)` 走 `vision_model` | 模型**数层数很容易错**，用户确认时重点核对 |
+| 一句话（"我家厨房有个三层吊柜"） | 无图片 → 同一个方法走 `chat_model`，`input_note` 放描述 | 最省 token，也最不容易错 |
+| 什么都没有（新账号） | **不调 LLM、不写 `AgentTrace`** | `build_template_proposal` 直接给卧室 / 厨房 / 客厅 + 各一个柜子 |
+
+- 照片 + 描述可以同时给：描述当 hint，图片照发。
+- 关键一条（风险 2）：**带图的调用必须用 `vision_model`**，否则文本模型收到图片会 400。
+  `tests/api/test_structure_proposal_api.py` 里有一条用 mock 记录 model 名的断言钉住它。
 
 > 第三种是兜底：**拍照即建模不能让"没有照片"的用户卡住。**
 > 一个刚注册、只想手动搭的用户，也应该能在 3 步内得到一个可用 Slot。
+> 模板放在服务端而不是前端常量：客户端只需要一个调用、一种响应类型，
+> 模板照样过同一遍 Step 4，而且**零成本**。
 
 ---
 
