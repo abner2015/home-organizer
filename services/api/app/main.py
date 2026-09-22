@@ -10,6 +10,7 @@ from app.api.v1 import auth as auth_v1
 from app.api.v1 import files as files_v1
 from app.api.v1 import homes as homes_v1
 from app.api.v1 import items as items_v1
+from app.api.v1 import placements as placements_v1
 from app.api.v1 import recommendations as recommendations_v1
 from app.api.v1 import search as search_v1
 from app.api.v1 import structure as structure_v1
@@ -70,6 +71,8 @@ app.include_router(files_v1.router, prefix="/api/v1")
 app.include_router(homes_v1.router, prefix="/api/v1")
 app.include_router(homes_v1.rooms_router, prefix="/api/v1")
 app.include_router(items_v1.router, prefix="/api/v1")
+# Manual item placement ("反向录入"): item → slot with no LLM in the path.
+app.include_router(placements_v1.router, prefix="/api/v1")
 app.include_router(recommendations_v1.router, prefix="/api/v1")
 app.include_router(search_v1.router, prefix="/api/v1")
 # Storage-structure writes. ``/homes`` and ``/rooms`` each carry two routers

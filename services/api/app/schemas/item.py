@@ -172,6 +172,21 @@ class ItemPlacementView(BaseModel):
     note: str | None = None
 
 
+class PlaceItemRequest(BaseModel):
+    """Body for ``POST /placements`` — put an item straight into a slot.
+
+    ``extra="forbid"`` for hygiene but no ``strict``: JSON client input, so
+    UUIDs arrive as strings. Both ids are re-checked against the caller's home
+    by the service (cross-home → 404).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: uuid.UUID
+    slot_id: uuid.UUID
+    note: str | None = Field(default=None, max_length=500)
+
+
 class CandidateListResponse(BaseModel):
     """``GET /items/{id}/candidates`` — the deterministic pre-LLM view.
 
@@ -195,5 +210,6 @@ __all__ = [
     "ItemVisionResponse",
     "ItemVisionView",
     "PaginatedItemsView",
+    "PlaceItemRequest",
     "PlacementRefView",
 ]

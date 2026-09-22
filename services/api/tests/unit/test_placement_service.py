@@ -1,9 +1,10 @@
-"""Placement service — accept / reject / patch lifecycle.
+"""Placement service — accept / reject / patch + manual place / unplace.
 
 Unit-level tests using the real SQLite DB + the real agent + a mock AI
 provider. Covers the business invariants:
 
 - accept creates exactly one ItemPlacement row.
+- accept closes whatever active placement the item already had.
 - accept sets source = ai_recommendation (no prior PATCH) or user_manual (after PATCH).
 - accept twice on the same recommendation → 409 (second call's row isn't pending).
 - reject on a pending → 200, no placement created.
@@ -11,10 +12,14 @@ provider. Covers the business invariants:
 - PATCH then accept creates a user_manual placement.
 - PATCH to a slot in another home → 404.
 - accept / reject on a recommendation belonging to another home → 404.
+- place_item / unplace_item: the manual path (P0.3), with no Recommendation
+  writes and soft-close removal.
 """
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
+from unittest import mock
 
 import pytest
 from sqlalchemy import select
@@ -23,7 +28,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.agents.placement_service import (
     accept_recommendation,
     patch_recommendation,
+    place_item,
     reject_recommendation,
+    unplace_item,
 )
 from app.ai.providers.mock import MockAIProvider
 from app.core.exceptions import ConflictError, NotFoundError
@@ -391,6 +398,294 @@ async def test_failed_recommendation_cannot_be_accepted(
                 recommendation_id=rec_id,
                 home_id=seeded_actor.home_id,
                 user_id=seeded_actor.user_id,
+            )
+
+
+# ------------------------------------------------------------- manual placement
+
+
+async def test_accept_closes_previous_active_placement(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """Regression: accepting a recommendation must move the item, not fork it.
+
+    The accept path used to insert an ItemPlacement without closing the active
+    one. On PostgreSQL that raised IntegrityError (500); on SQLite — which
+    never enforced the partial unique index — it silently produced two active
+    rows and the item view picked whichever came last.
+    """
+    cup_id = storage_hierarchy.items["马克杯"]
+    manual_slot = storage_hierarchy.slots["L1S2"]
+
+    async with _session(db_engine) as session:
+        manual = await place_item(
+            session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            item_id=cup_id,
+            slot_id=manual_slot,
+        )
+        manual_id = manual.id
+
+    rec = await _run_recommendation(db_engine, seeded_actor, storage_hierarchy, cup_id)
+    async with _session(db_engine) as session:
+        outcome = await accept_recommendation(
+            session,
+            recommendation_id=rec.id,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+        )
+
+    async with _session(db_engine) as session:
+        rows = (
+            await session.execute(
+                select(ItemPlacement).where(ItemPlacement.item_id == cup_id)
+            )
+        ).scalars().all()
+
+    active = [r for r in rows if r.removed_at is None]
+    assert len(rows) == 2, "the manual row is history, not garbage"
+    assert len(active) == 1
+    assert active[0].id == outcome.placement.id
+    assert active[0].slot_id == storage_hierarchy.slots["L1S1"]
+    closed = next(r for r in rows if r.id == manual_id)
+    assert closed.removed_at is not None
+
+
+async def test_place_item_writes_no_recommendation_rows(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """A manual placement does not resolve, supersede or reject any suggestion."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    rec = await _run_recommendation(db_engine, seeded_actor, storage_hierarchy, cup_id)
+
+    async with _session(db_engine) as session:
+        placement = await place_item(
+            session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            item_id=cup_id,
+            slot_id=storage_hierarchy.slots["L1S2"],
+            note="我直接放进去了",
+        )
+        assert placement.source == PlacementSource.USER_MANUAL.value
+        assert placement.recommendation_id is None
+        assert placement.note == "我直接放进去了"
+
+    async with _session(db_engine) as session:
+        row = (
+            await session.execute(
+                select(Recommendation).where(Recommendation.id == rec.id)
+            )
+        ).scalar_one()
+        assert row.status == RecommendationStatus.PENDING.value
+
+
+async def test_place_item_then_accept_still_works(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """The manual path must not make the item un-recommendable."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    async with _session(db_engine) as session:
+        await place_item(
+            session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            item_id=cup_id,
+            slot_id=storage_hierarchy.slots["L1S2"],
+        )
+
+    rec = await _run_recommendation(db_engine, seeded_actor, storage_hierarchy, cup_id)
+    async with _session(db_engine) as session:
+        outcome = await accept_recommendation(
+            session,
+            recommendation_id=rec.id,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+        )
+        assert outcome.recommendation.status == RecommendationStatus.ACCEPTED.value
+
+
+async def test_close_active_placements_uses_the_aware_utc_helper(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """The close timestamp must come from ``utc_now``, not ``datetime.utcnow``.
+
+    Naive values serialise without an offset, and the Web client's
+    ``new Date(iso)`` then reads them as *local* time — every "moved out at"
+    label shifts by the viewer's UTC offset. SQLite drops the offset on read,
+    so the only place this is observable is the value handed to the UPDATE.
+    """
+    cup_id = storage_hierarchy.items["马克杯"]
+    sentinel = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+    async with _session(db_engine) as session:
+        await place_item(
+            session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            item_id=cup_id,
+            slot_id=storage_hierarchy.slots["L1S2"],
+        )
+
+    from app.tools import write_tools
+
+    with mock.patch.object(write_tools, "utc_now", return_value=sentinel):
+        async with _session(db_engine) as session:
+            await place_item(
+                session,
+                home_id=seeded_actor.home_id,
+                user_id=seeded_actor.user_id,
+                item_id=cup_id,
+                slot_id=storage_hierarchy.slots["L1S1"],
+            )
+
+    async with _session(db_engine) as session:
+        closed = (
+            await session.execute(
+                select(ItemPlacement).where(
+                    ItemPlacement.item_id == cup_id,
+                    ItemPlacement.removed_at.is_not(None),
+                )
+            )
+        ).scalar_one()
+    assert closed.removed_at.replace(tzinfo=UTC) == sentinel
+
+
+async def test_unplace_item_soft_closes(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    cup_id = storage_hierarchy.items["马克杯"]
+    async with _session(db_engine) as session:
+        placement = await place_item(
+            session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            item_id=cup_id,
+            slot_id=storage_hierarchy.slots["L1S1"],
+        )
+        placement_id = placement.id
+
+    async with _session(db_engine) as session:
+        closed = await unplace_item(
+            session, placement_id=placement_id, home_id=seeded_actor.home_id
+        )
+        assert closed.removed_at is not None
+
+    async with _session(db_engine) as session:
+        rows = (
+            await session.execute(
+                select(ItemPlacement).where(ItemPlacement.id == placement_id)
+            )
+        ).scalars().all()
+        assert len(rows) == 1, "soft close must not delete the row"
+
+
+async def test_unplace_item_twice_raises_conflict(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    cup_id = storage_hierarchy.items["马克杯"]
+    async with _session(db_engine) as session:
+        placement = await place_item(
+            session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            item_id=cup_id,
+            slot_id=storage_hierarchy.slots["L1S1"],
+        )
+        placement_id = placement.id
+
+    async with _session(db_engine) as session:
+        await unplace_item(
+            session, placement_id=placement_id, home_id=seeded_actor.home_id
+        )
+
+    async with _session(db_engine) as session:
+        with pytest.raises(ConflictError):
+            await unplace_item(
+                session, placement_id=placement_id, home_id=seeded_actor.home_id
+            )
+
+
+async def test_unplace_placement_of_another_home_is_404(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """The placement exists, but its item belongs to a different home → 404."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    async with _session(db_engine) as session:
+        placement = await place_item(
+            session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            item_id=cup_id,
+            slot_id=storage_hierarchy.slots["L1S1"],
+        )
+        placement_id = placement.id
+
+    async with _session(db_engine) as session:
+        with pytest.raises(NotFoundError):
+            await unplace_item(
+                session, placement_id=placement_id, home_id=uuid.uuid4()
+            )
+
+
+async def test_unplace_unknown_placement_is_404(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    async with _session(db_engine) as session:
+        with pytest.raises(NotFoundError):
+            await unplace_item(
+                session, placement_id=uuid.uuid4(), home_id=seeded_actor.home_id
+            )
+
+
+async def test_place_item_cross_home_slot_is_404(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    from app.models.room import Room
+    from app.models.storage import StorageSection, StorageUnit
+
+    other_room = Room(
+        home_id=uuid.uuid4(), name="Garage", room_type="other", sort_order=1
+    )
+    async with _session(db_engine) as session:
+        session.add(other_room)
+        await session.flush()
+        other_unit = StorageUnit(
+            room_id=other_room.id,
+            name="Foreign",
+            unit_type=StorageUnitType.CABINET.value,
+            sort_order=1,
+        )
+        session.add(other_unit)
+        await session.flush()
+        other_section = StorageSection(
+            unit_id=other_unit.id,
+            name="S1",
+            section_type=StorageSectionType.LAYER.value,
+            sort_order=1,
+        )
+        session.add(other_section)
+        await session.flush()
+        other_slot = StorageSlot(
+            section_id=other_section.id,
+            code="X1",
+            label="Foreign",
+            allowed_categories=["misc"],
+            sort_order=1,
+        )
+        session.add(other_slot)
+        await session.commit()
+        foreign_slot_id = other_slot.id
+
+    async with _session(db_engine) as session:
+        with pytest.raises(NotFoundError):
+            await place_item(
+                session,
+                home_id=seeded_actor.home_id,
+                user_id=seeded_actor.user_id,
+                item_id=storage_hierarchy.items["马克杯"],
+                slot_id=foreign_slot_id,
             )
 
 

@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationFailedError
+from app.db.base import utc_now
 from app.db.enums import (
     AgentTraceStatus,
     PlacementSource,
@@ -213,6 +214,76 @@ async def verify_recommendation(
     return _trace_dict(trace)
 
 
+async def close_active_placements(
+    *,
+    db: AsyncSession,
+    item_id: uuid.UUID,
+    now: datetime | None = None,
+) -> None:
+    """Soft-close every active placement for the item.
+
+    Flush-level only — the caller owns the transaction. One item has at most
+    one active placement (partial unique index ``uq_item_placements_one_active_per_item``),
+    but we close *all* matching rows rather than one so a database that never
+    enforced the index (SQLite in tests) still converges to a single active row.
+    """
+    from sqlalchemy import update
+
+    await db.execute(
+        update(ItemPlacement)
+        .where(
+            ItemPlacement.item_id == item_id,
+            ItemPlacement.removed_at.is_(None),
+        )
+        .values(removed_at=now or utc_now())
+    )
+
+
+async def _create_placement(
+    *,
+    db: AsyncSession,
+    home_id: uuid.UUID,
+    user_id: uuid.UUID,
+    item_id: uuid.UUID,
+    slot_id: uuid.UUID,
+    recommendation_id: uuid.UUID | None = None,
+    source: str = PlacementSource.USER_MANUAL.value,
+    note: str | None = None,
+    remove_existing: bool = True,
+) -> ItemPlacement:
+    """The one implementation of "close the old active placement, insert the new one".
+
+    Validates item/slot ownership (cross-home → 404) and the ``source`` enum,
+    then flushes. The caller owns the commit: the accept path needs the
+    placement, the status flip and the supersede sweep to land as one
+    transaction, while the manual path commits on its own.
+    """
+    await _ensure_item_in_home(db, item_id, home_id)
+    await _ensure_slot_in_home(db, slot_id, home_id)
+
+    valid_sources = {s.value for s in PlacementSource}
+    if source not in valid_sources:
+        raise ValidationFailedError(
+            f"Invalid placement source {source!r}",
+            details={"allowed": sorted(valid_sources)},
+        )
+
+    if remove_existing:
+        await close_active_placements(db=db, item_id=item_id)
+
+    placement = ItemPlacement(
+        item_id=item_id,
+        slot_id=slot_id,
+        placed_by=user_id,
+        recommendation_id=recommendation_id,
+        source=source,
+        note=note,
+    )
+    db.add(placement)
+    await db.flush()
+    return placement
+
+
 async def save_placement(
     *,
     db: AsyncSession,
@@ -229,43 +300,24 @@ async def save_placement(
     """Create a new ItemPlacement row. By default removes any active placement
     for the same item (single-active-placement invariant from the DB partial
     unique index)."""
-    await _ensure_item_in_home(db, item_id, home_id)
-    await _ensure_slot_in_home(db, slot_id, home_id)
-
-    valid_sources = {s.value for s in PlacementSource}
-    if source not in valid_sources:
-        raise ValidationFailedError(
-            f"Invalid placement source {source!r}",
-            details={"allowed": sorted(valid_sources)},
-        )
-
-    from sqlalchemy import update
-
-    now = datetime.utcnow()
-    if remove_existing:
-        await db.execute(
-            update(ItemPlacement)
-            .where(
-                ItemPlacement.item_id == item_id,
-                ItemPlacement.removed_at.is_(None),
-            )
-            .values(removed_at=now)
-        )
-    placement = ItemPlacement(
+    placement = await _create_placement(
+        db=db,
+        home_id=home_id,
+        user_id=user_id,
         item_id=item_id,
         slot_id=slot_id,
-        placed_by=user_id,
         recommendation_id=recommendation_id,
         source=source,
         note=note,
+        remove_existing=remove_existing,
     )
-    db.add(placement)
     await db.commit()
     await db.refresh(placement)
     return _placement_dict(placement)
 
 
 __all__ = [
+    "close_active_placements",
     "create_recommendation",
     "save_placement",
     "verify_recommendation",

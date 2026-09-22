@@ -8,6 +8,9 @@ business invariants the API can't safely inline:
 - ``accept`` creates one ``ItemPlacement`` row. If the recommendation was
   PATCHed before accept, ``source`` is ``user_manual``; otherwise
   ``ai_recommendation``.
+- ``place`` / ``unplace`` are the manual path (P0.3 "反向录入"): an item that
+  already exists goes straight into a user-chosen slot with no LLM call, and
+  the placement is soft-closed rather than deleted.
 - ``reject`` sets status to ``rejected`` (still requires ``pending``).
 - ``patch`` updates ``chosen_slot_id`` (must belong to home) and keeps
   status ``pending``. Any previously-pending recommendation for the same
@@ -28,21 +31,14 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import AppError, ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError
+from app.db.base import utc_now
 from app.db.enums import PlacementSource, RecommendationStatus
 from app.models import Item, ItemPlacement, Recommendation
-from app.tools.write_tools import _ensure_slot_in_home
-
-# --------------------------------------------------------------------------- errors
-
-
-class PlacementError(AppError):
-    """Base for placement_service-level errors."""
-
-    code = "placement_error"
-    http_status = 400
-    message = "Placement operation failed"
-
+from app.tools.write_tools import (
+    _create_placement,
+    _ensure_slot_in_home,
+)
 
 # --------------------------------------------------------------------------- value objects
 
@@ -90,6 +86,29 @@ async def _load_recommendation_in_home(
     if item is None or item.home_id != home_id:
         raise NotFoundError("Recommendation not found")
     return rec
+
+
+async def _load_placement_in_home(
+    db: AsyncSession, placement_id: uuid.UUID, home_id: uuid.UUID
+) -> ItemPlacement:
+    """Cross-home safe load — 404 if missing or the item belongs to another home.
+
+    ItemPlacement has no ``home_id`` of its own, so ownership is resolved
+    through the item — same 404-not-403 rule as ``_load_recommendation_in_home``.
+    """
+    placement = (
+        await db.execute(
+            select(ItemPlacement).where(ItemPlacement.id == placement_id)
+        )
+    ).scalar_one_or_none()
+    if placement is None:
+        raise NotFoundError("Placement not found")
+    item = (
+        await db.execute(select(Item).where(Item.id == placement.item_id))
+    ).scalar_one_or_none()
+    if item is None or item.home_id != home_id:
+        raise NotFoundError("Placement not found")
+    return placement
 
 
 async def _ensure_pending(rec: Recommendation) -> None:
@@ -150,8 +169,6 @@ async def accept_recommendation(
             "cannot accept.",
             details={"state": "failed"},
         )
-    await _ensure_slot_in_home(db, rec.chosen_slot_id, home_id)
-
     # Was this recommendation PATCHed? PATCH writes the audit_note on the
     # `candidates` JSON blob; absence ⇒ original AI choice.
     was_patched = any(
@@ -160,10 +177,15 @@ async def accept_recommendation(
         for c in (rec.candidates or [])
     )
 
-    placement = ItemPlacement(
+    # Closes any active placement the item already had — accepting a
+    # recommendation is still "the item now lives here". Slot ownership was
+    # verified inside _create_placement.
+    placement = await _create_placement(
+        db=db,
+        home_id=home_id,
+        user_id=user_id,
         item_id=rec.item_id,
         slot_id=rec.chosen_slot_id,
-        placed_by=user_id,
         recommendation_id=rec.id,
         source=(
             PlacementSource.USER_MANUAL.value
@@ -172,13 +194,74 @@ async def accept_recommendation(
         ),
         note=note,
     )
-    db.add(placement)
     rec.status = RecommendationStatus.ACCEPTED.value
     await _supersede_previous_pending(db, rec.item_id, rec.id)
     await db.commit()
     await db.refresh(placement)
     await db.refresh(rec)
     return AcceptOutcome(recommendation=rec, placement=placement, was_patched=was_patched)
+
+
+async def place_item(
+    db: AsyncSession,
+    *,
+    home_id: uuid.UUID,
+    user_id: uuid.UUID,
+    item_id: uuid.UUID,
+    slot_id: uuid.UUID,
+    note: str | None = None,
+) -> ItemPlacement:
+    """Put an item directly into a slot the user picked. No LLM involved.
+
+    This is journey B ("反向录入"): the item already exists and the user already
+    knows where it goes, so nothing needs to be recommended. Writes one
+    ``ItemPlacement`` with ``source=user_manual`` and ``recommendation_id=None``
+    and closes the item's previous active placement.
+
+    Deliberately touches **no** Recommendation row: a manual placement does not
+    "resolve" a pending AI suggestion, which the user may still accept or
+    reject afterwards (accepting then closes this manual placement).
+
+    Raises:
+        NotFoundError: item or slot missing, or owned by another home.
+        ValidationFailedError: source not a known PlacementSource.
+    """
+    placement = await _create_placement(
+        db=db,
+        home_id=home_id,
+        user_id=user_id,
+        item_id=item_id,
+        slot_id=slot_id,
+        source=PlacementSource.USER_MANUAL.value,
+        note=note,
+    )
+    await db.commit()
+    await db.refresh(placement)
+    return placement
+
+
+async def unplace_item(
+    db: AsyncSession, *, placement_id: uuid.UUID, home_id: uuid.UUID
+) -> ItemPlacement:
+    """End a placement (soft-close: ``removed_at`` is set, the row survives).
+
+    History is never physically deleted — the item page's timeline and the
+    "where was this before" answer both read these rows.
+
+    Raises:
+        NotFoundError: placement missing or its item belongs to another home.
+        ConflictError: the placement is already closed.
+    """
+    placement = await _load_placement_in_home(db, placement_id, home_id)
+    if placement.removed_at is not None:
+        raise ConflictError(
+            "Placement is already ended",
+            details={"removed_at": placement.removed_at.isoformat()},
+        )
+    placement.removed_at = utc_now()
+    await db.commit()
+    await db.refresh(placement)
+    return placement
 
 
 async def reject_recommendation(
@@ -294,10 +377,11 @@ def _recommendation_to_dict(rec: Recommendation) -> dict[str, Any]:
 __all__ = [
     "AcceptOutcome",
     "PatchOutcome",
-    "PlacementError",
     "RejectOutcome",
     "accept_recommendation",
     "get_recommendation_dict",
     "patch_recommendation",
+    "place_item",
     "reject_recommendation",
+    "unplace_item",
 ]
