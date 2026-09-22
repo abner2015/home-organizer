@@ -177,6 +177,18 @@ MINIO_BUCKET_ITEMS=home-organizer-items
 MINIO_BUCKET_UPLOADS=home-organizer-uploads
 MINIO_USE_SSL=false
 
+# ----- Storage backend -----
+# `minio` 用上面的对象存储；`local` 写 STORAGE_LOCAL_DIR 并通过
+# `GET /api/v1/files/{key}` 回读。`local` 下 `POST /uploads/presign` 返回 409，
+# 浏览器改走 `POST /assets/upload`（multipart）。
+STORAGE_BACKEND=minio
+STORAGE_LOCAL_DIR=./var/storage
+# 本地读 URL 的签名密钥，留空回落到 JWT_SECRET。
+STORAGE_LOCAL_SECRET=
+# 本地签出的 URL 前缀。留空 ⇒ 根相对 URL，由浏览器按 web 源解析、经 Next
+# rewrite 回到本 API。只有 API 与页面不同源时才需要填。
+API_PUBLIC_BASE_URL=
+
 # ----- AI Provider -----
 AI_PROVIDER=openai_compatible
 AI_API_KEY=sk-xxxxx-replace-me
@@ -189,11 +201,7 @@ AI_TIMEOUT_S=30
 CORS_ORIGINS=http://localhost:3000,http://localhost:8000
 ```
 
-### ⏳ 缺口：存储后端的 4 个键没进 `.env.example`
-
-`STORAGE_BACKEND` / `STORAGE_LOCAL_DIR` / `STORAGE_LOCAL_SECRET` / `API_PUBLIC_BASE_URL`
-（`app/core/config.py` 里都有，默认 `minio` / `./var/storage` / `None` / `""`）**没有**写进
-`.env.example`。本地 demo（没有 MinIO）需要手工加：
+本地 demo（没有 MinIO）只需把 `STORAGE_BACKEND` 改成 `local`：
 
 ```bash
 STORAGE_BACKEND=local
