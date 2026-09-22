@@ -15,10 +15,13 @@ Two deliberate choices:
 """
 from __future__ import annotations
 
-from typing import Annotated, ClassVar
+import uuid
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from app.agents.structure.validate import ProposalWarning
+from app.ai.provider import StructureProposalOutput
 from app.core.exceptions import ValidationFailedError
 from app.db.enums import RoomType, StorageSectionType, StorageUnitType
 
@@ -135,6 +138,37 @@ class SlotUpdateRequest(_SparseUpdate):
     sort_order: int | None = Field(default=None, ge=0)
 
 
+class StructureProposalRequest(BaseModel):
+    """Ask the AI (or the template) for a structure.
+
+    Both fields absent is not an error — it selects the server-side template,
+    which is the "I'd rather not describe anything" path. Sending both is a
+    photo with a caption.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: uuid.UUID | None = None
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class StructureProposalResponse(BaseModel):
+    """A proposal, plus everything the confirm screen needs to be honest.
+
+    ``warnings`` is not decoration. Step 4 rewrites the model's answer
+    (trimming, dropping duplicate codes, clearing ungrounded categories), and
+    a user who is not told about that would be confirming something the model
+    never proposed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposal: StructureProposalOutput
+    warnings: list[ProposalWarning] = Field(default_factory=list)
+    source: Literal["photo", "text", "template"]
+    trace_id: uuid.UUID | None = None
+
+
 __all__ = [
     "HomeUpdateRequest",
     "RoomCreateRequest",
@@ -143,6 +177,8 @@ __all__ = [
     "SectionUpdateRequest",
     "SlotCreateRequest",
     "SlotUpdateRequest",
+    "StructureProposalRequest",
+    "StructureProposalResponse",
     "UnitCreateRequest",
     "UnitUpdateRequest",
 ]

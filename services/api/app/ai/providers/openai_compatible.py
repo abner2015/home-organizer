@@ -91,7 +91,7 @@ class OpenAICompatibleProvider:
         prompt_hash = hash_prompt(prompt)
         timeout = timeout_s or self.default_timeout_s
 
-        body = self._build_vision_body(prompt, image_url)
+        body = self._build_vision_body(prompt, image_url, VisionOutput)
 
         try:
             with timed() as elapsed:
@@ -155,16 +155,24 @@ class OpenAICompatibleProvider:
         prompt: str,
         schema: type[BaseModel],
         *,
+        image_url: str | None = None,
         timeout_s: float | None = None,
     ) -> BaseModel:
-        """Force JSON-object output and parse into ``schema``."""
+        """Force JSON-object output and parse into ``schema``.
+
+        With ``image_url`` set the call becomes multimodal and must run on the
+        vision model — a text-only endpoint 400s on an image content part.
+        """
         timeout = timeout_s or self.default_timeout_s
-        body = {
-            "model": self.chat_model,
-            "messages": [{"role": "user", "content": prompt}],
-            "response_format": {"type": "json_object"},
-            "temperature": 0.0,
-        }
+        if image_url:
+            body = self._build_vision_body(prompt, image_url, schema)
+        else:
+            body = {
+                "model": self.chat_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.0,
+            }
         try:
             response = await self._post_chat(body, timeout=timeout)
         except httpx.TimeoutException as exc:
@@ -229,11 +237,17 @@ class OpenAICompatibleProvider:
 
     # ---------------------------------------------------------- internals
 
-    def _build_vision_body(self, prompt: str, image_url: str) -> dict[str, Any]:
-        """Compose the Chat Completions request body for a vision call."""
+    def _build_vision_body(
+        self, prompt: str, image_url: str, schema: type[BaseModel]
+    ) -> dict[str, Any]:
+        """Compose the Chat Completions request body for an image call.
+
+        Shared by :meth:`vision` (``VisionOutput``) and by
+        :meth:`structured_output` when it is handed an ``image_url``.
+        """
         # Inject the JSON schema hint so the LLM emits the exact field
         # names we validate against.
-        schema_hint = VisionOutput.model_json_schema()
+        schema_hint = schema.model_json_schema()
         content = [
             {
                 "type": "text",

@@ -35,8 +35,16 @@ def _rooms(slots: list[dict[str, Any]]) -> list[str]:
     return seen
 
 
-def _categories(slots: list[dict[str, Any]], items: list[dict[str, Any]]) -> list[str]:
-    """Sorted union of item categories and slot allowed_categories."""
+def home_category_vocabulary(
+    slots: list[dict[str, Any]], items: list[dict[str, Any]]
+) -> list[str]:
+    """Sorted union of item categories and slot allowed_categories.
+
+    Public because the structure-proposal validator needs the same vocabulary
+    the prompt was grounded in: a category the model proposes should be kept
+    only if the *caller's* data already speaks it. Deriving the list twice
+    would let the two answers drift.
+    """
     seen: set[str] = set()
     for item in items:
         value = item.get("category")
@@ -107,7 +115,7 @@ def build_home_context(
     Slices *before* joining so a five-thousand-item home never builds a giant
     string only to throw it away.
     """
-    categories = _categories(slots, items)
+    categories = home_category_vocabulary(slots, items)
     lines: list[str] = [
         "【家中真实数据 — 以下名称只能原样引用，禁止编造】",
         "可选 category（物品大类，只能取下列值之一；无法对应时留空字符串）：",
@@ -142,4 +150,9 @@ def build_home_context(
     return "\n".join(lines)
 
 
-__all__ = ["MAX_ITEM_NAMES", "MAX_SLOT_LINES", "build_home_context"]
+__all__ = [
+    "MAX_ITEM_NAMES",
+    "MAX_SLOT_LINES",
+    "build_home_context",
+    "home_category_vocabulary",
+]

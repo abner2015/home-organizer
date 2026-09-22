@@ -231,6 +231,93 @@ def test_ranking_output_rejects_empty_candidates() -> None:
         RankingOutput.model_validate({"candidates": []})
 
 
+def _json_proposal() -> dict:
+    """A proposal exactly as ``json.loads`` would hand it over: enum *strings*.
+
+    Written out rather than built with ``model_dump`` so that a schema which
+    only accepts real enum members would fail here — the whole point is that the
+    LLM speaks JSON, not Python.
+    """
+    return json.loads(
+        '{"rooms": [{"name": "厨房", "room_type": "kitchen", "units": ['
+        '{"name": "吊柜", "unit_type": "cabinet", "sections": ['
+        '{"name": "第1层", "section_type": "layer", "slots": ['
+        '{"code": "K1", "label": "左侧", "allowed_categories": ["utensil"],'
+        ' "capacity_hint": "medium"}]}]}]}],'
+        ' "rationale": "描述里提到厨房的三层吊柜", "confidence": 0.8}'
+    )
+
+
+def test_structure_proposal_accepts_json_parsed_enum_strings() -> None:
+    from app.ai.provider import StructureProposalOutput
+
+    out = StructureProposalOutput.model_validate(_json_proposal())
+    assert out.rooms[0].room_type == "kitchen"
+    assert out.rooms[0].units[0].unit_type == "cabinet"
+    assert out.rooms[0].units[0].sections[0].section_type == "layer"
+    assert out.rooms[0].units[0].sections[0].slots[0].allowed_categories == ["utensil"]
+    assert out.rooms[0].units[0].sections[0].slots[0].capacity_hint == "medium"
+
+
+def test_structure_proposal_serializes_enums_as_bare_values() -> None:
+    """The response is JSON to a browser — ``StrEnum`` must not leak its repr."""
+    from app.ai.provider import StructureProposalOutput
+
+    dumped = StructureProposalOutput.model_validate(_json_proposal()).model_dump(mode="json")
+    assert dumped["rooms"][0]["room_type"] == "kitchen"
+    assert dumped["rooms"][0]["units"][0]["unit_type"] == "cabinet"
+
+
+def test_structure_proposal_rejects_a_chinese_room_type() -> None:
+    """「厨房」 is a room *name*; the enum wants the machine value.
+
+    This is the failure that must burn a retry rather than be repaired — there
+    is no rule that turns an arbitrary string into a ``RoomType``.
+    """
+    from app.ai.provider import StructureProposalOutput
+
+    payload = _json_proposal()
+    payload["rooms"][0]["room_type"] = "厨房"
+    with pytest.raises(ValidationError):
+        StructureProposalOutput.model_validate(payload)
+
+
+def test_structure_proposal_rejects_an_invented_capacity_hint() -> None:
+    """``capacity_hint`` is a Literal on the AI side (free text on the write API)."""
+    from app.ai.provider import StructureProposalOutput
+
+    payload = _json_proposal()
+    payload["rooms"][0]["units"][0]["sections"][0]["slots"][0]["capacity_hint"] = "huge"
+    with pytest.raises(ValidationError):
+        StructureProposalOutput.model_validate(payload)
+
+
+def test_structure_proposal_allows_a_null_capacity_hint() -> None:
+    """「不确定就留 null」 is an instruction — ``None`` must not be an error."""
+    from app.ai.provider import StructureProposalOutput
+
+    payload = _json_proposal()
+    payload["rooms"][0]["units"][0]["sections"][0]["slots"][0]["capacity_hint"] = None
+    out = StructureProposalOutput.model_validate(payload)
+    assert out.rooms[0].units[0].sections[0].slots[0].capacity_hint is None
+
+
+def test_structure_proposal_rejects_extra_fields() -> None:
+    from app.ai.provider import StructureProposalOutput
+
+    payload = _json_proposal()
+    payload["rooms"][0]["colour"] = "white"
+    with pytest.raises(ValidationError):
+        StructureProposalOutput.model_validate(payload)
+
+
+def test_structure_proposal_rejects_an_empty_room_list() -> None:
+    from app.ai.provider import StructureProposalOutput
+
+    with pytest.raises(ValidationError):
+        StructureProposalOutput.model_validate({"rooms": []})
+
+
 def test_mock_provider_implements_protocol() -> None:
     mock = MockAIProvider()
     # AIProvider is a runtime-checkable Protocol.

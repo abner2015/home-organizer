@@ -39,6 +39,12 @@ class MockAIProvider:
 
     name = "mock"
 
+    # Names the mock reports as "the model it used", so a test can assert that
+    # an image-bearing call really was routed to the vision model rather than
+    # the text one (which a real provider would 400 on).
+    vision_model = "mock-vision"
+    chat_model = "mock-chat"
+
     def __init__(
         self,
         *,
@@ -82,6 +88,9 @@ class MockAIProvider:
 
         self.call_count = 0
         self.recorded_calls: list[tuple[str, dict[str, Any]]] = []
+        # Last image / model seen, for assertions about the photo branch.
+        self.last_image_url: str | None = None
+        self.last_model: str | None = None
 
     # ----------------------------------------------------------------- helpers
 
@@ -109,6 +118,8 @@ class MockAIProvider:
         timeout_s: float = 30.0,
     ) -> VisionOutput:
         self.call_count += 1
+        self.last_image_url = image_url
+        self.last_model = self.vision_model
         self.recorded_calls.append(
             ("vision", {"image_url": image_url, "hint": hint, "context": context})
         )
@@ -154,11 +165,21 @@ class MockAIProvider:
         prompt: str,
         schema: type[BaseModel],
         *,
+        image_url: str | None = None,
         timeout_s: float = 30.0,
     ) -> BaseModel:
         self.call_count += 1
+        self.last_image_url = image_url
+        self.last_model = self.vision_model if image_url else self.chat_model
         self.recorded_calls.append(
-            ("structured_output", {"prompt": prompt, "schema": schema.__name__})
+            (
+                "structured_output",
+                {
+                    "prompt": prompt,
+                    "schema": schema.__name__,
+                    "image_url": image_url,
+                },
+            )
         )
         await self._maybe_sleep()
 

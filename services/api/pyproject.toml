@@ -70,6 +70,10 @@ ignore = ["E501"]
 "app/api/v1/structure.py" = ["RUF001", "RUF002", "RUF003"]
 "app/schemas/structure.py" = ["RUF001", "RUF002", "RUF003"]
 "app/services/structure_service.py" = ["RUF001", "RUF002", "RUF003"]
+# Structure proposal: the Step 4 warnings are user-facing Chinese (they are
+# rendered in the confirm step), as is the proposal prompt.
+"app/agents/structure/*" = ["RUF001", "RUF002", "RUF003"]
+"app/services/structure_proposal_service.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.11"

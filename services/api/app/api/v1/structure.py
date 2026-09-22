@@ -28,6 +28,8 @@ from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.factory import get_provider
+from app.ai.provider import AIProvider
 from app.api.deps import Actor, ensure_member, get_actor
 from app.core.exceptions import ForbiddenError, NotFoundError
 from app.db.enums import HomeRole
@@ -55,10 +57,12 @@ from app.schemas.structure import (
     SectionUpdateRequest,
     SlotCreateRequest,
     SlotUpdateRequest,
+    StructureProposalRequest,
+    StructureProposalResponse,
     UnitCreateRequest,
     UnitUpdateRequest,
 )
-from app.services import structure_service
+from app.services import structure_proposal_service, structure_service
 from app.tools.home_tools import (
     get_storage_sections,
     get_storage_slots,
@@ -70,6 +74,12 @@ rooms_router = APIRouter(prefix="/rooms", tags=["structure"])
 units_router = APIRouter(prefix="/storage-units", tags=["structure"])
 sections_router = APIRouter(prefix="/sections", tags=["structure"])
 slots_router = APIRouter(prefix="/slots", tags=["structure"])
+structures_router = APIRouter(prefix="/structures", tags=["structure"])
+
+
+def _get_ai_provider() -> AIProvider:
+    """FastAPI dependency. Overridden in tests to inject a mock."""
+    return get_provider()
 
 _ROOM_FIELDS = ("id", "home_id", "name", "room_type", "sort_order")
 _UNIT_FIELDS = ("id", "room_id", "name", "unit_type", "description", "sort_order")
@@ -445,6 +455,48 @@ async def delete_slot(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+# ------------------------------------------------------------------ proposals
+
+
+@structures_router.post(
+    "/propose",
+    response_model=StructureProposalResponse,
+    summary="Propose a storage structure from a photo, a sentence, or nothing",
+)
+async def propose_structure(
+    payload: StructureProposalRequest,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    provider: Annotated[AIProvider, Depends(_get_ai_provider)],
+) -> StructureProposalResponse:
+    """Run Step 1-5 of ``docs/AGENT.md`` §14 and return the proposal.
+
+    Nothing is written except an ``AgentTrace`` row: the four storage tables
+    are untouched, and the client persists the parts the user kept through the
+    write routes above. A request with neither ``asset_id`` nor a
+    ``description`` returns the server-side template without calling a model.
+
+    Errors follow the vision path's taxonomy — 404 for an asset outside the
+    caller's home, 503 for provider failures, 503 after parse retries are
+    exhausted.
+    """
+    result = await structure_proposal_service.propose_structure(
+        db,
+        provider=provider,
+        home_id=actor.home_id,
+        user_id=actor.user_id,
+        asset_id=payload.asset_id,
+        description=payload.description,
+    )
+    await db.commit()
+    return StructureProposalResponse(
+        proposal=result.proposal,
+        warnings=result.warnings,
+        source=result.source,
+        trace_id=result.trace_id,
+    )
+
+
 def _enum_strings(changes: dict[str, object]) -> dict[str, object]:
     """Coerce StrEnum members to plain ``str`` before they reach the column.
 
@@ -462,5 +514,6 @@ __all__ = [
     "router",
     "sections_router",
     "slots_router",
+    "structures_router",
     "units_router",
 ]

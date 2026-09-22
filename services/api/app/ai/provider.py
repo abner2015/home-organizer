@@ -33,6 +33,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.db.enums import RoomType, StorageSectionType, StorageUnitType
+
 # --------------------------------------------------------------------------- Vision output
 
 
@@ -93,6 +95,85 @@ class ItemInferenceOutput(BaseModel):
     estimated_size: Literal["small", "medium", "large"] | None = None
     is_sensitive: bool = False
     needs_lock: bool = False
+
+
+# --------------------------------------------------------------------------- structure proposal output
+
+
+# The ``max_length`` values below are *runaway guards*, deliberately looser
+# than the sizes the product wants (6 rooms / 12 units / 12 sections / 20
+# slots). A proposal that overshoots by a few nodes is trimmed by
+# ``agents.structure.validate`` and explained to the user as a warning; if the
+# schema itself refused it, the only available response would be to retry the
+# LLM and then fail the request over something a human would just delete.
+
+
+class ProposedSlot(BaseModel):
+    """One storage position the model suggests adding.
+
+    ``capacity_hint`` is a ``Literal`` here even though the write API's column
+    is free text: this is the *model's* output contract, and the ranking code
+    only understands these three words (plus a bare digit, which the model has
+    no reason to emit for a freshly built slot). Narrowing it stops the model
+    from inventing ``"medium-large"``, which no parser recognizes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=32)
+    label: str | None = Field(default=None, max_length=200)
+    allowed_categories: list[str] = Field(default_factory=list, max_length=64)
+    capacity_hint: Literal["small", "medium", "large"] | None = None
+
+
+class ProposedSection(BaseModel):
+    """One partition inside a storage unit (a layer / drawer / box)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=100)
+    section_type: StorageSectionType
+    slots: list[ProposedSlot] = Field(default_factory=list, max_length=64)
+
+
+class ProposedUnit(BaseModel):
+    """One piece of storage furniture inside a room."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=100)
+    unit_type: StorageUnitType
+    sections: list[ProposedSection] = Field(default_factory=list, max_length=32)
+
+
+class ProposedRoom(BaseModel):
+    """One room of the home."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=100)
+    room_type: RoomType
+    units: list[ProposedUnit] = Field(default_factory=list, max_length=32)
+
+
+class StructureProposalOutput(BaseModel):
+    """Structured output of a structure-proposal LLM call.
+
+    Depth is bounded by the nesting itself rather than by a ``max_depth`` the
+    model would have to be trusted about. Not ``strict`` for the usual reason —
+    this is validated against JSON text from the LLM, where the enum fields
+    arrive as strings.
+
+    Nothing here is persisted by the proposal call itself: the shape mirrors
+    what the write API can create, and the user confirms before any of it
+    becomes rows.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rooms: list[ProposedRoom] = Field(min_length=1, max_length=32)
+    rationale: str = Field(default="", max_length=512)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 # --------------------------------------------------------------------------- Ranking output (Phase 8 stub)
@@ -193,6 +274,7 @@ class AIProvider(Protocol):
         prompt: str,
         schema: type[BaseModel],
         *,
+        image_url: str | None = None,
         timeout_s: float = 30.0,
     ) -> BaseModel:
         """Generic structured-output call.
@@ -201,6 +283,14 @@ class AIProvider(Protocol):
         to conform to ``schema`` (e.g. via ``response_format`` or tool use)
         and return a parsed instance. On any parse failure it must raise
         ``AIOutputParseError`` (not return ``None`` / a dict).
+
+        ``image_url`` attaches one image to the same call. It is opaque to the
+        provider — a public URL, a presigned URL, or a ``data:`` URI. When it
+        is set the provider must use its *vision* model and a multimodal
+        content body: the text model of a text-only endpoint (DeepSeek, for
+        one) rejects image parts with a 400. ``None`` (the default) leaves the
+        request byte-identical to the pre-P0.2 shape, so existing callers such
+        as ``rank_candidates`` need no change.
         """
         ...
 

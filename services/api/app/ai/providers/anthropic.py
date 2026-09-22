@@ -162,27 +162,38 @@ class AnthropicProvider:
         prompt: str,
         schema: type[BaseModel],
         *,
+        image_url: str | None = None,
         timeout_s: float | None = None,
     ) -> BaseModel:
+        """Force a JSON object and parse it into ``schema``.
+
+        With ``image_url`` set the call becomes multimodal and runs on the
+        vision model, matching :meth:`vision`.
+        """
         timeout = timeout_s or self.default_timeout_s
         schema_hint = schema.model_json_schema()
+        user_text = (
+            f"{prompt}\n\n"
+            f"请严格按以下 JSON schema 输出：\n"
+            f"{json.dumps(schema_hint, ensure_ascii=False)}"
+        )
+        if image_url:
+            content: str | list[dict[str, Any]] = [
+                {"type": "text", "text": user_text},
+                self._image_block(image_url),
+            ]
+            model = self.vision_model
+        else:
+            content = user_text
+            model = self.chat_model
         body = {
-            "model": self.chat_model,
+            "model": model,
             "max_tokens": 1024,
             "system": (
                 "你是一个严格遵循 schema 的结构化输出助手。"
                 "只输出一个 JSON 对象，不要任何额外文本。"
             ),
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        f"{prompt}\n\n"
-                        f"请严格按以下 JSON schema 输出：\n"
-                        f"{json.dumps(schema_hint, ensure_ascii=False)}"
-                    ),
-                }
-            ],
+            "messages": [{"role": "user", "content": content}],
         }
         try:
             response = await self._post_messages(body, timeout=timeout)

@@ -80,6 +80,7 @@ app.include_router(structure_v1.rooms_router, prefix="/api/v1")
 app.include_router(structure_v1.units_router, prefix="/api/v1")
 app.include_router(structure_v1.sections_router, prefix="/api/v1")
 app.include_router(structure_v1.slots_router, prefix="/api/v1")
+app.include_router(structure_v1.structures_router, prefix="/api/v1")
 app.include_router(uploads_v1.router, prefix="/api/v1")
 
 
