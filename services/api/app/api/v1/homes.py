@@ -37,6 +37,10 @@ from app.schemas.home import (
     StorageSectionView,
     StorageSlotView,
     StorageUnitView,
+    room_view,
+    section_view,
+    slot_view,
+    unit_view,
 )
 from app.tools.home_tools import (
     get_home,
@@ -71,52 +75,6 @@ def _home_view(data: dict[str, Any], **counts: int | None) -> HomeView:
     )
 
 
-def _room_view(data: dict[str, Any], *, unit_count: int = 0) -> RoomView:
-    return RoomView(
-        id=data["id"],
-        home_id=data["home_id"],
-        name=data["name"],
-        room_type=data["room_type"],
-        sort_order=int(data.get("sort_order") or 0),
-        unit_count=unit_count,
-    )
-
-
-def _slot_view(data: dict[str, Any]) -> StorageSlotView:
-    return StorageSlotView(
-        id=data["id"],
-        section_id=data["section_id"],
-        code=data["code"],
-        label=data.get("label"),
-        capacity_hint=data.get("capacity_hint"),
-        allowed_categories=list(data.get("allowed_categories") or []),
-        sort_order=int(data.get("sort_order") or 0),
-        active_count=int(data.get("active_count") or 0),
-    )
-
-
-def _section_view(data: dict[str, Any], *, slots: list[StorageSlotView]) -> StorageSectionView:
-    return StorageSectionView(
-        id=data["id"],
-        unit_id=data["unit_id"],
-        name=data["name"],
-        section_type=data["section_type"],
-        sort_order=int(data.get("sort_order") or 0),
-        slots=slots,
-    )
-
-
-def _unit_view(data: dict[str, Any], *, sections: list[StorageSectionView]) -> StorageUnitView:
-    return StorageUnitView(
-        id=data["id"],
-        room_id=data["room_id"],
-        name=data["name"],
-        unit_type=data["unit_type"],
-        sort_order=int(data.get("sort_order") or 0),
-        sections=sections,
-    )
-
-
 async def _nested_units(
     db: AsyncSession, *, home_id: uuid.UUID, room_id: uuid.UUID | None = None
 ) -> list[dict[str, Any]]:
@@ -131,18 +89,18 @@ async def _nested_units(
 
     slots_by_section: dict[str, list[StorageSlotView]] = defaultdict(list)
     for slot in slots:
-        slots_by_section[slot["section_id"]].append(_slot_view(slot))
+        slots_by_section[slot["section_id"]].append(slot_view(slot))
 
     sections_by_unit: dict[str, list[StorageSectionView]] = defaultdict(list)
     for section in sections:
         sections_by_unit[section["unit_id"]].append(
-            _section_view(section, slots=slots_by_section[section["id"]])
+            section_view(section, slots=slots_by_section[section["id"]])
         )
 
     out: list[dict[str, Any]] = []
     for unit in units:
         out.append(
-            _unit_view(unit, sections=sections_by_unit[unit["id"]]).model_dump(mode="json")
+            unit_view(unit, sections=sections_by_unit[unit["id"]]).model_dump(mode="json")
         )
     return out
 
@@ -158,7 +116,7 @@ async def _space_tree(db: AsyncSession, *, home_id: uuid.UUID) -> SpaceTreeView:
 
     room_trees = [
         RoomTreeView(
-            **_room_view(room, unit_count=len(units_by_room[room["id"]])).model_dump(),
+            **room_view(room, unit_count=len(units_by_room[room["id"]])).model_dump(),
             units=units_by_room[room["id"]],
         )
         for room in rooms
@@ -238,7 +196,7 @@ async def list_rooms(
     unit_counts: dict[str, int] = defaultdict(int)
     for unit in units:
         unit_counts[unit["room_id"]] += 1
-    return [_room_view(room, unit_count=unit_counts[room["id"]]) for room in rooms]
+    return [room_view(room, unit_count=unit_counts[room["id"]]) for room in rooms]
 
 
 @router.get(
@@ -267,7 +225,7 @@ async def list_slots(
 ) -> list[StorageSlotView]:
     await ensure_member(db, home_id=home_id, user_id=actor.user_id)
     slots = await get_storage_slots(db=db, home_id=home_id)
-    return [_slot_view(slot) for slot in slots]
+    return [slot_view(slot) for slot in slots]
 
 
 @rooms_router.get(

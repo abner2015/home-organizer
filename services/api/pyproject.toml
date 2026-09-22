@@ -65,6 +65,11 @@ ignore = ["E501"]
 # Verifier failure messages are user-facing (they land in
 # ``RecommendResponse.error``), so they are Chinese with fullwidth punctuation.
 "app/verification/checks.py" = ["RUF001", "RUF002", "RUF003"]
+# Storage-structure writes: the 409 / 403 messages name the blocker to the
+# user ("该房间下还有 3 件收纳家具，不能删除").
+"app/api/v1/structure.py" = ["RUF001", "RUF002", "RUF003"]
+"app/schemas/structure.py" = ["RUF001", "RUF002", "RUF003"]
+"app/services/structure_service.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -22,7 +22,6 @@ from app.db.enums import (
 from app.models.item import Item
 from app.models.placement import ItemPlacement
 from app.models.recommendation import Recommendation
-from app.models.storage import StorageSlot
 from app.models.trace import AgentTrace
 
 
@@ -89,19 +88,15 @@ async def _ensure_item_in_home(
 async def _ensure_slot_in_home(
     db: AsyncSession, slot_id: uuid.UUID, home_id: uuid.UUID
 ) -> None:
-    """Verify the slot exists and belongs to the given home (cross-home → 404)."""
-    from app.models.room import Room
-    from app.models.storage import StorageSection, StorageUnit
+    """Verify the slot exists and belongs to the given home (cross-home → 404).
 
-    stmt = (
-        select(StorageSlot.id)
-        .join(StorageSection, StorageSection.id == StorageSlot.section_id)
-        .join(StorageUnit, StorageUnit.id == StorageSection.unit_id)
-        .join(Room, Room.id == StorageUnit.room_id)
-        .where(StorageSlot.id == slot_id, Room.home_id == home_id)
-    )
-    if (await db.execute(stmt)).first() is None:
-        raise NotFoundError("Storage slot not found")
+    Delegates to ``structure_service.load_slot`` — the write API needs the same
+    lookup and returning the row, so keeping a second copy of the four-table
+    join here would let the two drift apart.
+    """
+    from app.services.structure_service import load_slot
+
+    await load_slot(db, slot_id=slot_id, home_id=home_id)
 
 
 async def create_recommendation(

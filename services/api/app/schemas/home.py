@@ -9,6 +9,7 @@ JSON-safe dicts whose UUIDs are strings.
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -100,6 +101,65 @@ class SpaceTreeView(BaseModel):
     rooms: list[RoomTreeView] = Field(default_factory=list)
 
 
+# ------------------------------------------------------------------- factories
+#
+# The read routes in ``app/api/v1/homes.py`` and the write routes in
+# ``app/api/v1/structure.py`` both project rows into these views, so the
+# projection lives here rather than privately in one of them. Input is the
+# JSON-shaped ``dict`` the tool layer already produces; the write routes build
+# one from the ORM row they just created.
+
+
+def room_view(data: dict[str, Any], *, unit_count: int = 0) -> RoomView:
+    return RoomView(
+        id=data["id"],
+        home_id=data["home_id"],
+        name=data["name"],
+        room_type=data["room_type"],
+        sort_order=int(data.get("sort_order") or 0),
+        unit_count=unit_count,
+    )
+
+
+def slot_view(data: dict[str, Any]) -> StorageSlotView:
+    return StorageSlotView(
+        id=data["id"],
+        section_id=data["section_id"],
+        code=data["code"],
+        label=data.get("label"),
+        capacity_hint=data.get("capacity_hint"),
+        allowed_categories=list(data.get("allowed_categories") or []),
+        sort_order=int(data.get("sort_order") or 0),
+        active_count=int(data.get("active_count") or 0),
+    )
+
+
+def section_view(
+    data: dict[str, Any], *, slots: list[StorageSlotView]
+) -> StorageSectionView:
+    return StorageSectionView(
+        id=data["id"],
+        unit_id=data["unit_id"],
+        name=data["name"],
+        section_type=data["section_type"],
+        sort_order=int(data.get("sort_order") or 0),
+        slots=slots,
+    )
+
+
+def unit_view(
+    data: dict[str, Any], *, sections: list[StorageSectionView]
+) -> StorageUnitView:
+    return StorageUnitView(
+        id=data["id"],
+        room_id=data["room_id"],
+        name=data["name"],
+        unit_type=data["unit_type"],
+        sort_order=int(data.get("sort_order") or 0),
+        sections=sections,
+    )
+
+
 __all__ = [
     "HomeView",
     "RoomTreeView",
@@ -108,4 +168,8 @@ __all__ = [
     "StorageSectionView",
     "StorageSlotView",
     "StorageUnitView",
+    "room_view",
+    "section_view",
+    "slot_view",
+    "unit_view",
 ]

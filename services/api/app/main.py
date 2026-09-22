@@ -12,6 +12,7 @@ from app.api.v1 import homes as homes_v1
 from app.api.v1 import items as items_v1
 from app.api.v1 import recommendations as recommendations_v1
 from app.api.v1 import search as search_v1
+from app.api.v1 import structure as structure_v1
 from app.api.v1 import uploads as uploads_v1
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
@@ -71,6 +72,14 @@ app.include_router(homes_v1.rooms_router, prefix="/api/v1")
 app.include_router(items_v1.router, prefix="/api/v1")
 app.include_router(recommendations_v1.router, prefix="/api/v1")
 app.include_router(search_v1.router, prefix="/api/v1")
+# Storage-structure writes. ``/homes`` and ``/rooms`` each carry two routers
+# (reads in homes_v1, writes here); FastAPI matches on the full path *and*
+# method, so ``POST /rooms/{id}/storage-units`` does not shadow the GET.
+app.include_router(structure_v1.router, prefix="/api/v1")
+app.include_router(structure_v1.rooms_router, prefix="/api/v1")
+app.include_router(structure_v1.units_router, prefix="/api/v1")
+app.include_router(structure_v1.sections_router, prefix="/api/v1")
+app.include_router(structure_v1.slots_router, prefix="/api/v1")
 app.include_router(uploads_v1.router, prefix="/api/v1")
 
 
