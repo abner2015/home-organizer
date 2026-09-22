@@ -31,14 +31,12 @@ export default function LoginPage() {
         setError("这个账号下还没有家庭空间，请联系管理员或重新注册。");
         return;
       }
-      setSession(
-        {
-          token: tokens.access_token,
-          homeId: home.id,
-          displayName: me.display_name || "我",
-        },
-        tokens.expires_in,
-      );
+      setSession({
+        token: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        homeId: home.id,
+        displayName: me.display_name || "我",
+      });
       router.replace("/");
       router.refresh();
     } catch (err) {

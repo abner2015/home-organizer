@@ -5,7 +5,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { HOME_COOKIE, NAME_COOKIE, TOKEN_COOKIE } from "./cookies";
+import { HOME_COOKIE, NAME_COOKIE, REFRESH_COOKIE, TOKEN_COOKIE } from "./cookies";
 import type { Session } from "./session";
 
 /** The session from the request's cookies, or `null` when signed out. */
@@ -14,7 +14,12 @@ export async function getServerSession(): Promise<Session | null> {
   const token = store.get(TOKEN_COOKIE)?.value;
   const homeId = store.get(HOME_COOKIE)?.value;
   if (!token || !homeId) return null;
-  return { token, homeId, displayName: store.get(NAME_COOKIE)?.value ?? "我" };
+  return {
+    token,
+    refreshToken: store.get(REFRESH_COOKIE)?.value ?? null,
+    homeId,
+    displayName: store.get(NAME_COOKIE)?.value ?? "我",
+  };
 }
 
 /**

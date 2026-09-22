@@ -4,5 +4,6 @@
 // browser-oriented `session.ts`.
 
 export const TOKEN_COOKIE = "ho_token";
+export const REFRESH_COOKIE = "ho_refresh";
 export const HOME_COOKIE = "ho_home";
 export const NAME_COOKIE = "ho_name";

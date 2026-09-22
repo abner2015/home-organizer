@@ -43,7 +43,7 @@ import type {
   User,
   UUID,
 } from "./types";
-import { clearSession } from "./session";
+import { clearSession, getSession, updateSessionTokens } from "./session";
 
 // In the browser we hit relative URLs so the Next.js rewrite kicks in.
 // During SSR we can fall back to the configured API base.
@@ -70,9 +70,31 @@ export class APIError extends Error {
   }
 }
 
+/**
+ * Trade the stored refresh token for a new pair, in the browser only.
+ *
+ * Reads the token straight from the cookie rather than from a `Session`, so it
+ * still works when the caller is holding a session object it captured earlier
+ * in the page's life. Returns whether the cookies were replaced.
+ */
+async function renewSession(): Promise<boolean> {
+  const refreshToken = getSession()?.refreshToken;
+  if (!refreshToken) return false;
+  try {
+    const tokens = await api.refresh(refreshToken);
+    updateSessionTokens(tokens);
+    return true;
+  } catch {
+    // Either the refresh token is no longer good or the API is unreachable.
+    // Both mean "this session cannot continue"; the caller signs out.
+    return false;
+  }
+}
+
 async function request<T>(
   path: string,
   init: RequestInit & { session?: ApiSession },
+  retried = false,
 ): Promise<T> {
   const { session, ...rest } = init;
   const overrideHeaders: Record<string, string> = {};
@@ -108,10 +130,27 @@ async function request<T>(
     }
   }
   if (!res.ok) {
-    // An expired token is indistinguishable from a revoked one, so drop the
-    // session and let the middleware route us to /login rather than leaving
-    // the user on a page that can only ever fail.
+    // A 401 usually just means the access token aged out while this page was
+    // open — the common case, since a page can sit idle for an hour without any
+    // navigation for the middleware to renew on. Try the refresh token once
+    // before concluding anything; only if that also fails is the session
+    // genuinely over, and then the user belongs on /login rather than on a page
+    // that can only ever fail.
     if (res.status === 401 && session && isBrowser) {
+      if (!retried && (await renewSession())) {
+        // The session object the caller passed in still holds the dead token,
+        // so re-read it rather than reusing `session` — and keep the caller's
+        // choice about whether to name a home.
+        const current = getSession();
+        return request<T>(
+          path,
+          {
+            ...init,
+            session: current ? { ...session, token: current.token } : session,
+          },
+          true,
+        );
+      }
       clearSession();
       window.location.href = "/login";
     }
@@ -138,6 +177,19 @@ export const api = {
     return request<TokenResponse>("/api/v1/auth/login", {
       method: "POST",
       body: JSON.stringify(body),
+    });
+  },
+
+  /**
+   * Rotate a refresh token for a new access + refresh pair.
+   *
+   * Deliberately takes no `session`: a 401 here must not trigger the retry
+   * above, or a dead refresh token would recurse instead of signing out.
+   */
+  async refresh(refreshToken: string): Promise<TokenResponse> {
+    return request<TokenResponse>("/api/v1/auth/refresh", {
+      method: "POST",
+      body: JSON.stringify({ refresh_token: refreshToken }),
     });
   },
 
