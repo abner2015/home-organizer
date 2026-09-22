@@ -28,6 +28,7 @@ import type {
   PaginatedItems,
   PatchRequest,
   PatchResponse,
+  PlaceItemBody,
   PresignRequest,
   PresignResponse,
   ProposeStructureBody,
@@ -380,6 +381,27 @@ export const api = {
       method: "PATCH",
       session,
       body: JSON.stringify(body),
+    });
+  },
+
+  // ------------------------------------------------------------- placements
+
+  // Manual placement ("反向录入"): the item already exists and the user already
+  // knows where it goes, so no recommendation is involved. The item's previous
+  // active placement is closed by the API.
+  async placeItem(body: PlaceItemBody, session: ApiSession): Promise<ItemPlacement> {
+    return request<ItemPlacement>("/api/v1/placements", {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  // Soft close — the row stays as history, `removed_at` gets stamped.
+  async unplaceItem(placementId: UUID, session: ApiSession): Promise<ItemPlacement> {
+    return request<ItemPlacement>(`/api/v1/placements/${placementId}`, {
+      method: "DELETE",
+      session,
     });
   },
 

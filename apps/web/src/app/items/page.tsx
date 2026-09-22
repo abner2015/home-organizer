@@ -3,6 +3,7 @@ import { api } from "@/lib/api";
 import { requireSession } from "@/lib/session.server";
 import { PageHeader } from "@/components/PageHeader";
 import { ItemGrid } from "@/components/Items";
+import { PlaceItemButton } from "@/components/placements/PlaceItemButton";
 import { EmptyState, ErrorState } from "@/components/States";
 import { CATEGORY_LABEL } from "@/lib/format";
 import type { Item } from "@/lib/types";
@@ -42,9 +43,14 @@ export default async function ItemsPage({
         title="物品"
         description={total > 0 ? `共 ${total} 件` : "你的家庭物品清单"}
         actions={
-          <Link href="/items/new" className="btn-primary">
-            + 添加物品
-          </Link>
+          <>
+            <Link href="/items/place" className="btn-secondary">
+              批量归位
+            </Link>
+            <Link href="/items/new" className="btn-primary">
+              + 添加物品
+            </Link>
+          </>
         }
       />
 
@@ -88,7 +94,12 @@ export default async function ItemsPage({
           }
         />
       ) : (
-        <ItemGrid items={items} />
+        <ItemGrid
+          items={items}
+          renderAction={(item) => (
+            <PlaceItemButton item={item} session={session} />
+          )}
+        />
       )}
     </div>
   );

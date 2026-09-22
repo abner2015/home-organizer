@@ -3,7 +3,15 @@ import type { Item } from "@/lib/types";
 import { formatRelative, formatSlotPath, formatCategory } from "@/lib/format";
 import { clsx } from "@/lib/format";
 
-export function ItemCard({ item, href }: { item: Item; href?: string }) {
+export function ItemCard({
+  item,
+  href,
+  action,
+}: {
+  item: Item;
+  href?: string;
+  action?: React.ReactNode;
+}) {
   const content = (
     <div className="card flex gap-3 p-3 hover:border-brand-200 hover:shadow-soft transition-all">
       <Thumb url={item.primary_image_url} name={item.name} />
@@ -24,14 +32,21 @@ export function ItemCard({ item, href }: { item: Item; href?: string }) {
       </div>
     </div>
   );
-  if (href) {
-    return (
-      <Link href={href} className="block">
-        {content}
-      </Link>
-    );
-  }
-  return content;
+  // The action is rendered as a sibling of the link, never inside it: the whole
+  // card is already a `<Link>`, and a button nested in an anchor would both
+  // navigate and be invalid HTML.
+  return (
+    <div className="space-y-2">
+      {href ? (
+        <Link href={href} className="block">
+          {content}
+        </Link>
+      ) : (
+        content
+      )}
+      {action ? <div className="flex justify-end">{action}</div> : null}
+    </div>
+  );
 }
 
 function Thumb({ url, name }: { url?: string; name: string }) {
@@ -58,14 +73,27 @@ function Thumb({ url, name }: { url?: string; name: string }) {
   );
 }
 
-export function ItemGrid({ items, empty }: { items: Item[]; empty?: React.ReactNode }) {
+export function ItemGrid({
+  items,
+  empty,
+  renderAction,
+}: {
+  items: Item[];
+  empty?: React.ReactNode;
+  renderAction?: (item: Item) => React.ReactNode;
+}) {
   if (items.length === 0 && empty) {
     return <>{empty}</>;
   }
   return (
     <div className={clsx("grid gap-3 sm:grid-cols-2 lg:grid-cols-3")}>
       {items.map((it) => (
-        <ItemCard key={it.id} item={it} href={`/items/${it.id}`} />
+        <ItemCard
+          key={it.id}
+          item={it}
+          href={`/items/${it.id}`}
+          action={renderAction?.(it)}
+        />
       ))}
     </div>
   );

@@ -276,6 +276,14 @@ export interface ItemPlacement {
   note?: string;
 }
 
+// Body for POST /placements — put an item straight into a slot ("反向录入").
+// No model runs; the item's previous active placement is closed server-side.
+export interface PlaceItemBody {
+  item_id: UUID;
+  slot_id: UUID;
+  note?: string | null;
+}
+
 export interface PaginatedItems {
   items: Item[];
   page: number;

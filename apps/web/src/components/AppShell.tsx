@@ -23,6 +23,7 @@ const SECONDARY: NavItem[] = [
   { href: "/home/rooms", label: "房间", icon: <DoorIcon /> },
   { href: "/home/storage", label: "收纳空间", icon: <ShelfIcon /> },
   { href: "/home/setup", label: "搭建我的家", icon: <CompassIcon /> },
+  { href: "/items/place", label: "批量归位", icon: <ShelfIcon /> },
   { href: "/items/new", label: "添加物品", icon: <PlusIcon /> },
 ];
 

@@ -3,8 +3,11 @@ import { notFound } from "next/navigation";
 import { api } from "@/lib/api";
 import { requireSession } from "@/lib/session.server";
 import { PageHeader } from "@/components/PageHeader";
-import { ErrorState, Loading } from "@/components/States";
+import { ErrorState } from "@/components/States";
+import { PlaceItemButton } from "@/components/placements/PlaceItemButton";
+import { RemovePlacementButton } from "@/components/placements/RemovePlacementButton";
 import { formatDateTime, formatSlotPath, formatCategory, formatSize } from "@/lib/format";
+import type { ApiSession } from "@/lib/api";
 import type { Item, ItemPlacement } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -12,6 +15,7 @@ export const dynamic = "force-dynamic";
 interface DetailData {
   item: Item | null;
   placements: ItemPlacement[];
+  session: ApiSession;
   error: string | null;
 }
 
@@ -22,10 +26,10 @@ async function loadItem(id: string): Promise<DetailData> {
       api.getItem(id, session),
       api.getItemPlacements(id, session).catch(() => []),
     ]);
-    return { item, placements, error: null };
+    return { item, placements, session, error: null };
   } catch (err) {
     console.error("item load failed", err);
-    return { item: null, placements: [], error: "无法加载物品详情" };
+    return { item: null, placements: [], session, error: "无法加载物品详情" };
   }
 }
 
@@ -44,6 +48,10 @@ export default async function ItemDetail({ params }: { params: { id: string } })
   }
   const item = data.item!;
   const placement = item.current_placement;
+  // The placements endpoint returns the active row first (newest first), but
+  // pick by predicate rather than by index so reordering it above cannot
+  // silently attach 「移出」 to a closed row.
+  const activeId = data.placements.find((p) => p.removed_at === null)?.id ?? null;
   return (
     <div className="space-y-6">
       <PageHeader
@@ -114,13 +122,17 @@ export default async function ItemDetail({ params }: { params: { id: string } })
             ) : null}
           </dl>
 
-          <div className="mt-5 flex flex-wrap gap-2">
+          <div className="mt-5 flex flex-wrap items-center gap-2">
             <Link
               href={`/items/new?recommend_for=${item.id}`}
               className="btn-primary"
             >
               ✨ 获取推荐位置
             </Link>
+            <PlaceItemButton item={item} session={data.session} label="放到别处" />
+            {activeId ? (
+              <RemovePlacementButton placementId={activeId} session={data.session} />
+            ) : null}
             <Link href="/assistant" className="btn-secondary">
               AI 助手查找
             </Link>
