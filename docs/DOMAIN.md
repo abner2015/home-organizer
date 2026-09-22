@@ -2,10 +2,12 @@
 
 > 完整定义核心实体、属性、关系与业务规则。表结构见 `docs/DATABASE.md`。
 >
-> 最后更新：2026-09-21 —— 订正 `Recommendation.status`（`adjusted` → `superseded`）、
+> 最后更新：2026-09-22 —— §2.10 补 `ItemPlacement` 的两条写路径（AI accept / 手动落位，
+> 共用一个原语）、§4.1 与 §8 订正「删 slot 的判据是任何 placement 记录，不只是 active」。
+> （2026-09-21：订正 `Recommendation.status`（`adjusted` → `superseded`）、
 > §5 的 schema（类名 `RankingOutput`、上限 3、不加 `strict=True`）、
 > §7 的 `AgentTrace.steps` 形状（键名 `state`，取值是 `RecommendationState`，
-> 不是 `think/act/observe/...` 那套 ReAct 词汇）。
+> 不是 `think/act/observe/...` 那套 ReAct 词汇）。）
 >
 > **代码是唯一事实来源。** 本文档在描述 schema 时尽量贴出代码原文，但仍可能滞后；
 > 冲突时以 `app/models/` 与 `app/ai/provider.py` 为准。
@@ -190,10 +192,22 @@ User ──< HomeMembership >── Home
 | removed_at | timestamptz? | null = 当前在位 |
 | placed_by | UUID | FK → User |
 | source | enum | `ai_recommendation` / `user_manual` |
-| recommendation_id | UUID? | FK → Recommendation（如果是 AI 推荐落库的） |
+| recommendation_id | UUID? | FK → Recommendation（如果是 AI 推荐落库的；**手动落位为 `NULL`**） |
 | note | str? | |
 
 部分唯一索引：`UNIQUE (item_id) WHERE removed_at IS NULL` —— 一个物品同时只能在一个 Slot 中。
+
+**两条写路径，一个原语**（`app/tools/write_tools.py:_create_placement`）：
+
+1. **AI 路径** —— `POST /recommendations/{id}/accept`（`source = ai_recommendation`，
+   用户 PATCH 改过则是 `user_manual`）。
+2. **手动路径（P0.3 反向录入）** —— `POST /placements`（`source = user_manual`，
+   `recommendation_id = NULL`），**不调用任何 LLM**，也**不碰任何 `Recommendation` 行** ——
+   一条手动落位并不「解决」一条 AI 建议，用户之后仍可接受 / 拒绝它。
+
+两条路径都会先软关闭该物品已有的 active placement。**"移出"** 同样是软关闭
+（`DELETE /placements/{id}` → `removed_at = now()`），**行永不物理删除** ——
+历史靠 `removed_at` 而非删除来体现（F-2.3）。
 
 ---
 
@@ -351,7 +365,10 @@ User ──< HomeMembership >── Home
 
 - 任何 `StorageSlot` 必须挂在一个 `StorageSection` 下；不允许跳过层级。
 - 删除 `StorageUnit` 需校验无 active `ItemPlacement`；否则禁止。
-- 删除 `StorageSlot` 需校验无 active `ItemPlacement`；否则禁止。
+- 删除 `StorageSlot` 需校验**不存在任何 `ItemPlacement` 记录（含已 `removed` 的）**；
+  否则 409 —— `item_placements.slot_id` 是 `ondelete="RESTRICT"`，只数 active 会让数据库
+  抛 `IntegrityError`（500）。`details` 分开给 `active_count` / `historical_count`。
+  （实现见 `app/services/structure_service.py`；`docs/DEVELOPMENT_PLAN.md` P0.2。）
 
 ### 4.2 物品
 
@@ -472,7 +489,8 @@ class RecommendationState(StrEnum):
 - 任意时刻，DB 中对每个 Item 最多一个 `ItemPlacement` 满足 `removed_at IS NULL`。
 - 任意 `Recommendation.candidates[*].slot_id` ∈ 现存 `StorageSlot.id`。
 - 任意 `Recommendation` 都有一条 `AgentTrace` 关联。
-- 删除 `StorageSlot` 不允许存在 active `ItemPlacement`。
+- 删除 `StorageSlot` 不允许存在**任何** `ItemPlacement` 记录（active 或已 `removed`）——
+  FK 是 `RESTRICT`，历史记录同样是拒绝删除的理由。
 - `HomeRule.rule_type = hard` 必须在 Verifier 路径中被强制执行。
 
 ---

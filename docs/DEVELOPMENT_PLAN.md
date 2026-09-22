@@ -6,7 +6,7 @@
 >   真实产物路径、真实验收结论、真实基线。已完成的部分不再有「任务」，只有事实。
 > - **下篇 · P0 路线图**（P0.0–P0.4）：唯一还在推进的计划。每个 P0.x 都带交付物与验收标准。
 >
-> 最后更新：2026-09-21 —— 去重编号、订正路径、删除已被证伪的 `strict=True` 处方、新增 P0 路线图。
+> 最后更新：2026-09-22 —— P0.3 反向录入交付；基线 600 → 626。
 >
 > 背景：本文件原稿写于**开工前**。开工后实际走出来的顺序与原稿并不一致，于是原稿里出现了
 > Phase 9、Phase 10 各两份（旧副本与新副本交织），路径也停留在 `apps/api/`。本次一并归位。
@@ -50,7 +50,7 @@
 
 **当前基线**（任何改动都不得使其上升/下降）：
 
-- `services/api`：**600 passed / 1 skipped**
+- `services/api`：**626 passed / 1 skipped**
 - `ruff check app/ tests/`：**32**（历史遗留，不得上升）
 - `mypy app/`：**20**（历史遗留，不得上升）
 - `apps/web`：`npx tsc --noEmit` 与 `npx next lint` **干净**
@@ -168,13 +168,14 @@ P0 是「**让一个真人第一次用起来，能走完一遍并觉得有用**�
 
 ```
 P0.1 真实账号 ✅  ──┐
-                    ├──► P0.2 拍照即建模 ✅ ──┬──► P0.3 反向录入
+                    ├──► P0.2 拍照即建模 ✅ ──┬──► P0.3 反向录入 ✅
                     │                         └──► P0.4 闭环 + 讲理由
                     └──► （P0.1 尾巴：token 续期 ✅）
 ```
 
 P0.2 是硬前提：**没有真实的 slot，推荐、反向录入、闭环全都无从谈起。**
 现在这条前提已经成立 —— 全新账号可以在浏览器里从空树搭出第一个可用 slot。
+P0.3 又把它反过来用：**放不需要 AI 也能发生**，AI 只负责「不知道放哪」的那一半。
 
 ---
 
@@ -263,24 +264,50 @@ prompt `app/agent/prompts/structure.v1.md`；前端 `apps/web/src/app/home/setup
 
 ---
 
-## P0.3 — 反向录入 ⏳
+## P0.3 — 反向录入 ✅ 已交付（2026-09-22）
 
 **为什么**：物品**已经在某个地方**时，用户不该被迫走一遍「拍照 → 识别 → 推荐 → 接受」。
 已经有明确去向的东西应当能直接落位。这是「无需繁琐录入」的另一半。
 
 **交付物**
 
-1. 把已有物品**直接放进指定 slot** 的接口：直写 `ItemPlacement`（`source=user_manual`），
-   **不经过 LLM**；同一物品的旧 active placement 需被移除。
-2. Web：物品详情 / 列表里的「放到这里」交互，支持连续补录多件。
+1. ✅ **直接落位接口**（`app/api/v1/placements.py` + `app/agents/placement_service.py`）：
+   `POST /api/v1/placements` → 201 直写 `ItemPlacement`（`source=user_manual`），
+   **不经过 LLM**；`DELETE /api/v1/placements/{id}` → 200 **软关闭**（置 `removed_at`，
+   行永不物理删除，历史仍可读）。
+2. ✅ **「关旧 + 插新」只有一份实现**：`app/tools/write_tools.py:_create_placement` /
+   `close_active_placements`，`save_placement`（AI 路径）与 `place_item`（手动路径）共用。
+   原语放在 `tools/` 而不是 `agents/` —— 反过来会让低层工具依赖 agents 包（倒置依赖）。
+3. ✅ **Web**：物品列表 / 详情页逐件「放到这里」（放完**不导航**，所以「连续补录多件」成立）；
+   独立的 `/items/place`「批量归位」页（先选一格，再勾选多件一次落位）。
 
 **验收**
 
-- [ ] 用户能把一件物品直接「放」进某个 slot，`item_placements` 正确落库
-- [ ] 物品详情显示当前位置，且**不触发任何 LLM 调用**（`agent_traces` 行数不增）
-- [ ] 跨 home 的 slot → 404；删除随后被正确反映在空间树上
+- [x] 用户能把一件物品直接「放」进某个 slot，`item_placements` 正确落库
+      （`tests/api/test_placement_write_api.py`，17 条）
+- [x] 物品详情显示当前位置，且**不触发任何 LLM 调用** —— 断言 `agent_traces` 行数不变
+- [x] 跨 home 的 item / slot → 404；未知 slot → 404；无凭证 → 401
+- [x] 同一物品落两次后**恰好一条 active**（显式数行数，不依赖部分唯一索引 —— SQLite 不强制它）
+- [x] 空间树该格 `active_count`：0 → 落位后 1 → 移出后 0
+- [x] 重复 `DELETE` → 409；`DELETE` 跨 home → 404
+- [x] 基线：**626 passed / 1 skipped**，ruff 32，mypy 20；`tsc --noEmit` + `next lint` 干净
 
-**依赖**：P0.2（得先有 slot 可放）。
+**顺带修的真实 bug**：`accept_recommendation` 建新 `ItemPlacement` 时**不关闭**该物品已有的
+active placement，只靠 `uq_item_placements_one_active_per_item` 兜底 —— PG 上 `IntegrityError`
+（500），SQLite 上静默产生两条 active 而 `_active_placement_by_item` 用 dict 收敛、后写的悄悄赢。
+两条写路径现在共用 `_create_placement`，回归由
+`tests/unit/test_placement_service.py::test_accept_closes_previous_active_placement` 守住。
+
+**落地位置**：后端 `app/{api/v1/placements.py, agents/placement_service.py,
+tools/write_tools.py, schemas/item.py}`；前端 `apps/web/src/components/placements/*`
+（`SlotPicker` / `PlaceItemButton` / `RemovePlacementButton` / `BatchPlaceClient`）+
+`apps/web/src/app/items/place/page.tsx`。
+
+**本批不做**（留 ⏳）：后端批量端点（批量页逐条 POST 足够）、`PATCH /placements/{id}`、
+手动落位的容量 / 安全校验（那是 AI 路径 verifier 的职责，手动是用户的明确选择）、
+手动落位时 supersede `Recommendation`、并发落位的 409 兜底。
+
+**依赖**：P0.2（得先有 slot 可放）✅。
 
 ---
 
@@ -312,6 +339,7 @@ prompt `app/agent/prompts/structure.v1.md`；前端 `apps/web/src/app/home/setup
 | 推荐接受率低 | 低于 60% | 调 prompt；补强「讲理由」；做用户访谈 |
 | Verifier 误拦截高 | 拦截后用户仍接受的占比 > 5% | 软化 hard 规则；增加 evidence 字段 |
 | AI 提议结构「太啰嗦」 | 用户确认率低 | 减少单次提议数量；优先提议层 / 格而非整个柜子 |
+| 并发落位产生两条 active | 同一物品几乎同时落位 | PG 部分唯一索引抛 `IntegrityError`（500）。单用户 UI 下几乎不可能；要封死就在路由捕 `IntegrityError` 返 409 —— **P0.3 只记录，未实现** |
 | Token 成本失控 | 月成本超预算 | 限流；切更便宜模型；缓存空间快照 |
 
 ## 节奏

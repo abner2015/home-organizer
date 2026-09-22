@@ -2,8 +2,9 @@
 
 > FastAPI，OpenAPI 自动生成。所有路径以 `/api/v1` 开头。
 >
-> 最后更新：2026-09-22 —— §3–§5 的写接口随 P0.2 落地，§7 补 `POST /structures/propose`。
-> （上一版 2026-09-21：补实现状态总览（§0），订正 4 处与代码不符的事实
+> 最后更新：2026-09-22 —— §8 摆放接口随 P0.3 落地（`POST /placements` / `DELETE /placements/{id}`）。
+> （同日上一版：§3–§5 的写接口随 P0.2 落地，§7 补 `POST /structures/propose`。
+> 2026-09-21：补实现状态总览（§0），订正 4 处与代码不符的事实
 > —— recommend 路径、accept 请求体、adjust 端点已废弃、object_key 前缀。）
 
 ---
@@ -28,7 +29,7 @@
 | §6 物品 | presign、assets、files、items（创建 / 查询 / 改 / placements / candidates）、recognize | ✅ |
 | §7 AI | vision、infer、recommend、accept、reject、PATCH、search、**`POST /structures/propose`** | ✅ |
 | | ~~`/recommendations/{recId}/adjust`~~ | ❌ **已废弃**，见 §7 |
-| §8 摆放 | `POST /placements`（直接落位，不经 LLM） | ⏳ P0.3「反向录入」 |
+| §8 摆放 | **`POST /placements`（直接落位，不经 LLM）、`DELETE /placements/{id}`（软关闭）** | ✅ 写（P0.3） |
 | §9 规则与偏好 | 规则 / 偏好的 CRUD | 📋 设计稿 |
 | §10 错误码 | —— | ✅ |
 | §11 请求示例 | —— | ✅ 已订正 |
@@ -37,6 +38,10 @@
 **§3–§5 的写接口已于 2026-09-22 随 P0.2 落地**（`app/api/v1/structure.py` +
 `app/services/structure_service.py`）。在此之前新账号的家是一棵空树、推荐永远候选为空
 （详见 `docs/PRD.md` §2.2 旅程 A）；现在用户可以在浏览器里从零搭出第一个 slot。
+
+**§8 的摆放接口已于 2026-09-22 随 P0.3 落地**（`app/api/v1/placements.py` +
+`app/agents/placement_service.py`）。在此之前，**给物品落位的唯一路径是接受 AI 推荐** ——
+一件已经知道该放哪的东西被迫走一遍「拍照 → 识别 → 推荐 → 接受」（`docs/PRD.md` §2.2 旅程 B）。
 
 **仍未实现的 §3 写接口**：`POST /homes` 与成员管理。注册时自动 provision 一个「我的家」
 （见 §2），所以当前没有任何接口需要创建 home。
@@ -674,6 +679,11 @@ MinIO 部署请继续使用 presigned GET。
 选择的位置是推荐自身携带的 `chosen_slot_id`，落 `ItemPlacement`，
 置 `Recommendation.status = accepted`。同时把该物品的**其他 pending 推荐置为 `superseded`**。
 
+> 落位前会先软关闭该物品**已有的 active placement**（同一物品恒只有一条 active），
+> 与 §8 的手动落位共用同一个原语 `_create_placement`。
+> P0.3 之前这里不关旧行，只靠部分唯一索引兜底：PG 上 `IntegrityError`（500），
+> SQLite 上静默留下两条 active。
+
 ### PATCH /api/v1/recommendations/{recId}
 
 用户想换一个位置时，**先 PATCH 再 accept**：
@@ -764,30 +774,60 @@ PATCH 之后 `status` 仍是 `pending` —— 直到 accept 才落 `ItemPlacemen
 
 ---
 
-## 8. 摆放（Placement）
+## 8. 摆放（Placement）✅ 已实现（P0.3，2026-09-22）
 
-> ⏳ **本节整节未实现（P0.3「反向录入」）。** 这两个端点是 §8 的全部内容，目前都不存在。
->
-> 现在唯一能写 `ItemPlacement` 的路径是**接受推荐**（§7 的 accept）—— 也就是说，
-> 用户无法把一个**已知去向**的物品直接放进某个格子，必须走一遍
-> 「拍照 → 识别 → 推荐 → 接受」。这正是 P0.3 要修的问题（见 `docs/PRD.md` §2.2 旅程 B）。
->
-> `placement_service` 里写 placement 的逻辑已经存在（accept 就在用），P0.3 主要是把它
-> 接出一个**不经 LLM** 的 HTTP 入口。
+「反向录入」：物品**已经存在**、用户**已经知道该放哪**时，直接落位，不进推荐流程。
+这条路径与 §7 的 accept 是**同一个写原语**（`app/tools/write_tools.py:_create_placement`）——
+「关掉旧 active，插入新 active」只有一份实现，区别只在 `source` 与 `recommendation_id`。
 
-### POST /api/v1/placements ⏳ P0.3
+> **不碰任何 `Recommendation` 行。** 一条手动落位并不「解决」一条 AI 建议，用户之后仍可
+> 接受 / 拒绝它（届时 accept 会正常关掉这条手动记录）。手动落位的
+> `recommendation_id = null`、`source = 'user_manual'`。
+>
+> 非本家成员由 `get_actor` 拦成 **404**（不是 403），与全库口径一致。
+
+### POST /api/v1/placements ✅
+
+请求（`extra="forbid"`，未知字段 → 422）：
 
 ```json
-{ "item_id": "uuid", "slot_id": "uuid", "recommendation_id": "uuid?", "note": "string?" }
+{ "item_id": "uuid", "slot_id": "uuid", "note": "string?" }
 ```
 
-- 如果物品已有 active placement，自动 `removed_at = now()`。
-- 创建新 active placement，`source = user_manual`。
-- **不调用任何 LLM**（这是它与 §7 recommend 的本质区别）。
+- 若物品已有 active placement → 自动 `removed_at = now()`（同一物品恒只有一条 active）。
+- 创建新 active placement，`source = "user_manual"`、`recommendation_id = null`。
+- **不调用任何 LLM**（这是它与 §7 recommend 的本质区别）；副作用只有一行
+  `item_placements`，`agent_traces` 行数不变。
+- 响应 **201** + `ItemPlacementView`（含 `slot_path` / `source` / `placed_at` / `removed_at`）。
+- `item_id` 或 `slot_id` 不属于本 home / 不存在 → **404**；无凭证 → 401。
 
-### DELETE /api/v1/placements/{placementId} ⏳ P0.3
+```json
+{
+  "id": "uuid",
+  "item_id": "uuid",
+  "slot_id": "uuid",
+  "slot_path": "厨房 / 吊柜 / 上层 / 左侧",
+  "source": "user_manual",
+  "note": null,
+  "placed_at": "2026-09-22T10:00:00+00:00",
+  "removed_at": null
+}
+```
 
-仅结束（`removed_at = now()`），不物理删除。
+### DELETE /api/v1/placements/{placementId} ✅
+
+仅**结束**（`removed_at = now()`），**永不物理删除** —— 摆放历史仍是可读的
+（见 §6 的 `GET /items/{itemId}/placements`）。
+
+- 响应 **200** + 软关闭后的 `ItemPlacementView`（`removed_at` 已置）；
+  返回整行而不是 204，前端不必再发一次 GET。
+- 对已结束的记录重复调用 → **409**（`conflict`）。
+- 跨 home / 未知 id → **404**；无凭证 → 401。
+
+> **关于并发**：单用户 UI 下不会发生，但同一物品的两个落位请求真的同时到达时，
+> 两边可能都读到「无 active」而双双插入，PG 的部分唯一索引
+> `uq_item_placements_one_active_per_item` 会抛 `IntegrityError`（500）。
+> **本批只记录，未在路由捕获**（见 `docs/DEVELOPMENT_PLAN.md` 风险登记）。
 
 ---
 
@@ -915,14 +955,28 @@ POST /api/v1/items/infer
 → { "vision": { "name": "雨伞", "category": "misc", ... }, "trace_id": "uuid" }
 ```
 
-### 11.2 手动摆放（⏳ P0.3，尚不可用）
+### 11.2 手动摆放（✅ 可用，P0.3）
 
 ```http
 POST /api/v1/placements
+Authorization: Bearer <token>
+X-Home-Id: <uuid>
+
 { "item_id": "uuid", "slot_id": "uuid" }
 ```
 
-当前唯一能给物品落位的路径是 §11.1 的第 6 步「接受推荐」。直接落位是 P0.3 的内容。
+`201`，`source = "user_manual"`，**一个模型都不调**。物品原有 active placement 被自动软关闭。
+
+移出（软关闭，不删行）：
+
+```http
+DELETE /api/v1/placements/{placementId}
+```
+
+`200` + `removed_at` 已置；重复调用 `409`。
+
+在 §11.1 的推荐流程里，落位只发生在第 6 步「接受推荐」。§8 让**已经知道该放哪**的
+物品跳过前 5 步。
 
 ---
 

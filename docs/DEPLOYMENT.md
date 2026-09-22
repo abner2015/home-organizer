@@ -287,7 +287,7 @@ docker compose exec api python -m app.db.seed
 cd services/api
 source .venv/bin/activate
 alembic upgrade head                             # 迁移
-python -m pytest tests/ --no-header -q          # 基线 534 passed / 1 skipped
+python -m pytest tests/ --no-header -q          # 基线 626 passed / 1 skipped
 python -m ruff check app/ tests/                 # 基线 32
 python -m mypy app/                              # 基线 20
 uvicorn app.main:app --host 0.0.0.0 --port 8000

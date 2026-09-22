@@ -2,8 +2,10 @@
 
 > PostgreSQL 16。所有表使用 `uuid` 主键（`gen_random_uuid()`，需要 `pgcrypto` 扩展）、`created_at` / `updated_at` 时间戳。所有变更走 Alembic。
 >
-> 最后更新：2026-09-21 —— 订正 §1「枚举用 PostgreSQL ENUM」（实际是 text + CHECK）、
-> §3.11 `recommendations.status` 的 CHECK（`adjusted` → `superseded`，迁移 `0003`）。
+> 最后更新：2026-09-22 —— §6 不变量表：删 slot 的判据是「任何 placement（含已 removed）」；
+> 补 SQLite 不强制部分唯一索引的警告（P0.3）。
+> （2026-09-21：订正 §1「枚举用 PostgreSQL ENUM」（实际是 text + CHECK）、
+> §3.11 `recommendations.status` 的 CHECK（`adjusted` → `superseded`，迁移 `0003`）。）
 >
 > 已落地的迁移：`0001_initial_schema` / `0002_assets` / `0003_update_recommendation_status`。
 
@@ -374,7 +376,15 @@ CREATE EXTENSION IF NOT EXISTS vector;       -- pgvector
 | 物品最多一张主图 | 部分唯一索引 | Service 校验 |
 | 候选 Slot 真实存在 | 暂无（JSONB 字段） | Verifier 校验 |
 | 任何 Recommendation 必关联 AgentTrace | FK NOT NULL | 落库前确保 |
-| 删除 StorageSlot 不允许 active placement | FK ON DELETE RESTRICT | Service 校验 |
+| 删除 StorageSlot 不允许存在任何 placement（含已 removed） | FK ON DELETE RESTRICT | Service 校验 |
+
+> ⚠️ **部分唯一索引在 SQLite 上不存在。** 测试跑的是 SQLite，`UNIQUE (item_id) WHERE
+> removed_at IS NULL` 完全不被强制 —— 所以「同一物品只有一条 active」这条不变量
+> **必须由应用层保证，且测试必须显式数行数**，不能靠索引兜底。
+>
+> P0.3 之前 AI accept 路径只 `INSERT` 不关旧行：PG 上 `IntegrityError`（500），
+> SQLite 上**静默留下两条 active**。现在两条写路径（accept / 手动落位）共用
+> `app/tools/write_tools.py:_create_placement`，先 `close_active_placements` 再插。
 
 ---
 

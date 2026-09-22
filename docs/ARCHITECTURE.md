@@ -2,8 +2,9 @@
 
 > 描述系统的组件划分、职责、关键数据流与部署视图。
 >
-> 最后更新：2026-09-21 —— 本版按**真实代码布局**重写。原稿的 `apps/api/`、`packages/ai/`、
-> `app/agent/orchestrator.py`、以及「pipeline 的 Step 1 是 Vision」都与实际不符，已全部订正。
+> 最后更新：2026-09-22 —— 新增 §4.3「反向录入 —— 手动落位（全程零 LLM）」，§12 演进路线对齐。
+> （2026-09-21：本版按**真实代码布局**重写。原稿的 `apps/api/`、`packages/ai/`、
+> `app/agent/orchestrator.py`、以及「pipeline 的 Step 1 是 Vision」都与实际不符，已全部订正。）
 >
 > 状态图例：✅ 已交付 · ⏳ 已排期未实现（见 `docs/DEVELOPMENT_PLAN.md` 下篇）· 📋 设计稿
 >
@@ -255,7 +256,36 @@ AI 层就放在 `services/api/app/ai/`，只有一个消费方，拆包是纯开
 > 原稿写的是 `GET /api/items?q=...` 的 ILIKE 查询。那是「按名字搜物品」的**实现细节**，
 > 现在它的入口是 `GET /api/v1/items` 的 query 参数；而自然语言问答走的是上面这条链路。
 
-### 4.3 图片存储
+### 4.3 反向录入 —— 手动落位（全程零 LLM）
+
+旅程 B：物品已经在手上、去向也已经知道，就不该走 §4.1 那条链路。
+
+```
+[Web] 物品列表的逐件「放到这里」 / 详情页「放到别处」 / /items/place 批量归位
+   │
+   │  POST /api/v1/placements  {item_id, slot_id, note?}
+   ▼
+[API] app/api/v1/placements.py
+   │
+   ▼
+[Service] placement_service.place_item → tools/write_tools._create_placement
+   │  1. 校验 item / slot ∈ 本 home（否则 404）
+   │  2. close_active_placements(item_id)      ← 同一物品恒只有一条 active
+   │  3. INSERT ItemPlacement(source='user_manual', recommendation_id=NULL)
+   ▼
+[DB] item_placements 一行；**AgentTrace 不增、Recommendation 不碰**
+
+移出：DELETE /api/v1/placements/{id} → 只置 removed_at（软关闭，行永不物理删除）
+```
+
+> **这条路径与 §4.1 的 accept 共用同一个原语**（`_create_placement`），
+> 这正是 P0.3 顺手修掉的那个 bug：accept 过去不关旧行，只靠 PG 的部分唯一索引
+> `uq_item_placements_one_active_per_item` 兜底 —— PG 上 `IntegrityError`（500），
+> SQLite 上静默留下两条 active。
+>
+> 原语放在 `app/tools/` 而不是 `app/agents/`：反过来会让低层工具依赖 agents 包（倒置依赖）。
+
+### 4.4 图片存储
 
 见 §6.1。要点：**图片永远不由 Web 直传 API 再转存**（MinIO 模式下浏览器直传，本地模式下
 走 multipart 由 API 落盘），且远端模型拿到的图片是**内联 data URI**，不是 URL
@@ -460,11 +490,11 @@ Phase 编号的根源。**统一口径见 `docs/DEVELOPMENT_PLAN.md` §0**，后
 
 | | 内容 | 状态 |
 | --- | --- | --- |
-| P0.0 | 设计文档与代码对齐 | 进行中（本文档即其中一份） |
+| P0.0 | 设计文档与代码对齐 | ✅ 已交付（2026-09-21） |
 | P0.1 | 真实账号：JWT + Home 选择器 + Web 登录 | ✅ 已交付 |
-| P0.2 | 拍照即建模（空间结构由 LLM 提议 + 用户确认） | ⏳ 最大断点 |
-| P0.3 | 反向录入（先有物品，再补空间） | ⏳ |
-| P0.4 | 助手记忆 / 多轮 | ✅ 已交付（Phase 12） |
+| P0.2 | 拍照即建模（空间结构由 LLM 提议 + 用户确认） | ✅ 已交付（2026-09-22） |
+| P0.3 | 反向录入（已有物品直接落位，不经 LLM） | ✅ 已交付（2026-09-22） |
+| P0.4 | 闭环 + 讲理由（反馈回灌偏好；推荐给出人话理由） | ⏳ |
 
 更远的（多轮对话深化、pgvector 图像相似度、微信小程序、多人协作权限细分、计费多租户）
 仍然是演进方向，但**没有排期**。

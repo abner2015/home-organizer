@@ -75,17 +75,24 @@ home-organizer/
   Vision 识别、9 步推荐 pipeline（含 Verifier + Retry）、自然语言搜索助手（含多轮记忆）、
   可切换存储后端（`STORAGE_BACKEND=local|minio`）。
 - **前端**：`/` 首页、`/login`、`/signup`、`/home`（含 rooms / storage / setup）、
-  `/items`（含详情、新增）、`/recommendations/[id]`、`/assistant`。认证走 cookie +
-  `Authorization: Bearer`，未登录由 `src/middleware.ts` 重定向到 `/login`。
-- **测试基线**：`services/api` 600 passed / 1 skipped；ruff 32 / mypy 20（均为历史遗留，不得上升）；
+  `/items`（含详情、新增、`/items/place` 批量归位）、`/recommendations/[id]`、`/assistant`。
+  认证走 cookie + `Authorization: Bearer`，未登录由 `src/middleware.ts` 重定向到 `/login`。
+- **测试基线**：`services/api` 626 passed / 1 skipped；ruff 32 / mypy 20（均为历史遗留，不得上升）；
   `apps/web` 的 `npx tsc --noEmit` 与 `npx next lint` 必须干净。
 
 已知缺口（完整路线图与验收标准见 `docs/DEVELOPMENT_PLAN.md` 下篇「P0 路线图」）：
 
-1. **P0.3 反向录入** —— 已有物品直接落位，不经 LLM。
-2. **P0.4 闭环 + 讲理由** —— 接受 / 拒绝反馈回灌偏好；推荐给出人话理由。
-3. **P0.2 的尾巴** —— `POST /homes`、成员管理、`GET /storage-units/{id}` /
+1. **P0.4 闭环 + 讲理由** —— 接受 / 拒绝反馈回灌偏好；推荐给出人话理由。
+2. **P0.2 的尾巴** —— `POST /homes`、成员管理、`GET /storage-units/{id}` /
    `GET /sections/{id}` 详情路由、完整的结构编辑器（见 `docs/DEVELOPMENT_PLAN.md` P0.2「本批不做」）。
+3. **P0.3 的尾巴** —— 后端批量落位端点（批量页逐条 POST 足够）、`PATCH /placements/{id}`、
+   手动落位的容量 / 安全校验、并发落位撞部分唯一索引时的 409 兜底
+   （见 `docs/DEVELOPMENT_PLAN.md` P0.3「本批不做」）。
+
+> **P0.3 反向录入 ✅ 已交付（2026-09-22）**：`POST /api/v1/placements`（直接落位）+
+> `DELETE /api/v1/placements/{id}`（软关闭），写入路径与 accept 共用同一个「关旧 + 插新」
+> 原语 `app/tools/write_tools.py:_create_placement`。Web 侧为物品列表 / 详情页的逐件
+> 「放到这里」与 `/items/place` 批量归位。**落位不再需要 AI**——AI 只负责「不知道放哪」的那一半。
 
 > **P0.2 拍照即建模 ✅ 已交付（2026-09-22）**：结构写接口
 > （`app/api/v1/structure.py`）+ AI 提议（`POST /api/v1/structures/propose`，
@@ -152,7 +159,7 @@ home-organizer/
 
 ```bash
 cd services/api && source .venv/bin/activate
-python -m pytest tests/ --no-header -q   # 基线 534 passed / 1 skipped
+python -m pytest tests/ --no-header -q   # 基线 626 passed / 1 skipped
 python -m ruff check app/ tests/         # 基线 32（历史遗留，不得上升）
 python -m mypy app/                      # 基线 20（历史遗留，不得上升）
 ```
