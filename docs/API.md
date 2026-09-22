@@ -2,8 +2,11 @@
 
 > FastAPI，OpenAPI 自动生成。所有路径以 `/api/v1` 开头。
 >
-> 最后更新：2026-09-22 —— §8 摆放接口随 P0.3 落地（`POST /placements` / `DELETE /placements/{id}`）。
-> （同日上一版：§3–§5 的写接口随 P0.2 落地，§7 补 `POST /structures/propose`。
+> 最后更新：2026-09-22 —— **P0.4**：`ItemPlacementView` 加 `reason`
+> （「为什么放这里」）；候选端点/推荐响应里的理由**一律非空且不含 ASCII**；
+> accept / 手动落位写入类别偏好、reject 派生出该物品的永久排除（§7 / §8）。
+> 同日上一版：§8 摆放接口随 P0.3 落地（`POST /placements` / `DELETE /placements/{id}`）。
+> （同日更早：§3–§5 的写接口随 P0.2 落地，§7 补 `POST /structures/propose`。
 > 2026-09-21：补实现状态总览（§0），订正 4 处与代码不符的事实
 > —— recommend 路径、accept 请求体、adjust 端点已废弃、object_key 前缀。）
 
@@ -497,7 +500,26 @@ MinIO 部署请继续使用 presigned GET。
 
 ### GET /api/v1/items/{itemId}/placements
 
-历史摆放时间线。
+历史摆放时间线（新的在前，每行都带已解析的 `slot_path`，active 与否都一样）。
+
+```json
+[
+  {
+    "id": "uuid",
+    "item_id": "uuid",
+    "slot_id": "uuid",
+    "slot_path": "厨房 / 吊柜 / 第一层 / 第一格",
+    "source": "ai_recommendation",
+    "placed_at": "2026-09-22T10:00:00+00:00",
+    "removed_at": null,
+    "reason": "马克杯放在厨房吊柜第1层"
+  }
+]
+```
+
+**`reason`（P0.4）**——「为什么放这里」。AI 落位的那条来自其**来源推荐**的
+`candidates[slot_id].reason`（一次批量 IN 查询填充，不逐行查）；手动落位（§8）
+恒为空串 `""`，因为手动落位没有任何要解释的。前端在 `reason` 非空时才渲染那一行。
 
 ---
 
@@ -563,66 +585,108 @@ MinIO 部署请继续使用 presigned GET。
 > 路径挂在 `/recommendations` 下，**不是** `/items/{itemId}/recommend` —— 它产出的是一个
 > `Recommendation` 资源。另有一条 `GET /api/v1/recommendations/{recId}` 读回单个推荐。
 
-```json
-// request (可选)
-{ "include_history": true }
+请求体是 **`{}`（空对象，`extra="forbid"`）** —— 唯一输入是路径里的 `itemId` 与 actor 头。
 
+```json
 // response 200
 {
   "recommendation_id": "uuid",
+  "item_id": "uuid",
   "trace_id": "uuid",
+  "chosen_slot_id": "uuid",
+  "status": "pending",
+  "state": "answer",
+  "retries_used": 0,
+  "pre_filter_count": 18,
+  "post_filter_count": 12,
   "candidates": [
     {
       "slot_id": "uuid",
-      "slot_path": "厨房/橱柜 A/第一层/A-1-1",
-      "confidence": 0.86,
-      "reason": "厨房常用于存放茶叶...",
-      "matched_rules": ["kitchen_for_food"],
-      "evidence_item_ids": ["uuid", "uuid"]
+      "code": "L1S1",
+      "label": "第一层第一格",
+      "full_path": "厨房 / 吊柜 / 第一层 / 第一格",
+      "room_name": "厨房",
+      "unit_name": "吊柜",
+      "section_name": "第一层",
+      "score": 87,
+      "confidence": 0,
+      "reason": "马克杯是餐具类物品，厨房 / 吊柜 / 第一层 / 第一格可以存放此类物品",
+      "matched_rules": [],
+      "evidence_item_ids": [],
+      "is_recommended": true
     }
   ],
-  "pre_filter_count": 18,
-  "post_filter_count": 12,
-  "verifier_passed": true,
-  "retry_count": 0
+  "error": null
 }
 ```
 
-失败（候选为空 / 全部被硬规则过滤 / verifier 失败 / 超过 retry）：
+失败（候选为空 / 全部被硬规则过滤 / 全部被用户排除 / verifier 失败 / 超过 retry）：
 
 ```json
 {
-  "recommendation_id": null,
+  "recommendation_id": "uuid",
+  "item_id": "uuid",
   "trace_id": "uuid",
-  "candidates": [],
+  "chosen_slot_id": null,
+  "status": "pending",
+  "state": "failed",
+  "retries_used": 2,
   "pre_filter_count": 0,
   "post_filter_count": 0,
-  "verifier_passed": false,
-  "retry_count": 2,
-  "error": { "code": "verifier_failed", "message": "..." }
+  "candidates": [],
+  "error": "无符合硬规则的位置"
 }
 ```
 
-### GET /api/v1/items/{itemId}/candidates（调试端点）
+> `status` 是**推荐的生命周期**（`pending` / `accepted` / `rejected` / `superseded`），
+> `state` 是**这一次 pipeline 跑的结局**（`answer` / `failed`）—— 两者独立。
+> **失败也返回 200**（`state="failed"` + `error`），不是 4xx：跑完了、只是没有安全答案。
 
-> 返回 9 步 pipeline 的中间产物（不含 LLM response 内容，避免泄露），用于排查"为什么没推荐这个 slot"。
+**P0.4**：`candidates` 里**每一条**都有非空中文理由；被用户拒绝过的 slot 不会出现；
+若候选被全部排除，`error` 是「该物品的候选位置均已被你排除」。
+
+> `_top3` 会把**选中的那条排到第一位**，所以响应里候选的**下标不是分数序**。
+> 需要比较打分时用 `score` 字段，或走 §7 的 `GET …/candidates`。
+
+### GET /api/v1/items/{itemId}/candidates ✅
+
+> **无 LLM 调用**：跑 RETRIEVE → CANDIDATE_GENERATION → FILTER → RANK 的同一批纯函数，
+> 跳过 DECIDE。结果就是「LLM 会看到的那份有序候选」。用来排查「为什么没推荐这个 slot」，
+> 也供不想付费调模型的 UI 直接使用。代价是 `agent_traces` 行数不变。
 
 ```json
 {
-  "vision": { "name": "龙井茶叶", "category": "食品", "confidence": 0.9 },
-  "pre_filter": [
-    { "slot_id": "uuid", "score": 87, "score_breakdown": {"history": 40, "category": 25, "room": 15, "capacity": 7, "preference": 0, "default": 0} }
-  ],
-  "post_filter": [
-    { "slot_id": "uuid", "score": 87, "passed_hard_rules": true }
-  ],
+  "pre_filter_count": 18,
+  "post_filter_count": 12,
   "final_candidates": [
-    { "slot_id": "uuid", "confidence": 0.86, "reason": "..." }
+    {
+      "slot_id": "uuid",
+      "code": "L1S1",
+      "label": "第一层第一格",
+      "full_path": "厨房 / 吊柜 / 第一层 / 第一格",
+      "section_name": "第一层",
+      "score": 87,
+      "confidence": 0,
+      "reason": "马克杯是餐具类物品，厨房 / 吊柜 / 第一层 / 第一格可以存放此类物品",
+      "is_recommended": false
+    }
   ]
 }
 ```
 
-仅 home 成员可访问；仅展示不含敏感 LLM 响应。
+**P0.4 之后有两点变了**：
+
+1. **每条候选的 `reason` 都非空**（确定性中文，由 ranker 的分项拼出；`full_path` 含
+   ASCII 时会换成中文段名）。此前这里一律是空串。
+2. **被用户拒绝过的 slot 不再出现** —— 与 agent 的 FILTER 步同口径
+   （见 §7 reject）。`is_recommended` 恒为 `false`，因为这条路径不跑 DECIDE、
+   也就没有「选中」这个概念。
+
+> `confidence` 目前恒为 `0`：`det_score` 与 LLM 的 confidence 是两回事，
+> 候选视图读的是后者而这条路径没有模型参与。前端若展示「置信度」会显示 0%，
+> 这是已知的外观问题，没有任何逻辑依赖它。
+
+仅 home 成员可访问；未知 / 跨 home 的 item → **404**。
 
 ### POST /api/v1/search（自然语言检索）
 
@@ -684,6 +748,13 @@ MinIO 部署请继续使用 presigned GET。
 > P0.3 之前这里不关旧行，只靠部分唯一索引兜底：PG 上 `IntegrityError`（500），
 > SQLite 上静默留下两条 active。
 
+**反馈回灌（P0.4）**：同一次事务里往 `user_preferences` 写一条**按类别限定**的正偏好
+（key = `preferred_slots`），值形如
+`{"slots": {"<slot_id>": {"category": "medicine", "count": 1}}}`。
+下次对**同类别的物品**推荐时，`ranking._preference_match` 给该 slot +10。
+用 `chosen_slot_id` 而不是模型最初的建议 —— PATCH 覆盖后的**用户真实选择**才是正信号。
+写入与落位共用一个 `commit`，所以 accept 仍然是单事务。见 `docs/AGENT.md` §15.1。
+
 ### PATCH /api/v1/recommendations/{recId}
 
 用户想换一个位置时，**先 PATCH 再 accept**：
@@ -706,7 +777,17 @@ PATCH 之后 `status` 仍是 `pending` —— 直到 accept 才落 `ItemPlacemen
 { "note": "这个柜子太满了" }
 ```
 
-`status = rejected`；`note` 记录拒绝原因（`P0.4` 会把这条反馈回灌到偏好）。
+`status = rejected`。
+
+**反馈回灌（P0.4）**：该推荐的 `chosen_slot_id` **保留不清**，于是它天然成为一条
+「这个物品不要放这个 slot」的记录 —— 排除集是从 `status='rejected'` 的行**派生**的
+（`app/tools/recommendation_tools.py:get_rejected_slot_ids`），**不落任何新存储、无迁移**。
+下次对**同一物品**推荐时，FILTER 步会把这个 slot 过滤掉，`GET /items/{itemId}/candidates`
+（§6）走同一口径。排除是**永久**的，只增不减；`superseded` 的推荐**不**计入。
+
+`note`（可选，≤ 512）只是给**人**看的原因，存在该推荐 `candidates[0]` 的 `audit_note` 上
+—— 它**不参与**排除逻辑。物品的候选被全部排除后，`POST …/recommend` 返回
+`state = "failed"`，error 文案为「该物品的候选位置均已被你排除」。
 
 ### POST /api/v1/structures/propose ✅ P0.2
 
@@ -809,10 +890,15 @@ PATCH 之后 `status` 仍是 `pending` —— 直到 accept 才落 `ItemPlacemen
   "slot_path": "厨房 / 吊柜 / 上层 / 左侧",
   "source": "user_manual",
   "note": null,
+  "reason": "",
   "placed_at": "2026-09-22T10:00:00+00:00",
   "removed_at": null
 }
 ```
+
+`reason` 是「为什么放这里」（P0.4）。手动落位**恒为空串** —— 用户自己的选择没有什么要解释的；
+AI 落位那条才有值（见 §6 的 `GET /items/{itemId}/placements`）。字段带默认值，
+所以 `POST` / `DELETE` 的响应在你不需要它时也不会缺键。
 
 ### DELETE /api/v1/placements/{placementId} ✅
 
@@ -867,6 +953,11 @@ PATCH 之后 `status` 仍是 `pending` —— 直到 accept 才落 `ItemPlacemen
 ```json
 { "value": { "default_tool_location": "garage" } }
 ```
+
+> 这两个路由仍是**设计稿**（没有 HTTP 端点）。
+> 但 `user_preferences` 表**已经在被写**：`POST …/accept` 与 §8 的
+> `POST /placements` 会 upsert `preferred_slots`（P0.4，见 `docs/AGENT.md` §15.1）。
+> 目前没有开放给客户端直接读写的接口 —— 「撤销偏好」的入口也在 ⏳ 里。
 
 ---
 

@@ -73,16 +73,19 @@ home-organizer/
 
 - **后端**：JWT 认证、Home/Room/Unit/Section/Slot 层级、物品 CRUD + 图片上传、
   Vision 识别、9 步推荐 pipeline（含 Verifier + Retry）、自然语言搜索助手（含多轮记忆）、
-  可切换存储后端（`STORAGE_BACKEND=local|minio`）。
+  可切换存储后端（`STORAGE_BACKEND=local|minio`）、**闭环反馈**（接受 → 类别偏好；
+  拒绝 → 永久排除该 slot，P0.4）。
 - **前端**：`/` 首页、`/login`、`/signup`、`/home`（含 rooms / storage / setup）、
   `/items`（含详情、新增、`/items/place` 批量归位）、`/recommendations/[id]`、`/assistant`。
   认证走 cookie + `Authorization: Bearer`，未登录由 `src/middleware.ts` 重定向到 `/login`。
-- **测试基线**：`services/api` 626 passed / 1 skipped；ruff 32 / mypy 20（均为历史遗留，不得上升）；
+- **测试基线**：`services/api` 666 passed / 1 skipped；ruff 32 / mypy 20（均为历史遗留，不得上升）；
   `apps/web` 的 `npx tsc --noEmit` 与 `npx next lint` 必须干净。
+- **评测基线**：61/61、Valid Slot 100%、Hard Violation 1.64%、Accuracy 59.02%、Top-3 Recall 70.49%
+  （Mock AI；见 `docs/EVALUATION.md` §3.2）。
 
 已知缺口（完整路线图与验收标准见 `docs/DEVELOPMENT_PLAN.md` 下篇「P0 路线图」）：
 
-1. **P0.4 闭环 + 讲理由** —— 接受 / 拒绝反馈回灌偏好；推荐给出人话理由。
+1. **P0.0 定位与产品重规划（文档）** —— 定位、三段旅程、权限模型落进 `docs/PRD.md`。
 2. **P0.2 的尾巴** —— `POST /homes`、成员管理、`GET /storage-units/{id}` /
    `GET /sections/{id}` 详情路由、完整的结构编辑器（见 `docs/DEVELOPMENT_PLAN.md` P0.2「本批不做」）。
 3. **P0.3 的尾巴** —— 后端批量落位端点（批量页逐条 POST 足够）、`PATCH /placements/{id}`、
@@ -98,6 +101,13 @@ home-organizer/
 > （`app/api/v1/structure.py`）+ AI 提议（`POST /api/v1/structures/propose`，
 > `docs/AGENT.md` §14）+ Web `/home/setup`。全新账号现在能在浏览器里从空树搭出第一个
 > 可用 slot，推荐不再恒为 `state=failed`。**曾经的「当前最大断点」已关闭。**
+
+> **P0.4 闭环 + 讲理由 ✅ 已交付（2026-09-22）**：接受 / 手动落位往 `user_preferences`
+> 写一条**按类别限定**的正偏好（`preferred_slots`，仅同类别的物品 +10）；拒绝从
+> `status='rejected'` 的行**派生**出排除集（不落新存储、无迁移），FILTER 步过滤掉，
+> 该 slot 对**该物品**永不出现。每条候选都带非空中文理由 —— RANK 用确定性分项拼一句，
+> LLM 的理由过闸（含 CJK、无 ASCII 字母）才覆盖它。物品页与推荐页都展示「为什么放这里」。
+> 实现细节与**副作用**（确定性兜底让 `check_reason_consistent` 被架空）见 `docs/AGENT.md` §15。
 
 产品层面的定位、核心价值（放 / 理 / 找）、三段旅程、权限模型、使用指引见 `docs/PRD.md` §1–§2。
 
@@ -159,7 +169,7 @@ home-organizer/
 
 ```bash
 cd services/api && source .venv/bin/activate
-python -m pytest tests/ --no-header -q   # 基线 626 passed / 1 skipped
+python -m pytest tests/ --no-header -q   # 基线 666 passed / 1 skipped
 python -m ruff check app/ tests/         # 基线 32（历史遗留，不得上升）
 python -m mypy app/                      # 基线 20（历史遗留，不得上升）
 ```

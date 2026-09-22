@@ -23,14 +23,15 @@ services/api/
 │   ├── core/            # config, logging, exceptions, request_id, health
 │   ├── api/
 │   │   ├── deps.py      # get_actor：JWT + X-Home-Id
-│   │   └── v1/          # auth / homes / items / recommendations / search /
-│   │                    #   assets / uploads / files
+│   │   └── v1/          # auth / homes / items / recommendations / placements /
+│   │                    #   structure / search / assets / uploads / files
 │   ├── schemas/         # API 请求/响应模型
 │   ├── models/          # SQLAlchemy ORM
 │   ├── services/        # 业务逻辑
-│   ├── agents/          # 推荐 pipeline + NL 搜索编排
+│   ├── agents/          # 推荐 pipeline（+ reason.py 确定性理由）+ NL 搜索编排
 │   ├── verification/    # Verifier 检查
-│   ├── tools/           # Agent 工具（13 个）
+│   ├── tools/           # Agent 工具（registry 13 个 + 不进 registry 的原语：
+│   │                    #   write_tools._create_placement / recommendation_tools）
 │   ├── ai/              # AIProvider Protocol + 三个实现
 │   ├── storage/         # StorageBackend（minio | local）
 │   ├── cache/           # Redis 客户端
@@ -80,7 +81,7 @@ curl http://localhost:8000/health
 ```bash
 python -m ruff check app/ tests/     # 基线 32
 python -m mypy app/                  # 基线 20
-python -m pytest tests/ --no-header -q   # 基线 626 passed / 1 skipped
+python -m pytest tests/ --no-header -q   # 基线 666 passed / 1 skipped
 ```
 
 离线评测：

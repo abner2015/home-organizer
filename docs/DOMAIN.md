@@ -209,6 +209,15 @@ User ──< HomeMembership >── Home
 （`DELETE /placements/{id}` → `removed_at = now()`），**行永不物理删除** ——
 历史靠 `removed_at` 而非删除来体现（F-2.3）。
 
+**两条路径都写反馈**（P0.4）：同一次事务里 upsert 一条按类别限定的
+`UserPreference`（key = `preferred_slots`），用于下次同类物品的排序；写入只 `flush`，
+与落位共用那一次 `commit`。
+
+**「为什么放这里」不在这张表上**：`ItemPlacement` **没有** `reason` 列。API 的
+`reason` 字段是**读时拼出来的** —— `recommendation_id` join 回 `Recommendation.candidates`
+取该 slot 的 reason（见 `docs/API.md` §6）。手动落位 `recommendation_id = NULL`，
+所以恒为空串。这样理由只有一个来源，不会出现行内快照与推荐对不上的情况。
+
 ---
 
 ### 2.11 Recommendation（推荐记录）

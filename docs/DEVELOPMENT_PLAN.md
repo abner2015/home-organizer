@@ -6,7 +6,7 @@
 >   真实产物路径、真实验收结论、真实基线。已完成的部分不再有「任务」，只有事实。
 > - **下篇 · P0 路线图**（P0.0–P0.4）：唯一还在推进的计划。每个 P0.x 都带交付物与验收标准。
 >
-> 最后更新：2026-09-22 —— P0.3 反向录入交付；基线 600 → 626。
+> 最后更新：2026-09-22 —— P0.4 闭环 + 讲理由交付，**P0 四个批次全部完成**；基线 626 → 666。
 >
 > 背景：本文件原稿写于**开工前**。开工后实际走出来的顺序与原稿并不一致，于是原稿里出现了
 > Phase 9、Phase 10 各两份（旧副本与新副本交织），路径也停留在 `apps/api/`。本次一并归位。
@@ -169,7 +169,7 @@ P0 是「**让一个真人第一次用起来，能走完一遍并觉得有用**�
 ```
 P0.1 真实账号 ✅  ──┐
                     ├──► P0.2 拍照即建模 ✅ ──┬──► P0.3 反向录入 ✅
-                    │                         └──► P0.4 闭环 + 讲理由
+                    │                         └──► P0.4 闭环 + 讲理由 ✅
                     └──► （P0.1 尾巴：token 续期 ✅）
 ```
 
@@ -311,23 +311,86 @@ tools/write_tools.py, schemas/item.py}`；前端 `apps/web/src/components/placem
 
 ---
 
-## P0.4 — 闭环 + 讲理由 ⏳
+## P0.4 — 闭环 + 讲理由 ✅ 已交付（2026-09-22）
 
 **为什么**：推荐出来后，用户的接受 / 拒绝应当让**下一次更准**；并且用户要能看懂
-「为什么是这个柜子这一格」。当前偏好没有被回灌，拒绝也没有被记住。
+「为什么是这个柜子这一格」。此前偏好没有被回灌（`UserPreference` 表存在、
+`ranking._preference_match` 与 `verification.checks.check_user_preferences` 都在读它，
+但**没有任何一行代码写过它**），拒绝也没有被记住（`_step_retrieve` 只读
+`get_item_placements`，从不读历史 `Recommendation`）。理由则只到**一条**候选
+（`_step_decide` 用 `max(..., key=confidence)` 只留 LLM 的第一名 reason，其余丢弃），
+且无 LLM 的候选端点 reason 一律为空串。
 
 **交付物**
 
-1. **反馈回灌**：接受 → 正偏好；拒绝 → 记录原因并排除该 slot，下次同物品的候选不再包含它。
-2. **讲理由**：每条推荐给出可读的中文理由，并在推荐页 / 物品页展示「为什么放这里」。
+1. ✅ **反馈回灌**：接受 / 手动落位 → 正偏好；拒绝 → 该 slot 对该物品**永久**排除。
+   - 正偏好按**类别**限定：`user_preferences` 的 `preferred_slots` 存
+     `{"<slot_id>": {"category": "<item.category>", "count": <n>}}`，
+     仅当物品类别匹配时 `_preference_match` 才 +10（存了空 category 的老行恒定匹配，
+     兼容旧形状 `preferred_slot_ids`）。**没做迁移** —— 表已有
+     `uq_user_preferences_user_home_key`，`value` 是 `JSONBCompat`，够用。
+   - 排除**派生而非存储**：`app/tools/recommendation_tools.py:get_rejected_slot_ids`
+     从 `status='rejected'` 且 `chosen_slot_id` 非空的推荐反查（`reject_recommendation`
+     只改 status，**不清** `chosen_slot_id`，所以旧行天然是正确的排除集）。零新增存储、
+     无迁移、天然「同物品」。FILTER 步过滤掉它们 —— 因为
+     `whitelist_slot_ids == known_slot_ids == 候选集`，verifier 白名单自动跟着收缩。
+   - 写入是**单事务内的 flush**：`record_preferred_slot`（`app/tools/write_tools.py`）
+     只 `flush`，由 accept / `place_item` 既有那一次 `commit` 收口。
+     **必须 select-then-update**（`uq_user_preferences_user_home_key` 是普通唯一索引，
+     SQLite 也强制），且**必须整体赋新 dict**（`JSONBCompat` 不跟踪原地修改）。
+2. ✅ **讲理由**：每条候选都有非空中文理由，推荐页 / 物品页展示。
+   - `app/agents/rank_slots` 给**每**行附带确定性理由 `reason`（由 ranker 的分项
+     `score_terms` 拼出），推荐路径与无 LLM 的 `GET /items/{id}/candidates` 因此同时点亮。
+   - `app/agents/reason.py:build_reason` 是**纯函数**（无 uuid / 时间戳 —— 否则
+     `test_candidates_are_deterministic_and_ranked` 的 `second.json() == body` 会破）；
+     `full_path` 含 ASCII 时**逐段丢弃**，退到 `room/unit/section` 中文名。
+   - LLM 理由过闸 `is_acceptable_llm_reason`：非空、长度 2..512、含 CJK、且**不含任何
+     ASCII 字母**。过闸的**全部**候选理由都保留（不再只留第一名），不过闸则确定性理由兜底。
+   - 物品页摆放历史每条显示「为什么放这里」：AI 落位有其来源推荐的理由，手动落位为空串
+     （`ItemPlacementView.reason`）。
 
 **验收**
 
-- [ ] 接受某个 slot 后，对同类物品再次推荐，该 slot 的排序**上升**
-- [ ] 拒绝某个 slot 后，同物品的候选**不再包含**它
-- [ ] 每条候选都有非空的中文理由，且**不含 code / 英文**（Phase 12 已确立的规则）
+- [x] 接受某个 slot 后，对**同类别**的另一件物品再次推荐，该 slot 的排序**上升**
+      （`tests/unit/test_feedback_loop.py` 断言 `det_score` 恰好 +10 且位次严格上升；
+      API 级见 `tests/api/test_recommendation_api.py`）
+- [x] 拒绝某个 slot 后，同物品的候选**不再包含**它（重跑 `run_recommendation` 与
+      `GET /items/{id}/candidates` 两条路径都断言）
+- [x] 每条候选都有非空的中文理由，且**不含 code / 英文**
+      （`tests/unit/test_reason.py` + API 级遍历每一条候选断言含 CJK、无 `[A-Za-z]`）
+- [x] 拒绝原因是**按物品**的：给物品 X 拒绝的 slot 对物品 Y 仍出现；
+      `superseded` 的推荐**不**触发排除
+- [x] 候选被全部排除后 `state=failed`，错误文案为「该物品的候选位置均已被你排除」
+      而不是误导性的「无符合硬规则的位置」
+- [x] 评测数字**未动**：61/61、Valid Slot 100%、Hard Violation 1.64%、
+      Accuracy 59.02%、Top-3 Recall 70.49%（`score_terms` 重构保证
+      `deterministic_score` 逐项相同）
+- [x] 基线：**666 passed / 1 skipped**（+40），ruff 32，mypy 20；
+      `tsc --noEmit` + `next lint` 干净
 
-**依赖**：P0.2（有真实 slot 之后，闭环才有意义）。
+**已知副作用（必读）**：确定性兜底让理由**永远**满足 `check_reason_consistent`，
+于是该 verifier 检查事实上被架空 —— VERIFY 变绿**不再**意味着「LLM 解释得很清楚」，
+只意味着「理由合规」。这是本批决策的直接后果，不是 bug。
+`tests/unit/test_recommendation_agent.py::test_scenario_9_retry_twice_still_fails`
+因此改用一个**幻觉 slot id** 作失败杠杆（原先靠 ASCII 理由触发 verifier 失败，现在会被兜底救回）。
+
+**其他决策**
+
+- **偏好是 per-user 的**（`_step_retrieve` 带 `user_id`）：同一家的另一位成员看不到这份加成。
+  这是表的语义决定的，正确，但要知道。
+- **排除永久**：只增不减，「撤销排除」的入口记为 ⏳。
+- 不做 verifier 检查、不做理由重试 —— 闸门不过就静默回落，不浪费一次 retry。
+
+**落地位置**：后端 `app/{agents/reason.py, agents/ranking.py, agents/pipeline.py,
+agents/context.py, agents/placement_service.py, tools/recommendation_tools.py,
+tools/write_tools.py, services/recommendation_service.py, api/v1/items.py,
+schemas/item.py}`；前端 `apps/web/src/app/items/[id]/page.tsx` +
+`apps/web/src/app/recommendations/[id]/RecommendationActions.tsx`。
+
+**本批不做**（留 ⏳）：「撤销排除」入口、跨用户偏好共享、`PATCH /placements/{id}`、
+把偏好做成带权重列的结构化模型（现在够用）、P0.3 已记录的并发落位 409 兜底。
+
+**依赖**：P0.2（有真实 slot 之后，闭环才有意义）✅。
 
 ---
 

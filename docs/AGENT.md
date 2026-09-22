@@ -4,13 +4,18 @@
 > 核心原则：**LLM 只做"对已筛选候选打分 + 写理由"这一件事**；候选生成、约束过滤、Verifier 全部由确定性代码完成。
 >
 > **本文档范围**：§1–§13 描述**推荐 pipeline**（✅ 已实现，代码在 `app/agents/pipeline.py`）。
-> §14 描述**结构提议 pipeline**（⏳ P0.2「拍照即建模」，**尚未实现**）—— 它是第二条链路，
+> §14 描述**结构提议 pipeline**（✅ P0.2「拍照即建模」，已交付 2026-09-22）—— 它是第二条链路，
 > 解决的是"用户的家是空树"这个问题：推荐链路的**输入**是已存在的 Slot，而结构提议链路的
 > **输出**正是 Slot 本身。
 >
-> 最后更新：2026-09-21 —— 新增 §14；**§1 / §2 / §10 的步骤名与状态机整体订正**（原稿用的
+> 最后更新：2026-09-22 —— 新增 **§15 反馈闭环与理由（P0.4）**；此前 2026-09-21 新增 §14，
+> 并**整体订正 §1 / §2 / §10 的步骤名与状态机**（原稿用的
 > `Vision → Structured Item → Storage Retrieval → …` 这套名字与代码里的 `RecommendationState`
-> 是两套，且把 Vision 错列为 pipeline 的第一步，见下）；订正 §3.1 的工具名。
+> 是两套，且把 Vision 错列为 pipeline 的第一步，见下），订正 §3.1 的工具名。
+>
+> **§4 / §6 的权重表是设计稿**，实现以 `app/agents/ranking.py:_WEIGHTS` 为准
+> （`category 25 / room 20 / path 15 / capacity 15 / preference 10 / history 10 / soft_rule 5`，
+> 由 `score_terms()` 分项求和）。P0.4 的理由文案就是从这套分项拼出来的（§15.3）。
 
 ---
 
@@ -193,6 +198,7 @@ score(slot) = w_history * history_score
 - `room_type_score`：根据 `category → room_type` 映射（如"厨具"→"kitchen"），slot 所在 room 类型匹配则 100，否则按距离衰减。
 - `capacity_score`：`item.estimated_size` vs `slot.capacity_hint`（"small/medium/large"）严格匹配 +100，相邻 +50，不匹配 0。
 - `preference_score`：匹配 `UserPreference` 中 `default_<category>_location` 之类 key → +100。
+  （**实现不同**：实际读 `preferred_slots`，按类别匹配 +10，见 §15.1。）
 - `default_room_score`：冷启动专用，`category → room_type` 软命中 +50。
 
 ### 4.2 冷启动 Fallback
@@ -291,6 +297,9 @@ def check_rule(slot, rule, item) -> Optional[Violation]:
 
 LLM 看到的是**已经按 score 排好序的前 20 个**，它的任务不是"从 100 里挑 3"，而是"对 20 个排序 + 给理由"。
 
+> P0.4 起，RANK 还给**每一行**附上一句由分项拼出的确定性中文理由（§15.3），
+> LLM 的理由过闸才**覆盖**它 —— 所以「给理由」不再只依赖模型。
+
 ---
 
 ## 7. LLM Decision（Step 7）
@@ -379,6 +388,13 @@ Verifier 强制再做一次：
 7. **reason 非空**。
 
 任一失败 → Violation，触发 Retry（≤ 2 次，回到 Step 7）。
+
+> **P0.4 起第 7 条事实上被架空**：VERIFY 在跑 `run_verifier` 之前把
+> `ctx.last_decision_reason` 写进 chosen slot（`pipeline.py:384`），而 DECIDE 保证它**非空**
+> —— 过闸的 LLM 理由，否则 `build_reason`（§15.3）。确定性理由**永远**通过
+> `check_reason_consistent`，所以 VERIFY 变绿不再能推出「LLM 解释得清楚」，
+> 只说明「理由合规」。这也是 `test_scenario_9_retry_twice_still_fails`
+> 改用幻觉 slot id 作失败杠杆的原因。
 
 ```python
 class VerifyResult(BaseModel):
@@ -666,7 +682,79 @@ LLM 的产物在返回给用户**之前**必须过一遍纯代码检查：
 
 ---
 
-## 15. 未来扩展
+## 15. 反馈闭环与理由（P0.4）
+
+| 交付物 | 状态 |
+| --- | --- |
+| 接受 / 手动落位 → 正偏好回灌 | ✅ 已交付（2026-09-22） |
+| 拒绝 → 该 slot 对该物品永久排除 | ✅ 已交付 |
+| 每条候选都有非空中文理由 | ✅ 已交付 |
+
+### 15.1 写的两件事
+
+**接受信号（正偏好）**：`app/tools/write_tools.py:record_preferred_slot` 是**唯一**写
+`UserPreference` 的地方，被两条路径调用 —— `accept_recommendation`（用 `chosen_slot_id`，
+即 PATCH 覆盖后的**用户真实选择**，不是模型最初的建议）与 `place_item`（P0.3 手动落位）。
+写入**只 flush 不 commit**，由调用方既有那一次 `commit` 收口，所以 accept / 手动落位
+仍是单事务。
+
+```jsonc
+// user_preferences.value（key = "preferred_slots"）
+{"slots": {"<slot_id>": {"category": "medicine", "count": 2}}}
+```
+
+两个陷阱，都不是防御性代码：
+
+1. **必须 select-then-update**。`uq_user_preferences_user_home_key` 是**普通**唯一索引，
+   SQLite 也强制 —— 盲插 `IntegrityError`。
+2. **必须整体赋新 dict**。`JSONBCompat` 没有可变跟踪，原地改 `value["slots"][...]` 不会标脏，
+   SQLite 上会静默丢失。
+
+`ranking._preference_match` 只在**类别匹配**时给 +10：存了 `category` 的行要求
+`== item.category`；`category` 为空的行（老数据 / 物品无类别）**恒定匹配**；旧形状
+`value["preferred_slot_ids"]`（无类别）也仍然 +10。**偏好是 per-user 的** —— 同一家的
+另一位成员看不到这份加成，这是表的语义决定的。
+
+**拒绝信号（排除）**：`app/tools/recommendation_tools.py:get_rejected_slot_ids` **派生**
+而不是存储 —— `select(Recommendation.chosen_slot_id).join(Item, …).where(status='rejected',
+chosen_slot_id IS NOT NULL)`。`reject_recommendation` 只改 `status`、**不清**
+`chosen_slot_id`，所以旧行天然就是一份正确的、按物品的排除集：零新增存储、无迁移。
+
+### 15.2 在哪生效
+
+- **RETRIEVE**（`_step_retrieve`）把排除集读进 `ctx.excluded_slot_ids`。
+- **FILTER**（`_step_filter`）在 `generate_candidates` 之后、`hard_filter` 之前过滤掉它们。
+  因为 `_build_verification_ctx` 里 `whitelist_slot_ids == known_slot_ids == 候选集`，
+  **verifier 白名单自动跟着收缩**，不需要额外改动。
+- 无 LLM 的 `GET /items/{id}/candidates` 走**同一个** `get_rejected_slot_ids`，两条路径同口径。
+- 排除**永久**（只增不减）；`superseded` 的推荐**不**计入排除，只有 `rejected` 算。
+  候选被全部排除后 `state=failed`，错误文案是「该物品的候选位置均已被你排除」，
+  不是误导性的「无符合硬规则的位置」。
+
+### 15.3 理由：确定性优先，LLM 过闸叠加
+
+`app/agents/ranking.py:rank_slots` 给**每一行**附带 `reason`，由分项 `score_terms` 拼出
+（`app/agents/reason.py:build_reason`）。所以推荐路径与无 LLM 的候选端点**同时**点亮，
+不会再有空串理由。
+
+LLM 的理由**过闸**才保留，闸门 `is_acceptable_llm_reason`：非空、长度 2..512、
+含 CJK（`[\u4e00-\u9fff]`）、且**不含任何 ASCII 字母**（`[A-Za-z]`）—— 这是
+Phase 12「推荐里不出现英文 / code」那条规则在运行时的强制执行。过闸的**全部**候选理由
+都保留（不再像以前只留 `max(…, key=confidence)` 那一条）；不过闸就静默回落，**不**重试。
+
+`build_reason` 是**纯函数**（无 uuid / 无时间戳），否则
+`test_candidates_are_deterministic_and_ranked` 的 `second.json() == body` 会破。
+`full_path` 含 ASCII 时**逐段丢弃**，退到 `room/unit/section` 中文名（`label` 为空时
+leaf 用 `code`，会让 `full_path` 变成 `…/L1S1`）。
+
+> **副作用，必读**：确定性兜底让理由**永远**满足 `check_reason_consistent`，于是该
+> verifier 检查事实上被架空 —— VERIFY 变绿**不再**意味着「LLM 解释得很清楚」，只意味着
+> 「理由合规」。这是本批决策的直接后果（决策：不做 verifier 检查、不做理由重试），
+> 不是 bug。
+
+---
+
+## 16. 未来扩展
 
 - 多轮对话：Step 7 输入加 `Conversation.history`，LLM 接收上下文。
 - 批量推荐：`BatchRecommendPipeline`，多条物品共享一次 storage retrieval。
