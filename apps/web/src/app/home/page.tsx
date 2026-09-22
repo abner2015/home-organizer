@@ -2,7 +2,7 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import { requireSession } from "@/lib/session.server";
 import { PageHeader, StatCard } from "@/components/PageHeader";
-import { ErrorState } from "@/components/States";
+import { EmptyState, ErrorState } from "@/components/States";
 import type { Home, SpaceTree } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -53,6 +53,27 @@ export default async function HomeOverview() {
       ),
     0,
   );
+
+  if (tree.rooms.length === 0) {
+    // A brand-new account lands here, and until this batch there was nothing it
+    // could do: the storage tree was written only by the seed script, so every
+    // recommendation answered "无符合硬规则的位置". The empty state offers the
+    // action rather than reporting the absence.
+    return (
+      <div>
+        <PageHeader title={tree.home?.name ?? "我的家"} description="家庭空间概览" />
+        <EmptyState
+          title="还没有收纳空间"
+          description="描述一句、拍一张照片，或者自己一级一级搭起来 —— 有了柜子和格子，AI 才能告诉你东西该放哪儿。"
+          action={
+            <Link href="/home/setup" className="btn-primary">
+              搭建我的家
+            </Link>
+          }
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

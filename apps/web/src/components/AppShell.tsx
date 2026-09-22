@@ -22,6 +22,7 @@ const NAV: NavItem[] = [
 const SECONDARY: NavItem[] = [
   { href: "/home/rooms", label: "房间", icon: <DoorIcon /> },
   { href: "/home/storage", label: "收纳空间", icon: <ShelfIcon /> },
+  { href: "/home/setup", label: "搭建我的家", icon: <CompassIcon /> },
   { href: "/items/new", label: "添加物品", icon: <PlusIcon /> },
 ];
 
@@ -237,6 +238,14 @@ function ShelfIcon({ className = "h-5 w-5" }: { className?: string }) {
       <rect x="3" y="4" width="18" height="16" rx="1.5" />
       <path d="M3 10h18" />
       <path d="M3 16h18" />
+    </svg>
+  );
+}
+function CompassIcon({ className = "h-5 w-5" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="m15.5 8.5-2 5-5 2 2-5 5-2Z" />
     </svg>
   );
 }

@@ -16,6 +16,7 @@ import type {
   AssetUploadResponse,
   CandidateListResponse,
   Home,
+  HomeUpdateBody,
   InferItemBody,
   InferItemResponse,
   Item,
@@ -29,17 +30,24 @@ import type {
   PatchResponse,
   PresignRequest,
   PresignResponse,
+  ProposeStructureBody,
   RecommendResponse,
   RejectRequest,
   RejectResponse,
   Room,
+  RoomCreateBody,
   SearchRequestBody,
   SearchResponseBody,
+  SectionCreateBody,
   SignupBody,
+  SlotCreateBody,
   SpaceTree,
+  StorageSection,
   StorageSlot,
   StorageUnit,
+  StructureProposalResponse,
   TokenResponse,
+  UnitCreateBody,
   User,
   UUID,
 } from "./types";
@@ -245,6 +253,80 @@ export const api = {
     return request<StorageSlot[]>(`/api/v1/homes/${session.homeId}/slots`, {
       method: "GET",
       session,
+    });
+  },
+
+  // ------------------------------------------------------------- structure writes
+
+  async updateHome(
+    body: HomeUpdateBody,
+    session: ApiSession,
+  ): Promise<Home> {
+    return request<Home>(`/api/v1/homes/${session.homeId}`, {
+      method: "PATCH",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  async createRoom(body: RoomCreateBody, session: ApiSession): Promise<Room> {
+    return request<Room>(`/api/v1/homes/${session.homeId}/rooms`, {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  async createUnit(
+    roomId: UUID,
+    body: UnitCreateBody,
+    session: ApiSession,
+  ): Promise<StorageUnit> {
+    return request<StorageUnit>(`/api/v1/rooms/${roomId}/storage-units`, {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  async createSection(
+    unitId: UUID,
+    body: SectionCreateBody,
+    session: ApiSession,
+  ): Promise<StorageSection> {
+    return request<StorageSection>(`/api/v1/storage-units/${unitId}/sections`, {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  async createSlot(
+    sectionId: UUID,
+    body: SlotCreateBody,
+    session: ApiSession,
+  ): Promise<StorageSlot> {
+    return request<StorageSlot>(`/api/v1/sections/${sectionId}/slots`, {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  // ------------------------------------------------------------- structure proposal
+
+  // Ask for a structure. An empty body selects the server-side template: no
+  // model is called and nothing is written except (for the other two branches)
+  // an AgentTrace. The proposal is not persisted anywhere — the user's ticks in
+  // the confirm step are what drive `createRoom`/`createUnit`/… below.
+  async proposeStructure(
+    body: ProposeStructureBody,
+    session: ApiSession,
+  ): Promise<StructureProposalResponse> {
+    return request<StructureProposalResponse>("/api/v1/structures/propose", {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
     });
   },
 

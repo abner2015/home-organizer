@@ -13,7 +13,7 @@ const ROOM_TYPE_LABEL: Record<string, string> = {
   living: "客厅",
   bathroom: "卫生间",
   study: "书房",
-  garage: "车库",
+  storage: "储藏间",
   other: "其他",
 };
 
@@ -50,10 +50,10 @@ export default async function RoomsPage() {
       {tree.rooms.length === 0 ? (
         <EmptyState
           title="还没有任何房间"
-          description="在管理收纳空间页面创建你的第一个房间。"
+          description="先搭一个骨架：描述一句、拍张照片，或者自己一级一级建。"
           action={
-            <Link href="/home/storage" className="btn-primary">
-              前往管理
+            <Link href="/home/setup" className="btn-primary">
+              搭建我的家
             </Link>
           }
         />

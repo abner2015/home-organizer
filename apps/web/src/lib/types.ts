@@ -48,7 +48,18 @@ export interface TokenResponse {
 
 // ------------------------------------------------------------- storage tree
 
-export type RoomType = "bedroom" | "kitchen" | "living" | "bathroom" | "study" | "garage" | "other";
+// These three mirror `services/api/app/db/enums.py`, which is the single source
+// of truth (the columns carry a CHECK constraint with exactly these values).
+// Getting one wrong is not a type error here — it is a 422 from the write API —
+// so they are spelled out to match rather than guessed at.
+export type RoomType =
+  | "bedroom"
+  | "kitchen"
+  | "bathroom"
+  | "study"
+  | "living"
+  | "storage"
+  | "other";
 
 export interface Room {
   id: UUID;
@@ -59,8 +70,8 @@ export interface Room {
   unit_count?: number;
 }
 
-export type UnitType = "cabinet" | "shelf" | "drawer" | "box" | "rack" | "other";
-export type SectionType = "layer" | "drawer" | "compartment" | "shelf" | "other";
+export type UnitType = "cabinet" | "shelf" | "drawer_cabinet" | "box" | "other";
+export type SectionType = "layer" | "drawer" | "box" | "compartment" | "other";
 
 export interface StorageSlot {
   id: UUID;
@@ -103,6 +114,110 @@ export interface SlotRef {
   unit_name: string;
   section_name: string;
   full_path: string;
+}
+
+// ------------------------------------------------------------- structure writes
+// Bodies for the storage-structure write API (`app/schemas/structure.py`). The
+// response of each create is the same view the read routes return, so the
+// existing Room / StorageUnit / StorageSection / StorageSlot types are reused.
+
+export interface HomeUpdateBody {
+  name: string;
+}
+
+export interface RoomCreateBody {
+  name: string;
+  room_type: RoomType;
+  sort_order?: number;
+}
+
+export interface UnitCreateBody {
+  name: string;
+  unit_type: UnitType;
+  description?: string | null;
+  sort_order?: number;
+}
+
+export interface SectionCreateBody {
+  name: string;
+  section_type: SectionType;
+  sort_order?: number;
+}
+
+export interface SlotCreateBody {
+  code: string;
+  label?: string | null;
+  // Free text: the engine also understands 小/中/大 and a bare digit ("6").
+  capacity_hint?: string | null;
+  allowed_categories?: string[];
+  sort_order?: number;
+}
+
+// ------------------------------------------------------------- structure proposal
+// Mirrors `app/ai/provider.py`'s StructureProposalOutput. Nothing here is
+// persisted — it is the model's (or the template's) answer, shown to the user
+// so they can decide what becomes real.
+
+export interface ProposedSlot {
+  code: string;
+  label?: string | null;
+  allowed_categories?: string[];
+  capacity_hint?: EstimatedSize | null;
+}
+
+export interface ProposedSection {
+  name: string;
+  section_type: SectionType;
+  slots: ProposedSlot[];
+}
+
+export interface ProposedUnit {
+  name: string;
+  unit_type: UnitType;
+  sections: ProposedSection[];
+}
+
+export interface ProposedRoom {
+  name: string;
+  room_type: RoomType;
+  units: ProposedUnit[];
+}
+
+export interface StructureProposal {
+  rooms: ProposedRoom[];
+  rationale: string;
+  confidence: number;
+}
+
+// Every kind except `truncated`/`possible_duplicate` means the server *edited*
+// the model's answer. The confirm screen has to disclose that or the user is
+// approving something the model never said.
+export type ProposalWarningKind =
+  | "truncated"
+  | "duplicate_code"
+  | "category_cleared"
+  | "possible_duplicate"
+  | "empty_vocabulary";
+
+export interface ProposalWarning {
+  kind: ProposalWarningKind;
+  path: string;
+  message: string;
+}
+
+export interface ProposeStructureBody {
+  asset_id?: UUID | null;
+  description?: string | null;
+}
+
+export type ProposalSource = "photo" | "text" | "template";
+
+export interface StructureProposalResponse {
+  proposal: StructureProposal;
+  warnings: ProposalWarning[];
+  source: ProposalSource;
+  // null for the template branch: no model ran, so there is nothing to trace.
+  trace_id: UUID | null;
 }
 
 // ------------------------------------------------------------- items

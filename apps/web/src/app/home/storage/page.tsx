@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { api } from "@/lib/api";
 import { requireSession } from "@/lib/session.server";
 import { PageHeader } from "@/components/PageHeader";
@@ -43,7 +44,12 @@ export default async function StoragePage() {
       {totalSlots === 0 ? (
         <EmptyState
           title="还没有任何收纳空间"
-          description="通过后端 API 创建房间、柜子、层和格子。"
+          description="有了柜子、层和格子，AI 才有地方可推荐。"
+          action={
+            <Link href="/home/setup" className="btn-primary">
+              搭建我的家
+            </Link>
+          }
         />
       ) : (
         <div className="space-y-4">
