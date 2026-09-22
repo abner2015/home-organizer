@@ -81,7 +81,7 @@ curl http://localhost:8000/health
 ```bash
 python -m ruff check app/ tests/     # 基线 32
 python -m mypy app/                  # 基线 20
-python -m pytest tests/ --no-header -q   # 基线 666 passed / 1 skipped
+python -m pytest tests/ --no-header -q   # 基线 669 passed / 1 skipped
 ```
 
 离线评测：

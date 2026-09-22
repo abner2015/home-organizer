@@ -6,7 +6,7 @@
 >   真实产物路径、真实验收结论、真实基线。已完成的部分不再有「任务」，只有事实。
 > - **下篇 · P0 路线图**（P0.0–P0.4）：唯一还在推进的计划。每个 P0.x 都带交付物与验收标准。
 >
-> 最后更新：2026-09-22 —— P0.4 闭环 + 讲理由交付，**P0 四个批次全部完成**；基线 626 → 666。
+> 最后更新：2026-09-22 —— P0.4 闭环 + 讲理由交付 + 真机验收通过（24/24）；**P0 四个批次全部完成**；基线 626 → 669。
 >
 > 背景：本文件原稿写于**开工前**。开工后实际走出来的顺序与原稿并不一致，于是原稿里出现了
 > Phase 9、Phase 10 各两份（旧副本与新副本交织），路径也停留在 `apps/api/`。本次一并归位。
@@ -348,6 +348,10 @@ tools/write_tools.py, schemas/item.py}`；前端 `apps/web/src/components/placem
      ASCII 字母**。过闸的**全部**候选理由都保留（不再只留第一名），不过闸则确定性理由兜底。
    - 物品页摆放历史每条显示「为什么放这里」：AI 落位有其来源推荐的理由，手动落位为空串
      （`ItemPlacementView.reason`）。
+   - 理由的从句按权重降序取第一个成立的，**偏好除外** —— 偏好项命中时**额外**补一句
+     「符合你以往的收纳习惯」。`category`（+25，最重的一项）几乎对每条被推荐的 slot
+     都成立，严格「第一个成立就返回」会让偏好那句永远轮不到，用户接受过的位置在理由里
+     看不出痕迹。这是 P0.4 **真机验收**发现的唯一缺口（其余 23 项一次通过），已修。
 
 **验收**
 
@@ -362,10 +366,16 @@ tools/write_tools.py, schemas/item.py}`；前端 `apps/web/src/components/placem
       `superseded` 的推荐**不**触发排除
 - [x] 候选被全部排除后 `state=failed`，错误文案为「该物品的候选位置均已被你排除」
       而不是误导性的「无符合硬规则的位置」
+- [x] 接受后对**同类别**的另一件物品再推荐，该 slot 的**理由里出现**「符合你以往的收纳习惯」
+      （`tests/unit/test_reason.py::test_preference_is_narrated_alongside_a_stronger_clause`；
+      真机：`儿童退烧药` 对该 slot 45 → 55、rank 2 → 1，理由里出现该句）
+- [x] **真机验收**（真 DeepSeek，全新 seed 库，24 项检查）：接受 → 同类物品该 slot 得分 / 位次
+      上升且只有该 slot 变化；拒绝 → 两条路径都不再出现该 slot，`candidates[0].audit_note`
+      记下原因；全部排除 → 失败文案正确；摆放历史按「有无来源推荐」区分有无理由
 - [x] 评测数字**未动**：61/61、Valid Slot 100%、Hard Violation 1.64%、
       Accuracy 59.02%、Top-3 Recall 70.49%（`score_terms` 重构保证
       `deterministic_score` 逐项相同）
-- [x] 基线：**666 passed / 1 skipped**（+40），ruff 32，mypy 20；
+- [x] 基线：**669 passed / 1 skipped**（+43），ruff 32，mypy 20；
       `tsc --noEmit` + `next lint` 干净
 
 **已知副作用（必读）**：确定性兜底让理由**永远**满足 `check_reason_consistent`，

@@ -78,7 +78,7 @@ home-organizer/
 - **前端**：`/` 首页、`/login`、`/signup`、`/home`（含 rooms / storage / setup）、
   `/items`（含详情、新增、`/items/place` 批量归位）、`/recommendations/[id]`、`/assistant`。
   认证走 cookie + `Authorization: Bearer`，未登录由 `src/middleware.ts` 重定向到 `/login`。
-- **测试基线**：`services/api` 666 passed / 1 skipped；ruff 32 / mypy 20（均为历史遗留，不得上升）；
+- **测试基线**：`services/api` 669 passed / 1 skipped；ruff 32 / mypy 20（均为历史遗留，不得上升）；
   `apps/web` 的 `npx tsc --noEmit` 与 `npx next lint` 必须干净。
 - **评测基线**：61/61、Valid Slot 100%、Hard Violation 1.64%、Accuracy 59.02%、Top-3 Recall 70.49%
   （Mock AI；见 `docs/EVALUATION.md` §3.2）。
@@ -169,7 +169,7 @@ home-organizer/
 
 ```bash
 cd services/api && source .venv/bin/activate
-python -m pytest tests/ --no-header -q   # 基线 666 passed / 1 skipped
+python -m pytest tests/ --no-header -q   # 基线 669 passed / 1 skipped
 python -m ruff check app/ tests/         # 基线 32（历史遗留，不得上升）
 python -m mypy app/                      # 基线 20（历史遗留，不得上升）
 ```

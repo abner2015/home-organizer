@@ -112,6 +112,25 @@ def test_category_match_is_named_as_the_evidence() -> None:
     assert "该位置可以存放此类物品" in reason
 
 
+def test_preference_is_narrated_alongside_a_stronger_clause() -> None:
+    """`category` (+25) fires for nearly every proposed slot, so a first-wins
+    clause list would make the preference sentence unreachable — and the user
+    could not see their own accept reflected in the reason (P0.4 acceptance)."""
+    reason = build_reason(_slot(), _item(), score_terms={"category": 1, "preference": 1})
+    assert "该位置可以存放此类物品" in reason
+    assert "符合你以往的收纳习惯" in reason
+
+
+def test_preference_is_not_mentioned_when_the_term_did_not_fire() -> None:
+    reason = build_reason(_slot(), _item(), score_terms={"category": 1})
+    assert "符合你以往的收纳习惯" not in reason
+
+
+def test_preference_is_not_repeated_when_it_is_the_strongest_clause() -> None:
+    reason = build_reason(_slot(), _item(), score_terms={"preference": 1})
+    assert reason.count("符合你以往的收纳习惯") == 1
+
+
 def test_blank_item_and_blank_location_still_yields_a_reason() -> None:
     reason = build_reason({}, {})
     assert reason == "这是一个合适的收纳位置"

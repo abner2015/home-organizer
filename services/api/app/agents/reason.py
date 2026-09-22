@@ -94,6 +94,8 @@ _ROOM_TYPE_ZH: dict[str, str] = {
 
 _LOCK_MARKERS = ("锁", "locked", "lockable")
 
+_PREFERENCE_CLAUSE = "符合你以往的收纳习惯"
+
 
 def is_acceptable_llm_reason(text: str | None) -> bool:
     """True if the model's reason may be shown to the user verbatim.
@@ -167,7 +169,7 @@ def _evidence_clause(slot: dict[str, Any], item: dict[str, Any], terms: dict[str
     if terms.get("history"):
         return "你之前就把同类物品放在这里"
     if terms.get("preference"):
-        return "符合你以往的收纳习惯"
+        return _PREFERENCE_CLAUSE
     if terms.get("room"):
         room_zh = _ROOM_TYPE_ZH.get(str(slot.get("room_type") or "").strip().lower(), "")
         if room_zh:
@@ -201,9 +203,17 @@ def build_reason(
     if location:
         parts.append(f"建议放在{location}")
 
-    evidence = _evidence_clause(slot, item, score_terms or {})
+    terms = score_terms or {}
+    evidence = _evidence_clause(slot, item, terms)
     if evidence:
         parts.append(evidence)
+    # The preference term is a *personal* signal, so it is narrated even when a
+    # generic clause already won — which is the normal case, because `category`
+    # (+25, the heaviest term) fires for essentially every slot the ranker
+    # proposes. Without this, `_evidence_clause`'s own preference branch is dead
+    # text and the user cannot see their own accept reflected in the reason.
+    if terms.get("preference") and evidence != _PREFERENCE_CLAUSE:
+        parts.append(_PREFERENCE_CLAUSE)
 
     if not parts:
         return "这是一个合适的收纳位置"
