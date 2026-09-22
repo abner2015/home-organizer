@@ -274,6 +274,9 @@ export interface ItemPlacement {
   placed_at: ISODateTime;
   removed_at?: ISODateTime | null;
   note?: string;
+  // 「为什么放这里」 — populated for an AI placement (the reason recorded on the
+  // originating recommendation); empty for a manual one (P0.4).
+  reason?: string;
 }
 
 // Body for POST /placements — put an item straight into a slot ("反向录入").

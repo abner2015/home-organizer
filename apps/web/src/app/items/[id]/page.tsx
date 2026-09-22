@@ -159,6 +159,11 @@ export default async function ItemDetail({ params }: { params: { id: string } })
                     {p.source === "ai_recommendation" ? "AI 推荐放置" : "手动放置"} ·{" "}
                     {formatDateTime(p.placed_at)}
                   </p>
+                  {p.reason ? (
+                    <p className="mt-1 text-xs text-ink-500">
+                      为什么放这里：{p.reason}
+                    </p>
+                  ) : null}
                 </div>
                 {p.removed_at ? (
                   <span className="badge">已结束 {formatDateTime(p.removed_at)}</span>
