@@ -25,16 +25,21 @@ import type {
   ItemUpsertBody,
   ItemVisionResponse,
   LoginBody,
+  Member,
+  MemberInviteBody,
+  MemberUpdateBody,
   PaginatedItems,
   PatchRequest,
   PatchResponse,
   PlaceItemBody,
+  PlacementUpdateBody,
   PresignRequest,
   PresignResponse,
   ProposeStructureBody,
   RecommendResponse,
   RejectRequest,
   RejectResponse,
+  RevokeResponse,
   Room,
   RoomCreateBody,
   SearchRequestBody,
@@ -397,6 +402,21 @@ export const api = {
     });
   },
 
+  // Edit a placement's note and/or move it to a different slot (P0.7). When
+  // only `slot_id` is sent, the new row inherits the old note; when both
+  // fields are sent, the explicit `note` wins. An empty body returns 422.
+  async updatePlacement(
+    placementId: UUID,
+    body: PlacementUpdateBody,
+    session: ApiSession,
+  ): Promise<ItemPlacement> {
+    return request<ItemPlacement>(`/api/v1/placements/${placementId}`, {
+      method: "PATCH",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
   // Soft close — the row stays as history, `removed_at` gets stamped.
   async unplaceItem(placementId: UUID, session: ApiSession): Promise<ItemPlacement> {
     return request<ItemPlacement>(`/api/v1/placements/${placementId}`, {
@@ -463,6 +483,16 @@ export const api = {
       session,
       body: JSON.stringify(body),
     });
+  },
+
+  async revokeRecommendation(
+    recId: UUID,
+    session: ApiSession,
+  ): Promise<RevokeResponse> {
+    return request<RevokeResponse>(
+      `/api/v1/recommendations/${recId}/revoke`,
+      { method: "POST", session, body: JSON.stringify({}) },
+    );
   },
 
   async patchRecommendation(
@@ -550,5 +580,56 @@ export const api = {
     if (!res.ok) {
       throw new APIError(`上传失败：${res.status}`, res.status, null);
     }
+  },
+
+  // ------------------------------------------------------------- members (P0.8)
+
+  // Open to any home member (not just owners): discoverability of "who else
+  // shares this home with me" is the whole point of this page.
+  async listHomeMembers(session: ApiSession): Promise<Member[]> {
+    return request<Member[]>(`/api/v1/homes/${session.homeId}/members`, {
+      method: "GET",
+      session,
+    });
+  },
+
+  // Owner only. Email must match an existing user; unknown emails come back
+  // as 404 not_found (message: 该邮箱还没注册账号). Re-adding a former
+  // member works because the row was hard-deleted, not soft-deleted.
+  async inviteHomeMember(
+    body: MemberInviteBody,
+    session: ApiSession,
+  ): Promise<Member> {
+    return request<Member>(`/api/v1/homes/${session.homeId}/members`, {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  // Owner only. Demoting the last remaining owner → 409 (handled by the
+  // callers — they should toast「至少需要保留一个 owner」and not refire).
+  async updateHomeMember(
+    targetUserId: UUID,
+    body: MemberUpdateBody,
+    session: ApiSession,
+  ): Promise<Member> {
+    return request<Member>(
+      `/api/v1/homes/${session.homeId}/members/${targetUserId}`,
+      { method: "PATCH", session, body: JSON.stringify(body) },
+    );
+  },
+
+  // Owner only. Removing the last owner → 409. Returns the last snapshot of
+  // the removed membership (200, not 204) so callers can show「已移除 XXX」
+  // without a follow-up GET.
+  async removeHomeMember(
+    targetUserId: UUID,
+    session: ApiSession,
+  ): Promise<Member> {
+    return request<Member>(
+      `/api/v1/homes/${session.homeId}/members/${targetUserId}`,
+      { method: "DELETE", session },
+    );
   },
 };

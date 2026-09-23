@@ -12,6 +12,10 @@ export interface Home {
   id: UUID;
   name: string;
   timezone?: string;
+  // Populated by `GET /homes/{id}`; `null`/`undefined` on the list endpoint
+  // because `_home_view` only fills counts there. Used to detect "is the
+  // caller the owner" on the home overview (P0.8 members link).
+  owner_id?: UUID;
   member_count?: number;
   item_count?: number;
   rule_count?: number;
@@ -21,6 +25,36 @@ export interface User {
   id: UUID;
   email: string;
   display_name?: string;
+}
+
+// ------------------------------------------------------------- members (P0.8)
+// Mirrors `app/schemas/home.py:MemberView` — one row of a home's member list.
+//
+// `role` is open to both `owner` and `member`; the Web client surfaces the
+// distinction with a badge. `joined_at` is shown next to each row in the
+// members page so the list reads like an org chart, oldest first.
+export type HomeRole = "owner" | "member";
+
+export interface Member {
+  user_id: UUID;
+  display_name: string;
+  email: string;
+  role: HomeRole;
+  joined_at: ISODateTime;
+}
+
+// POST /homes/{id}/members — invite by email. Email MUST match an existing
+// user account; unknown emails come back as 404 so the caller can tell the
+// friend to register first (no SMTP path in this build).
+export interface MemberInviteBody {
+  email: string;
+  role?: HomeRole;
+}
+
+// PATCH /homes/{id}/members/{user_id} — promote / demote. Only the role
+// changes; the rest of the membership is immutable.
+export interface MemberUpdateBody {
+  role: HomeRole;
 }
 
 // ------------------------------------------------------------- auth
@@ -287,6 +321,27 @@ export interface PlaceItemBody {
   note?: string | null;
 }
 
+// Body for PATCH /placements/{id} — edit a placement's note and/or move it
+// to a different slot (P0.7). Both fields are optional but at least one
+// must be set (the route returns 422 for {}).
+//
+// `note` semantics:
+//   - omitted → leave as-is
+//   - string  → update
+//   - null    → clear
+//
+// `slot_id` semantics:
+//   - omitted → leave as-is
+//   - UUID    → move (close current + insert new active row)
+//
+// When only `slot_id` is sent, the new row inherits the old note so
+// 「放到别处」 preserves the annotation. When both are sent, the explicit
+// new `note` wins.
+export interface PlacementUpdateBody {
+  note?: string | null;
+  slot_id?: UUID;
+}
+
 export interface PaginatedItems {
   items: Item[];
   page: number;
@@ -390,7 +445,12 @@ export interface RecommendResponse {
   error?: string | null;
 }
 
-export type RecommendationStatus = "pending" | "accepted" | "rejected" | "superseded";
+export type RecommendationStatus =
+  | "pending"
+  | "accepted"
+  | "rejected"
+  | "revoked"
+  | "superseded";
 
 // Mirrors the backend's CandidateListResponse
 // (GET /items/{id}/candidates — deterministic, no LLM call).
@@ -427,6 +487,11 @@ export interface RejectResponse {
   recommendation_id: UUID;
   status: RecommendationStatus;
   note?: string | null;
+}
+
+export interface RevokeResponse {
+  recommendation_id: UUID;
+  status: RecommendationStatus;
 }
 
 export interface PatchRequest {

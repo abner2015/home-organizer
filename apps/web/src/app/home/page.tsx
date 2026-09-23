@@ -10,24 +10,31 @@ export const dynamic = "force-dynamic";
 interface HomeData {
   home: Home | null;
   tree: SpaceTree | null;
+  currentUserId: string | null;
 }
 
 async function loadHome(): Promise<HomeData> {
   const session = await requireSession();
   try {
-    const [home, tree] = await Promise.all([
+    const [home, tree, me] = await Promise.all([
       api.getHome(session.homeId, session).catch(() => null),
       api.getSpaceTree(session).catch(() => null),
+      // Needed to gate the "管理成员" link to the actual owner of the home,
+      // not just anyone who happens to have `owner_id` set. P0.8.
+      api.me(session.token).catch(() => null),
     ]);
-    return { home, tree };
+    return { home, tree, currentUserId: me?.id ?? null };
   } catch (err) {
     console.error("home load failed", err);
-    return { home: null, tree: null };
+    return { home: null, tree: null, currentUserId: null };
   }
 }
 
 export default async function HomeOverview() {
   const data = await loadHome();
+  const isOwner = !!(
+    data.currentUserId && data.home?.owner_id === data.currentUserId
+  );
   if (!data.tree) {
     return (
       <div>
@@ -91,6 +98,22 @@ export default async function HomeOverview() {
           </>
         }
       />
+      {isOwner && tree.home?.id ? (
+        // The members page is gated to owners server-side (the API returns
+        // 403 for non-owner POST/PATCH/DELETE), but only owners see the link
+        // here so the affordance isn't advertised to people who can't act on
+        // it. `isOwner` compares the cookie's identity with the home's
+        // `owner_id`; an `/auth/me` failure here just hides the link, not the
+        // page itself.
+        <div className="flex justify-end">
+          <Link
+            href={`/home/${tree.home.id}/members`}
+            className="btn-ghost text-sm"
+          >
+            管理成员 →
+          </Link>
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard label="房间" value={tree.rooms.length} tone="brand" />
