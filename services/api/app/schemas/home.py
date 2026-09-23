@@ -33,6 +33,26 @@ class HomeView(BaseModel):
     rule_count: int | None = None
 
 
+class HomeCreateRequest(BaseModel):
+    """Body of ``POST /homes`` (P0.9).
+
+    The caller becomes the new home's OWNER automatically — there is no second
+    role parameter, and there is no "join an existing home" path on this
+    endpoint. ``timezone`` is optional; ``None`` falls back to the model
+    default (``Asia/Shanghai``) inside :func:`home_service.create_home_for`.
+
+    ``name`` is bounded to 1-100 chars to match the DB column (``String(100)``);
+    empty-after-strip is rejected by the route as 400 (``ValidationFailedError``,
+    project convention from P0.7) rather than letting Pydantic emit the more
+    generic 422, because the cause is *user* whitespace, not malformed input.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=100)
+    timezone: str | None = None
+
+
 class RoomView(BaseModel):
     """A room inside a home."""
 
@@ -209,6 +229,7 @@ def unit_view(
 
 
 __all__ = [
+    "HomeCreateRequest",
     "HomeView",
     "MemberInviteRequest",
     "MemberUpdateRequest",

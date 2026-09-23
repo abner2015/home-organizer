@@ -1,5 +1,5 @@
 """Home + storage-structure read endpoints (Phase 10) + member
-management (P0.8).
+management (P0.8) + create-home (P0.9).
 
 Phase 10 added the six read routes the Web app needs to render the
 home → room → unit → section → slot hierarchy; they are thin wrappers over
@@ -14,6 +14,12 @@ without changing the URL surface. Business logic is in
 guards. The one extra guard is :func:`_ensure_owner`, the only place the
 project allows ``ForbiddenError`` (403) inside a home — non-owner callers
 *are* members, so 404 would leak the existence of the home.
+
+P0.9 added ``POST /homes``: a Bearer-only route (no ``X-Home-Id`` because
+there is no home yet — ``get_current_user`` not ``get_actor``). The caller
+becomes OWNER of the freshly-created home; the actual write lives in
+:func:`app.services.home_service.create_home_for` so signup and this route
+share one primitive.
 
 Auth is the shared ``get_actor`` dependency (Bearer JWT + ``X-Home-Id``), the
 same one assets / items / recommendations / search use. Every read route
@@ -33,14 +39,16 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Actor, ensure_member, get_actor, get_current_user
-from app.core.exceptions import ForbiddenError, NotFoundError
+from app.core.exceptions import ForbiddenError, NotFoundError, ValidationFailedError
 from app.db.enums import HomeRole
 from app.db.session import get_db
 from app.models import HomeMembership, User
+from app.models.home import Home
 from app.models.item import Item
 from app.models.room import Room
 from app.models.rule import HomeRule
 from app.schemas.home import (
+    HomeCreateRequest,
     HomeView,
     MemberInviteRequest,
     MemberUpdateRequest,
@@ -56,6 +64,7 @@ from app.schemas.home import (
     slot_view,
     unit_view,
 )
+from app.services import home_service
 from app.services.membership_service import (
     build_member_view,
     change_role,
@@ -146,6 +155,54 @@ async def _space_tree(db: AsyncSession, *, home_id: uuid.UUID) -> SpaceTreeView:
 
 
 # ---------------------------------------------------------------------- routes
+
+
+@router.post(
+    "",
+    response_model=HomeView,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new home (caller becomes OWNER)",
+)
+async def create_home(
+    body: HomeCreateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> HomeView:
+    """Create a fresh home and make the caller its OWNER.
+
+    Uses :func:`get_current_user` (Bearer JWT only) because the call happens
+    *before* there is any home to put in ``X-Home-Id`` — listing your homes
+    has the same shape and is the precedent (``GET /homes``).
+
+    Empty-after-strip is a business-validation failure, not a schema one, so
+    it surfaces as 400 via ``ValidationFailedError`` (project convention from
+    P0.7) rather than the generic 422 Pydantic would otherwise emit. Storage
+    hierarchy is intentionally *not* created — the empty-state CTA on
+    ``/home`` already teaches the user to go build one via ``/home/setup``.
+    """
+    name = body.name.strip()
+    if not name:
+        raise ValidationFailedError("name 不能为空")
+    home: Home = await home_service.create_home_for(
+        db,
+        owner_id=current_user.id,
+        name=name,
+        timezone=body.timezone,
+    )
+    # A fresh home has exactly one member (the caller) and zero items / rules
+    # — counts are filled here rather than re-queried so we do not need a
+    # second round-trip after the inserts.
+    return _home_view(
+        {
+            "id": str(home.id),
+            "name": home.name,
+            "timezone": home.timezone,
+            "owner_id": str(home.owner_id),
+        },
+        member_count=1,
+        item_count=0,
+        rule_count=0,
+    )
 
 
 @router.get("", response_model=list[HomeView], summary="List the caller's homes")
