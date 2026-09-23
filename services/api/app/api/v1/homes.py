@@ -1,16 +1,26 @@
-"""Home + storage-structure read endpoints (Phase 10).
+"""Home + storage-structure read endpoints (Phase 10) + member
+management (P0.8).
 
-The Phase 8 Web app renders the whole home → room → unit → section → slot
-hierarchy, but nothing in the API exposed it: every page that called
-``GET /api/v1/homes/{id}/space-tree`` got a 404. This router adds the six read
-routes the frontend needs, all phrased as thin wrappers over the already-tested
-``app/tools/home_tools`` queries so there is exactly one place that knows how
-to walk the hierarchy.
+Phase 10 added the six read routes the Web app needs to render the
+home → room → unit → section → slot hierarchy; they are thin wrappers over
+the already-tested ``app/tools/home_tools`` queries so there is exactly one
+place that knows how to walk the hierarchy.
+
+P0.8 added four member-management routes (``/homes/{id}/members`` family).
+They live on the same router because a Home *is* the membership boundary —
+splitting them onto a separate router would just shuffle the imports around
+without changing the URL surface. Business logic is in
+:mod:`app.services.membership_service`; the routes here are projections and
+guards. The one extra guard is :func:`_ensure_owner`, the only place the
+project allows ``ForbiddenError`` (403) inside a home — non-owner callers
+*are* members, so 404 would leak the existence of the home.
 
 Auth is the shared ``get_actor`` dependency (Bearer JWT + ``X-Home-Id``), the
-same one assets / items / recommendations / search use. Every route requires
-the caller to be a member of the home in the path; non-members and unknown ids
-both 404 so the API never leaks the existence of another home's data.
+same one assets / items / recommendations / search use. Every read route
+requires the caller to be a member of the home in the path; non-members and
+unknown ids both 404 so the API never leaks the existence of another home's
+data. Management routes first ensure membership (404 otherwise), then ensure
+ownership (403 if member-but-not-owner).
 """
 from __future__ import annotations
 
@@ -18,12 +28,13 @@ import uuid
 from collections import defaultdict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Actor, ensure_member, get_actor, get_current_user
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import ForbiddenError, NotFoundError
+from app.db.enums import HomeRole
 from app.db.session import get_db
 from app.models import HomeMembership, User
 from app.models.item import Item
@@ -31,6 +42,9 @@ from app.models.room import Room
 from app.models.rule import HomeRule
 from app.schemas.home import (
     HomeView,
+    MemberInviteRequest,
+    MemberUpdateRequest,
+    MemberView,
     RoomTreeView,
     RoomView,
     SpaceTreeView,
@@ -41,6 +55,13 @@ from app.schemas.home import (
     section_view,
     slot_view,
     unit_view,
+)
+from app.services.membership_service import (
+    build_member_view,
+    change_role,
+    invite_member,
+    list_members,
+    remove_member,
 )
 from app.tools.home_tools import (
     get_home,
@@ -246,6 +267,149 @@ async def list_storage_units(
     return [StorageUnitView(**unit) for unit in await _nested_units(
         db, home_id=room.home_id, room_id=room_id
     )]
+
+
+# --------------------------------------------------------------------- P0.8
+# Member management
+#
+# All four routes share the same call graph: ensure membership (404 if not),
+# then for management-class actions ensure ownership (403 if not), then
+# delegate to ``membership_service``. The split exists so the routes are
+# thin and so the business logic — including the last-owner guard — stays
+# in one place that's easy to test in isolation.
+
+
+async def _ensure_owner(db: AsyncSession, *, home_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    """Raise ``ForbiddenError`` unless ``user_id`` is an OWNER of ``home_id``.
+
+    Caller is expected to have already passed ``ensure_member``; this checks
+    the role. This is one of two places in the project where 403 is
+    legitimate (the other is ``PATCH /homes/{id}`` non-owner); everywhere
+    else prefers 404 not-403 to avoid leaking "this home exists and you are
+    not in it".
+    """
+    stmt = select(HomeMembership.role).where(
+        HomeMembership.home_id == home_id,
+        HomeMembership.user_id == user_id,
+    )
+    role = (await db.execute(stmt)).scalar_one_or_none()
+    if role != HomeRole.OWNER.value:
+        raise ForbiddenError("只有 owner 可以管理成员")
+
+
+@router.get(
+    "/{home_id}/members",
+    response_model=list[MemberView],
+    summary="List a home's members",
+)
+async def list_home_members(
+    home_id: uuid.UUID,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[MemberView]:
+    """Every member of this home, oldest first (signup order).
+
+    Open to any member — owners, members, and self alike — so people can
+    see who else shares the home with them. Returns 404 for non-members
+    (not 403), per project convention.
+    """
+    await ensure_member(db, home_id=home_id, user_id=actor.user_id)
+    rows = await list_members(db, home_id=home_id)
+    return [build_member_view(row) for row in rows]
+
+
+@router.post(
+    "/{home_id}/members",
+    response_model=MemberView,
+    status_code=status.HTTP_200_OK,
+    summary="Add an existing user (matched by email) to this home",
+)
+async def invite_home_member(
+    home_id: uuid.UUID,
+    body: MemberInviteRequest,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MemberView:
+    """Invite by email. Owner only.
+
+    - email matches an existing ``User`` → 200 + the new member view.
+    - email does not match anyone → 404 not_found「该邮箱还没注册账号」.
+      There is no email/SMTP path in this build, so the friend has to
+      register first; the call *is* the invite.
+    - user is already a member → 409 conflict.
+
+    Returns 200 (not 201) so the same shape works for re-adding after a
+    previous remove — the resource already existed before this request.
+    """
+    await ensure_member(db, home_id=home_id, user_id=actor.user_id)
+    await _ensure_owner(db, home_id=home_id, user_id=actor.user_id)
+    row = await invite_member(
+        db,
+        home_id=home_id,
+        email=body.email,
+        role=body.role,
+    )
+    return build_member_view(row)
+
+
+@router.patch(
+    "/{home_id}/members/{user_id}",
+    response_model=MemberView,
+    summary="Change a member's role",
+)
+async def update_home_member(
+    home_id: uuid.UUID,
+    user_id: uuid.UUID,
+    body: MemberUpdateRequest,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MemberView:
+    """Promote / demote one member. Owner only.
+
+    - Demoting the last remaining owner → 409 conflict「至少需要保留一个 owner」.
+    - Promoting a member to owner is allowed (covers the "two owners from
+      day one" case where the original owner invited a co-owner directly).
+    - Setting the same role they already have is a no-op (still returns
+      the member view).
+    """
+    await ensure_member(db, home_id=home_id, user_id=actor.user_id)
+    await _ensure_owner(db, home_id=home_id, user_id=actor.user_id)
+    row = await change_role(
+        db,
+        home_id=home_id,
+        target_user_id=user_id,
+        new_role=body.role,
+    )
+    return build_member_view(row)
+
+
+@router.delete(
+    "/{home_id}/members/{user_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Remove a member from this home",
+)
+async def delete_home_member(
+    home_id: uuid.UUID,
+    user_id: uuid.UUID,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MemberView:
+    """Owner only. Removing yourself is allowed; removing the last owner is
+    not (409). Unknown user_id → 404 not_found.
+
+    The row is hard-deleted — there is no soft-delete on memberships the
+    way placements have ``removed_at``, because a re-``POST`` after a
+    remove is just a new invite with no audit trail worth carrying. (Items
+    the ex-member had placed keep their ``placed_by_user_id`` history
+    unchanged — that is the audit trail that matters.)
+
+    Returns the last snapshot of the removed membership (200, not 204) so
+    the caller can render what was deleted without a follow-up GET.
+    """
+    await ensure_member(db, home_id=home_id, user_id=actor.user_id)
+    await _ensure_owner(db, home_id=home_id, user_id=actor.user_id)
+    row = await remove_member(db, home_id=home_id, target_user_id=user_id)
+    return build_member_view(row)
 
 
 __all__ = ["rooms_router", "router"]

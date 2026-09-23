@@ -9,9 +9,12 @@ JSON-safe dicts whose UUIDs are strings.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+
+from app.db.enums import HomeRole
 
 
 class HomeView(BaseModel):
@@ -101,6 +104,51 @@ class SpaceTreeView(BaseModel):
     rooms: list[RoomTreeView] = Field(default_factory=list)
 
 
+class MemberView(BaseModel):
+    """One row in a home's member list (P0.8).
+
+    ``display_name`` and ``email`` come from the ``User`` row joined to the
+    ``HomeMembership``; ``role`` and ``joined_at`` from the membership. The
+    endpoint that emits this (``GET /homes/{id}/members``) is open to any
+    member of the home so people can see who else shares the home, not just
+    owners.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: uuid.UUID
+    display_name: str
+    email: EmailStr
+    role: HomeRole
+    joined_at: datetime
+
+
+class MemberInviteRequest(BaseModel):
+    """Body of ``POST /homes/{id}/members``.
+
+    Email must match an existing ``User``; unknown emails come back as
+    ``404 not_found`` so the caller can tell the friend to register first.
+    There is no email/SMTP path in this build, so the call IS the invite.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    role: HomeRole = HomeRole.MEMBER
+
+
+class MemberUpdateRequest(BaseModel):
+    """Body of ``PATCH /homes/{id}/members/{user_id}``.
+
+    Only the role changes — there is nothing else on a membership worth
+    editing. ``extra="forbid"`` keeps a typo'd field from silently no-op'ing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: HomeRole
+
+
 # ------------------------------------------------------------------- factories
 #
 # The read routes in ``app/api/v1/homes.py`` and the write routes in
@@ -162,6 +210,9 @@ def unit_view(
 
 __all__ = [
     "HomeView",
+    "MemberInviteRequest",
+    "MemberUpdateRequest",
+    "MemberView",
     "RoomTreeView",
     "RoomView",
     "SpaceTreeView",
