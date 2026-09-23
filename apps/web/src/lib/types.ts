@@ -159,6 +159,13 @@ export interface HomeUpdateBody {
   name: string;
 }
 
+// Body of `POST /api/v1/homes` (P0.9). The caller becomes OWNER of the new
+// home; the response is the same `Home` view the read routes return.
+export interface HomeCreateBody {
+  name: string;
+  timezone?: string | null;
+}
+
 export interface RoomCreateBody {
   name: string;
   room_type: RoomType;

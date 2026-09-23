@@ -16,6 +16,7 @@ import type {
   AssetUploadResponse,
   CandidateListResponse,
   Home,
+  HomeCreateBody,
   HomeUpdateBody,
   InferItemBody,
   InferItemResponse,
@@ -229,6 +230,22 @@ export const api = {
     return request<Home>(`/api/v1/homes/${targetHomeId}`, {
       method: "GET",
       session,
+    });
+  },
+
+  /**
+   * Create a fresh home (P0.9). Bearer-only — there is no `homeId` to put
+   * in `X-Home-Id` yet, which is exactly the point of the endpoint.
+   * Callers become OWNER of the new home automatically.
+   */
+  async createHome(
+    body: HomeCreateBody,
+    session: ApiSession,
+  ): Promise<Home> {
+    return request<Home>("/api/v1/homes", {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
     });
   },
 

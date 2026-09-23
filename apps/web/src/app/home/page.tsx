@@ -105,7 +105,13 @@ export default async function HomeOverview() {
         // it. `isOwner` compares the cookie's identity with the home's
         // `owner_id`; an `/auth/me` failure here just hides the link, not the
         // page itself.
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          {/* P0.9: anyone in the home can create a *new* home (the new home's
+              OWNER is the caller regardless of their role here) — so the
+              link is shown to all members, not just owners. */}
+          <Link href="/home/new" className="btn-ghost text-sm">
+            + 新家
+          </Link>
           <Link
             href={`/home/${tree.home.id}/members`}
             className="btn-ghost text-sm"
@@ -113,7 +119,14 @@ export default async function HomeOverview() {
             管理成员 →
           </Link>
         </div>
-      ) : null}
+      ) : (
+        // Non-owners still need a way to add a home of their own.
+        <div className="flex justify-end">
+          <Link href="/home/new" className="btn-ghost text-sm">
+            + 新家
+          </Link>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard label="房间" value={tree.rooms.length} tone="brand" />
