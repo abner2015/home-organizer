@@ -489,3 +489,386 @@ async def test_place_item_foreign_slot_leaves_item_without_placement(
         headers=seeded_actor.headers(),
     ).json()
     assert item["current_placement"] is None
+
+
+async def test_concurrent_place_returns_409(
+    api_client: TestClient,
+    seeded_actor,
+    storage_hierarchy,
+    db_engine,
+) -> None:
+    """The partial unique index ``uq_item_placements_one_active_per_item``
+    makes "one item, one active slot" a DB invariant. Two concurrent
+    POST /placements for the same item both run the close-then-insert
+    sequence; the loser's flush collides with the winner's already-committed
+    row and PG raises IntegrityError. The endpoint must translate that to
+    409 (not 500) so the caller knows it's a race they can retry.
+
+    SQLite doesn't enforce the index, so we simulate the race by monkeypatching
+    the session's flush to raise the same IntegrityError. The production
+    path is identical after the patch — _create_placement catches
+    IntegrityError on flush, rolls back, and raises ConflictError.
+    """
+    from unittest import mock
+
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    cup_id = storage_hierarchy.items["马克杯"]
+    slot_id = storage_hierarchy.slots["L1S1"]
+
+    async def _failing_flush(_self):
+        # Mirrors what PG would say when the loser of the race hits the
+        # partial unique index. The exact message text is not load-bearing —
+        # the writer's _constraint_name_from_integrity_error inspects the
+        # message only as a last resort, after the structured diag object.
+        raise IntegrityError(
+            "duplicate key value violates unique constraint "
+            '"uq_item_placements_one_active_per_item"',
+            params=None,
+            orig=Exception(
+                "duplicate key value violates unique constraint "
+                '"uq_item_placements_one_active_per_item"'
+            ),
+        )
+
+    with mock.patch.object(AsyncSession, "flush", new=_failing_flush):
+        resp = _place(api_client, seeded_actor, cup_id, slot_id)
+    assert resp.status_code == 409, resp.text
+    body = resp.json()
+    assert body["error"]["code"] == "conflict"
+    assert "already being placed" in body["error"]["message"]
+    assert body["error"]["details"]["constraint"] == (
+        "uq_item_placements_one_active_per_item"
+    )
+
+    # No row should have been committed — _create_placement rolled back the
+    # session before raising, and the route's commit was never reached.
+    async with _session(db_engine)() as session:
+        rows = (
+            await session.execute(
+                select(ItemPlacement).where(ItemPlacement.item_id == cup_id)
+            )
+        ).scalars().all()
+    assert rows == [], "a 409 placement must not leave any row behind"
+
+
+# ----------------------------------------------------------------------- patch
+# PATCH /placements/{id} — edit a placement's note and/or move it to a
+# different slot (P0.7).
+
+
+def _patch(
+    api_client: TestClient,
+    actor,
+    placement_id: uuid.UUID,
+    body: dict,
+):
+    return api_client.patch(
+        f"/api/v1/placements/{placement_id}",
+        json=body,
+        headers=actor.headers(),
+    )
+
+
+async def test_patch_placement_edits_note(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """PATCH `{"note": "..."}` → 200, DB row note updated, slot unchanged."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    slot_id = storage_hierarchy.slots["L1S1"]
+    placed = _place(api_client, seeded_actor, cup_id, slot_id)
+    assert placed.status_code == 201, placed.text
+    placement_id = placed.json()["id"]
+
+    resp = _patch(api_client, seeded_actor, placement_id, {"note": "新加备注"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == placement_id
+    assert body["note"] == "新加备注"
+    assert body["slot_id"] == str(slot_id)
+
+    async with _session(db_engine)() as session:
+        rows = (
+            await session.execute(
+                select(ItemPlacement).where(ItemPlacement.id == uuid.UUID(placement_id))
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].note == "新加备注"
+    assert rows[0].slot_id == slot_id
+
+
+async def test_patch_placement_clears_note(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """`{"note": null}` → 200, DB row note cleared."""
+    placed = _place(
+        api_client,
+        seeded_actor,
+        storage_hierarchy.items["马克杯"],
+        storage_hierarchy.slots["L1S1"],
+    )
+    placement_id = placed.json()["id"]
+
+    # Set a note first, then clear it.
+    assert _patch(api_client, seeded_actor, placement_id, {"note": "x"}).status_code == 200
+    resp = _patch(api_client, seeded_actor, placement_id, {"note": None})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["note"] is None
+
+    async with _session(db_engine)() as session:
+        row = (
+            await session.execute(
+                select(ItemPlacement).where(ItemPlacement.id == uuid.UUID(placement_id))
+            )
+        ).scalar_one()
+        assert row.note is None
+
+
+async def test_patch_placement_moves_slot(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """`{"slot_id": new}` → 200, old row closed, new row active."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    first = storage_hierarchy.slots["L1S1"]
+    second = storage_hierarchy.slots["L1S2"]
+    placed = _place(api_client, seeded_actor, cup_id, first)
+    old_id = placed.json()["id"]
+
+    resp = _patch(api_client, seeded_actor, old_id, {"slot_id": str(second)})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["slot_id"] == str(second)
+    new_id = body["id"]
+    assert new_id != old_id
+
+    # Exactly one active, one closed.
+    async with _session(db_engine)() as session:
+        rows = (
+            await session.execute(
+                select(ItemPlacement).where(ItemPlacement.item_id == cup_id)
+            )
+        ).scalars().all()
+    active = [r for r in rows if r.removed_at is None]
+    closed = [r for r in rows if r.removed_at is not None]
+    assert len(active) == 1 and active[0].id == uuid.UUID(new_id)
+    assert len(closed) == 1 and closed[0].id == uuid.UUID(old_id)
+
+
+async def test_patch_placement_move_inherits_note(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """Only `slot_id` provided → new row's note = old row's note."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    first = storage_hierarchy.slots["L1S1"]
+    second = storage_hierarchy.slots["L1S2"]
+    # Create a placement with a note via the manual endpoint. POST /placements
+    # accepts note too, so the seed flow is one call.
+    placed = api_client.post(
+        "/api/v1/placements",
+        json={
+            "item_id": str(cup_id),
+            "slot_id": str(first),
+            "note": "preserve me",
+        },
+        headers=seeded_actor.headers(),
+    )
+    assert placed.status_code == 201, placed.text
+    old_id = placed.json()["id"]
+
+    resp = _patch(api_client, seeded_actor, old_id, {"slot_id": str(second)})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["note"] == "preserve me"
+
+
+async def test_patch_placement_both_fields_uses_new_note(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """Both `note` and `slot_id` provided → new row's note = explicit new value."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    first = storage_hierarchy.slots["L1S1"]
+    second = storage_hierarchy.slots["L1S2"]
+    placed = api_client.post(
+        "/api/v1/placements",
+        json={"item_id": str(cup_id), "slot_id": str(first), "note": "old"},
+        headers=seeded_actor.headers(),
+    )
+    old_id = placed.json()["id"]
+
+    resp = _patch(
+        api_client, seeded_actor, old_id,
+        {"slot_id": str(second), "note": "explicit new"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["slot_id"] == str(second)
+    assert body["note"] == "explicit new"
+
+
+async def test_patch_placement_no_fields_is_400(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """Empty body → 400 ValidationFailedError.
+
+    Body shape validation that FastAPI/Pydantic catches at the framework
+    layer (extra fields, wrong types) returns 422; business-rule checks the
+    route raises itself return 400 (project convention — see
+    ``ValidationFailedError``). An empty body slips past Pydantic (every
+    field optional) and hits the route's own check.
+    """
+    placed = _place(
+        api_client,
+        seeded_actor,
+        storage_hierarchy.items["马克杯"],
+        storage_hierarchy.slots["L1S1"],
+    )
+    resp = _patch(api_client, seeded_actor, placed.json()["id"], {})
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "validation_error"
+
+
+async def test_patch_placement_extra_field_is_422(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """`{"hacker": true}` → 422 — schema validation (extra=forbid)."""
+    placed = _place(
+        api_client,
+        seeded_actor,
+        storage_hierarchy.items["马克杯"],
+        storage_hierarchy.slots["L1S1"],
+    )
+    resp = _patch(
+        api_client, seeded_actor, placed.json()["id"], {"note": "x", "hacker": True}
+    )
+    assert resp.status_code == 422
+
+
+async def test_patch_placement_unknown_id_is_404(
+    api_client: TestClient, seeded_actor
+) -> None:
+    resp = _patch(api_client, seeded_actor, uuid.uuid4(), {"note": "x"})
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "not_found"
+
+
+async def test_patch_placement_cross_home_is_404(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """The placement exists, but the caller names a different home → 404."""
+    placed = _place(
+        api_client,
+        seeded_actor,
+        storage_hierarchy.items["马克杯"],
+        storage_hierarchy.slots["L1S1"],
+    )
+    placement_id = placed.json()["id"]
+
+    resp = api_client.patch(
+        f"/api/v1/placements/{placement_id}",
+        json={"note": "x"},
+        headers={**seeded_actor.headers(), "X-Home-Id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "not_found"
+
+
+async def test_patch_placement_cross_home_slot_is_404(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """PATCH with a foreign `slot_id` → 404 (not a half-applied move)."""
+    placed = _place(
+        api_client,
+        seeded_actor,
+        storage_hierarchy.items["马克杯"],
+        storage_hierarchy.slots["L1S1"],
+    )
+    placement_id = placed.json()["id"]
+
+    foreign_slot = await _make_foreign_slot(db_engine)
+    resp = _patch(
+        api_client, seeded_actor, placement_id, {"slot_id": str(foreign_slot)}
+    )
+    assert resp.status_code == 404, resp.text
+
+    # No second placement row should have been written.
+    async with _session(db_engine)() as session:
+        rows = (
+            await session.execute(
+                select(ItemPlacement).where(
+                    ItemPlacement.item_id == storage_hierarchy.items["马克杯"]
+                )
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+
+
+async def test_patch_placement_closed_is_409(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """A closed placement is read-only — PATCH on it → 409."""
+    placed = _place(
+        api_client,
+        seeded_actor,
+        storage_hierarchy.items["马克杯"],
+        storage_hierarchy.slots["L1S1"],
+    )
+    placement_id = placed.json()["id"]
+    closed = api_client.delete(
+        f"/api/v1/placements/{placement_id}", headers=seeded_actor.headers()
+    )
+    assert closed.status_code == 200
+
+    resp = _patch(api_client, seeded_actor, placement_id, {"note": "x"})
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "conflict"
+
+
+async def test_patch_placement_without_credentials_is_401(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    placed = _place(
+        api_client,
+        seeded_actor,
+        storage_hierarchy.items["马克杯"],
+        storage_hierarchy.slots["L1S1"],
+    )
+    resp = api_client.patch(
+        f"/api/v1/placements/{placed.json()['id']}",
+        json={"note": "x"},
+        headers={"X-Home-Id": str(seeded_actor.home_id)},
+    )
+    assert resp.status_code == 401
+
+
+async def test_patch_placement_same_slot_is_noop(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """`slot_id` equal to the current slot → no new row, only the note changes."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    slot_id = storage_hierarchy.slots["L1S1"]
+    placed = _place(api_client, seeded_actor, cup_id, slot_id)
+    placement_id = placed.json()["id"]
+
+    resp = _patch(
+        api_client,
+        seeded_actor,
+        placement_id,
+        {"slot_id": str(slot_id), "note": "edited"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == placement_id
+    assert resp.json()["note"] == "edited"
+
+    async with _session(db_engine)() as session:
+        rows = (
+            await session.execute(
+                select(ItemPlacement).where(ItemPlacement.item_id == cup_id)
+            )
+        ).scalars().all()
+        assert len(rows) == 1, "same-slot PATCH must not insert a new row"
+
+
+# ----------------------------------------------------------------- (helpers)
+# `_patch` builds an actor.headers() call; the cross-home variant below
+# overrides X-Home-Id. Kept inline above.

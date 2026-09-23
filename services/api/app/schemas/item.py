@@ -195,6 +195,35 @@ class PlaceItemRequest(BaseModel):
     note: str | None = Field(default=None, max_length=500)
 
 
+class PlacementUpdateRequest(BaseModel):
+    """Body for ``PATCH /placements/{id}`` — edit a placement's note and/or
+    move it to a different slot (P0.7).
+
+    Both fields are optional but at least one must be provided — an empty body
+    returns **422** (the route checks ``model_fields_set`` to tell apart
+    「没传」 from 「传了 null」).
+
+    ``note``:
+      - omitted  → leave as-is
+      - string   → update
+      - null     → clear
+
+    ``slot_id``:
+      - omitted → leave as-is
+      - UUID    → move (close current + insert new active row, reusing
+                  ``_create_placement`` so P0.5's 409 fallback applies)
+
+    Move semantics: when only ``slot_id`` is given, the new row inherits the
+    old row's ``note`` (so "放到别处" preserves the user's note). When both
+    are given, the explicit new ``note`` wins — the user expressed intent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note: str | None = Field(default=None, max_length=500)
+    slot_id: uuid.UUID | None = None
+
+
 class CandidateListResponse(BaseModel):
     """``GET /items/{id}/candidates`` — the deterministic pre-LLM view.
 
@@ -222,4 +251,5 @@ __all__ = [
     "PaginatedItemsView",
     "PlaceItemRequest",
     "PlacementRefView",
+    "PlacementUpdateRequest",
 ]

@@ -12,11 +12,20 @@ business invariants the API can't safely inline:
   already exists goes straight into a user-chosen slot with no LLM call, and
   the placement is soft-closed rather than deleted.
 - ``reject`` sets status to ``rejected`` (still requires ``pending``).
+- ``revoke`` un-does a ``rejected`` decision (sets status to ``revoked``,
+  P0.6) — the slot is back in the candidate pool. Only ``rejected`` rows
+  can be revoked.
 - ``patch`` updates ``chosen_slot_id`` (must belong to home) and keeps
   status ``pending``. Any previously-pending recommendation for the same
   item becomes ``superseded`` once the user accepts — but PATCH itself
   doesn't supersede; that happens at accept time to avoid spurious
   history churn.
+- ``update_placement`` (P0.7) edits an *active* ItemPlacement: change the
+  note, move to a different slot, or both. Move reuses ``_create_placement``
+  so P0.5's 409 fallback covers concurrent edits for free; a same-slot
+  "move" is a no-op (only the note changes). Closed rows are immutable —
+  PATCH on them returns 409 (call ``DELETE /placements/{id}`` then PATCH
+  a new row).
 
 Cross-home lookups (Recommendation belongs to home A, actor is home B)
 surface as :class:`NotFoundError` so the API returns 404 without leaking
@@ -26,12 +35,12 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationFailedError
 from app.db.base import utc_now
 from app.db.enums import PlacementSource, RecommendationStatus
 from app.models import Item, ItemPlacement, Recommendation
@@ -66,6 +75,36 @@ class PatchOutcome:
 
     recommendation: Recommendation
 
+
+@dataclass(slots=True)
+class RevokeOutcome:
+    """Return shape of :func:`revoke_recommendation`."""
+
+    recommendation: Recommendation
+
+
+# --------------------------------------------------------------------------- sentinels
+# A small sentinel used by ``update_placement`` so the route layer can tell
+# "field omitted in the PATCH" (sentinel) apart from "field set to None"
+# (explicit clear). A bare ``None`` is ambiguous because every Pydantic
+# optional field defaults to ``None``.
+
+
+class _NoChangeType:
+    """Singleton type for the no-change sentinel."""
+
+    _instance: _NoChangeType | None = None
+
+    def __new__(cls) -> _NoChangeType:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return "_NO_CHANGE"
+
+
+_NO_CHANGE = _NoChangeType()
 
 # --------------------------------------------------------------------------- helpers
 
@@ -320,6 +359,50 @@ async def reject_recommendation(
     return RejectOutcome(recommendation=rec)
 
 
+async def revoke_recommendation(
+    db: AsyncSession,
+    *,
+    recommendation_id: uuid.UUID,
+    home_id: uuid.UUID,
+) -> RevokeOutcome:
+    """Reverse a previous rejection (P0.6). The slot becomes recommendable
+    again for this item.
+
+    Symmetric to :func:`reject_recommendation` — both are "no placement"
+    outcomes; ``revoked`` is the un-do of ``rejected``. The exclusion set in
+    :func:`app.tools.recommendation_tools.get_rejected_slot_ids` filters by
+    ``status='rejected'``, so flipping the row to ``revoked`` removes it from
+    the set with zero code changes on the read path.
+
+    Only ``rejected`` rows are revocable. A pending row is not yet excluded;
+    accepting or revoking it is the user's next choice, not undo. An
+    accepted row already has an ItemPlacement — "un-placing" it is a separate
+    flow (``DELETE /placements/{id}``), not this one. A revoked row is
+    already revoked. A superseded row never filtered the pool, so revoking it
+    is a no-op and is rejected here to keep the audit story clean.
+
+    The original reject's reason is preserved on
+    ``candidates[0].audit_note`` so the user can see "I rejected this for X,
+    then changed my mind on Y". Revoke takes no body — it's an un-do, not a
+    new fact.
+
+    Raises:
+        NotFoundError: recommendation not found or wrong home.
+        ConflictError: recommendation is not in ``rejected`` status.
+    """
+    rec = await _load_recommendation_in_home(db, recommendation_id, home_id)
+    if rec.status != RecommendationStatus.REJECTED.value:
+        raise ConflictError(
+            f"Only 'rejected' recommendations can be revoked; "
+            f"this one is {rec.status!r}.",
+            details={"status": rec.status},
+        )
+    rec.status = RecommendationStatus.REVOKED.value
+    await db.commit()
+    await db.refresh(rec)
+    return RevokeOutcome(recommendation=rec)
+
+
 async def patch_recommendation(
     db: AsyncSession,
     *,
@@ -375,6 +458,98 @@ async def patch_recommendation(
     return PatchOutcome(recommendation=rec)
 
 
+async def update_placement(
+    db: AsyncSession,
+    *,
+    placement_id: uuid.UUID,
+    home_id: uuid.UUID,
+    user_id: uuid.UUID,
+    set_note: str | _NoChangeType | None = _NO_CHANGE,
+    set_slot_id: uuid.UUID | _NoChangeType | None = _NO_CHANGE,
+) -> ItemPlacement:
+    """Edit an active placement (P0.7). Move closes the old row and inserts
+    a new one via :func:`_create_placement`; edit-note is a row UPDATE.
+
+    Semantics:
+
+    - ``set_note is _NO_CHANGE`` → don't update the note
+    - ``set_note is None`` → clear the note
+    - ``set_note is str`` → set the note
+    - Same three-way logic for ``set_slot_id``, except ``set_slot_id=None``
+      would mean "move to nothing" which doesn't make sense, so only the
+      omitted / explicit-UUID cases are meaningful for slots.
+
+    Move path (``set_slot_id`` is a UUID and differs from the current
+    slot): the new row's note is the explicit ``set_note`` if provided,
+    otherwise the old row's note (so "放到别处" preserves the user's
+    annotation). A same-slot PATCH is a no-op for the slot and only
+    touches the note if ``set_note`` was provided.
+
+    Raises:
+        NotFoundError: placement missing or its item belongs to another home.
+        ConflictError: placement is already closed (``removed_at`` set) —
+            history is read-only; "edit it" means PATCH a fresh row instead.
+        ValidationFailedError: both fields are ``_NO_CHANGE`` (route layer
+            also catches this with a 422; the service defends too).
+    """
+    placement = await _load_placement_in_home(db, placement_id, home_id)
+    if placement.removed_at is not None:
+        raise ConflictError(
+            "Cannot edit a closed placement",
+            details={"removed_at": placement.removed_at.isoformat()},
+        )
+    if set_note is _NO_CHANGE and set_slot_id is _NO_CHANGE:
+        raise ValidationFailedError(
+            "At least one of note or slot_id must be provided"
+        )
+
+    # -- move path --
+    wants_move = (
+        set_slot_id is not _NO_CHANGE
+        and set_slot_id is not None
+        and set_slot_id != placement.slot_id
+    )
+    if wants_move:
+        # Resolve the note: an explicit new value wins; otherwise inherit from
+        # the old row. set_note=_NOCHANGE -> keep old; set_note=None -> clear;
+        # set_note=str -> use the new string.
+        if set_note is _NO_CHANGE:
+            note_for_new = placement.note
+        elif set_note is None:
+            note_for_new = None
+        else:
+            note_for_new = cast(str, set_note)
+        new_placement = await _create_placement(
+            db=db,
+            home_id=home_id,
+            user_id=user_id,
+            item_id=placement.item_id,
+            slot_id=cast(uuid.UUID, set_slot_id),
+            source=PlacementSource.USER_MANUAL.value,
+            note=note_for_new,
+        )
+        # Positive feedback — same as manual placement. The user actively
+        # picked this slot, which is at least as strong a signal as accepting
+        # a recommendation.
+        await record_preferred_slot(
+            db=db,
+            user_id=user_id,
+            home_id=home_id,
+            item_id=placement.item_id,
+            slot_id=cast(uuid.UUID, set_slot_id),
+        )
+        await db.commit()
+        await db.refresh(new_placement)
+        return new_placement
+
+    # -- edit-note-only path (no move, or same-slot PATCH) --
+    if set_note is not _NO_CHANGE:
+        placement.note = cast("str | None", set_note)
+    await db.commit()
+    await db.refresh(placement)
+    return placement
+
+
 # --------------------------------------------------------------------------- view helpers
 
 
@@ -410,10 +585,13 @@ __all__ = [
     "AcceptOutcome",
     "PatchOutcome",
     "RejectOutcome",
+    "RevokeOutcome",
     "accept_recommendation",
     "get_recommendation_dict",
     "patch_recommendation",
     "place_item",
     "reject_recommendation",
+    "revoke_recommendation",
     "unplace_item",
+    "update_placement",
 ]
