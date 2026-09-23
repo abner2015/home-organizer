@@ -11,3 +11,7 @@ coverage
 .DS_Store
 .vscode
 .idea
+
+# TypeScript / Next build artifacts
+*.tsbuildinfo
+next-env.d.ts
