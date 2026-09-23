@@ -7,6 +7,7 @@
 > - **下篇 · P0 路线图**（P0.0–P0.4）：唯一还在推进的计划。每个 P0.x 都带交付物与验收标准。
 >
 > 最后更新：2026-09-23 —— P0.9 创建新家（POST /homes）交付；**P0 九个批次全部完成**；基线 626 → 669 → 671 → 683 → 708 → 739 → **752**。
+> （2026-09-23 补：**P0.A 切换家 UI** 交付，仅前端 0 后端改动；基线不变 752。）
 >
 > 背景：本文件原稿写于**开工前**。开工后实际走出来的顺序与原稿并不一致，于是原稿里出现了
 > Phase 9、Phase 10 各两份（旧副本与新副本交织），路径也停留在 `apps/api/`。本次一并归位。
@@ -782,8 +783,9 @@ Content-Type: application/json
 - **抽出 `home_service.create_home_for(db, *, owner_id, name, timezone=None) -> Home`**。
   P0.2 早就该抽的：`signup` 的内联 `Home + HomeMembership` 逻辑改走这个函数，
   **单一来源**。`test_signup_provisions_exactly_one_home` 继续通过 —— 行为字节级等价。
-- **不做**：切换家 UI、owner 转让、跨用户偏好共享、邮件邀请、
-  「带模板创建」（一上来附赠客厅 / 主卧 —— `signup` 也没附赠，保持一致）。
+- **不做**：切换家 UI（**已交付 — 见 P0.A**）、owner 转让、跨用户偏好共享、
+  邮件邀请、「带模板创建」（一上来附赠客厅 / 主卧 —— `signup` 也没附赠，
+  保持一致）。
 
 ### 落地位置
 
@@ -807,6 +809,68 @@ Content-Type: application/json
 - [x] 基线：**739 → 752 passed / 1 skipped**（+13：5 单元 + 8 API）
 - [x] ruff 32、mypy 20 —— 零上升
 - [x] `tsc --noEmit` + `next lint` 干净
+
+---
+
+## P0.A — 切换家 UI（AppShell 顶部 dropdown）✅ 已交付（2026-09-23）
+
+### Context
+
+P0.9 补了 `POST /homes`，能建第二个家；但 `homeId` cookie 写死后没 UI 切入口。
+多 home 用户卡在最后一公里 —— 建了家切不回去，所有页面按错的
+`X-Home-Id` 取数据。
+
+修法：纯前端。在 `AppShell` 顶部右侧加一个 dropdown：显示当前 active 家名 +
+用户全部家列表；点击切换 → `setSession({...current, homeId: newId})` 重写
+cookie + `router.refresh()` 让 server component 用新 X-Home-Id 重渲染。
+
+**零后端改动、零迁移、零新增 pytest** —— cookie 写读已被 `auth-and-session.md`
+里的测试覆盖。
+
+### 设计要点
+
+- **位置**：`apps/web/src/components/AppShell.tsx` 头部右侧，在 user button
+  **之前**插入。桌面 + 移动端**都显示**（与 user button 的
+  `hidden ... sm:flex` 反着来 —— 跨家切换是高频入口，不能藏）。
+- **数据**：组件 mount 时 `api.listHomes({token})` 拿用户全部家。
+- **切家**：`setSession({...current, homeId: newId})` → `router.refresh()`。
+  cookie 改变不自动触发 server 重渲染，必须显式 `refresh()`。
+- **单家场景**：dropdown 显示当前家名 + 「+ 新家」入口（列表只有 1 项，
+  点击切回自己 = noop）。
+- **空 / 加载 / 失败**：分别显示「加载中…」「加载失败，点重试」「还没有家」。
+- **关闭**：点击 dropdown 外部 + ESC 键（标准 click-outside + keydown）。
+- **可访问性**：`aria-haspopup="listbox"`、`aria-expanded={open}`、
+  当前 active 项 `aria-selected="true"`。
+
+### 落地位置
+
+- 新增 `apps/web/src/components/HomeSwitcher.tsx`（约 220 行，含两个 inline
+  图标 `HouseIcon` / `ChevronDown`）。
+- 修改 `apps/web/src/components/AppShell.tsx`：`+1` 行 import + `+1` 行 JSX。
+
+### 验收
+
+- [x] AppShell 顶部右侧 dropdown 可见，桌面 + 移动端均显示
+- [x] 单家场景下 dropdown 显示当前家名 + 「+ 新家」入口
+- [x] 多家场景下 dropdown 列出全部家，当前 active 高亮（带「当前」徽章）
+- [x] 点击另一个家 → dropdown 关闭 → `router.refresh()` 触发 server component
+      重渲染（无白屏闪烁）
+- [x] 点击 dropdown 外部 / ESC → 关闭
+- [x] 「+ 新家」链接跳 `/home/new`
+- [x] `apps/web/src/app/home/page.tsx` 的「+ 新家」链接保留
+      （home 概览上下文相关的 CTA，与 dropdown 不冲突）
+- [x] `npx tsc --noEmit` 干净
+- [x] `npx next lint` 干净
+- [x] 基线 **752 passed / 1 skipped**（无变化 —— 纯前端）
+- [x] ruff 32 / mypy 20（无变化）
+
+### 本批不做
+
+- **底部 nav 不动**（已经 5 列太挤，跨家切换这种「低频但重要」操作放顶部更合理）
+- **不**显示每个家的物品数（dropdown 太长不好读；只显示成员数）
+- **不**做「设为默认家」（cookie 已经是默认）
+- **不**做删除家（P1+，需要 owner + cascade 思考）
+- **不**做键盘快捷键（Cmd/Ctrl+K 之类的命令面板 —— 等 P1+ 思考）
 
 ---
 

@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { clsx } from "@/lib/format";
 import { clearSession, getSession, type Session } from "@/lib/session";
+import { HomeSwitcher } from "@/components/HomeSwitcher";
 
 interface NavItem {
   href: string;
@@ -88,6 +89,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <PlusIcon className="h-4 w-4" />
               添加物品
             </Link>
+            {session && <HomeSwitcher session={session} />}
             {session && (
               <button
                 type="button"
