@@ -6,6 +6,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { ErrorState } from "@/components/States";
 import { PlaceItemButton } from "@/components/placements/PlaceItemButton";
 import { RemovePlacementButton } from "@/components/placements/RemovePlacementButton";
+import { EditPlacementNote } from "@/components/placements/EditPlacementNote";
 import { formatDateTime, formatSlotPath, formatCategory, formatSize } from "@/lib/format";
 import type { ApiSession } from "@/lib/api";
 import type { Item, ItemPlacement } from "@/lib/types";
@@ -51,7 +52,9 @@ export default async function ItemDetail({ params }: { params: { id: string } })
   // The placements endpoint returns the active row first (newest first), but
   // pick by predicate rather than by index so reordering it above cannot
   // silently attach 「移出」 to a closed row.
-  const activeId = data.placements.find((p) => p.removed_at === null)?.id ?? null;
+  const activePlacement = data.placements.find((p) => p.removed_at === null) ?? null;
+  const activeId = activePlacement?.id ?? null;
+  const activeNote = activePlacement?.note ?? null;
   return (
     <div className="space-y-6">
       <PageHeader
@@ -165,11 +168,22 @@ export default async function ItemDetail({ params }: { params: { id: string } })
                     </p>
                   ) : null}
                 </div>
-                {p.removed_at ? (
-                  <span className="badge">已结束 {formatDateTime(p.removed_at)}</span>
-                ) : (
-                  <span className="badge-brand">进行中</span>
-                )}
+                <div className="flex flex-col items-end gap-1">
+                  {p.removed_at ? (
+                    <span className="badge">已结束 {formatDateTime(p.removed_at)}</span>
+                  ) : (
+                    <>
+                      <span className="badge-brand">进行中</span>
+                      {activeId ? (
+                        <EditPlacementNote
+                          placementId={activeId}
+                          initialNote={activeNote}
+                          session={data.session}
+                        />
+                      ) : null}
+                    </>
+                  )}
+                </div>
               </li>
             ))}
           </ol>
