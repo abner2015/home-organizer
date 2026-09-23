@@ -153,4 +153,4 @@ npx tsc --noEmit && npx next lint          # 应当无输出
 
 ## License
 
-未指定（私有项目）。
+[Apache License 2.0](LICENSE) — 详情见 [`LICENSE`](LICENSE) 文件。
