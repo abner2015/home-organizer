@@ -6,6 +6,7 @@ import type { Session } from "@/lib/session";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorState } from "@/components/States";
 import { RecommendationActions } from "./RecommendationActions";
+import { RevokeAction } from "./RevokeAction";
 import { formatConfidence, formatSlotPath } from "@/lib/format";
 import type {
   RecommendationStatus,
@@ -20,6 +21,7 @@ const STATUS_LABELS: Record<RecommendationStatus, string> = {
   pending: "待确认",
   accepted: "已采纳",
   rejected: "已拒绝",
+  revoked: "已撤销排除",
   superseded: "已被取代",
 };
 
@@ -107,6 +109,9 @@ export default async function RecommendationDetail({ params }: { params: { id: s
               candidates={rec.candidates}
               session={session}
             />
+          ) : null}
+          {rec.recommendation_id && rec.status === "rejected" ? (
+            <RevokeAction recId={rec.recommendation_id} session={session} />
           ) : null}
         </div>
         <div className="card p-5">
