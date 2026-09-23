@@ -6,7 +6,7 @@
 >   真实产物路径、真实验收结论、真实基线。已完成的部分不再有「任务」，只有事实。
 > - **下篇 · P0 路线图**（P0.0–P0.4）：唯一还在推进的计划。每个 P0.x 都带交付物与验收标准。
 >
-> 最后更新：2026-09-22 —— P0.4 闭环 + 讲理由交付 + 真机验收通过（24/24）；**P0 四个批次全部完成**；基线 626 → 669。
+> 最后更新：2026-09-23 —— P0.8 成员管理 / 多用户共享家 交付；**P0 八个批次全部完成**；基线 626 → 669 → 671 → 683 → 708 → **739**。
 >
 > 背景：本文件原稿写于**开工前**。开工后实际走出来的顺序与原稿并不一致，于是原稿里出现了
 > Phase 9、Phase 10 各两份（旧副本与新副本交织），路径也停留在 `apps/api/`。本次一并归位。
@@ -168,8 +168,8 @@ P0 是「**让一个真人第一次用起来，能走完一遍并觉得有用**�
 
 ```
 P0.1 真实账号 ✅  ──┐
-                    ├──► P0.2 拍照即建模 ✅ ──┬──► P0.3 反向录入 ✅
-                    │                         └──► P0.4 闭环 + 讲理由 ✅
+                    ├──► P0.2 拍照即建模 ✅ ──┬──► P0.3 反向录入 ✅ ──┬──► P0.5 并发 409 ✅
+                    │                         └──► P0.4 闭环 + 讲理由 ✅ ┴──► P0.6 撤销排除 ✅
                     └──► （P0.1 尾巴：token 续期 ✅）
 ```
 
@@ -305,7 +305,7 @@ tools/write_tools.py, schemas/item.py}`；前端 `apps/web/src/components/placem
 
 **本批不做**（留 ⏳）：后端批量端点（批量页逐条 POST 足够）、`PATCH /placements/{id}`、
 手动落位的容量 / 安全校验（那是 AI 路径 verifier 的职责，手动是用户的明确选择）、
-手动落位时 supersede `Recommendation`、并发落位的 409 兜底。
+手动落位时 supersede `Recommendation`。并发落位的 409 兜底 → **见 P0.5**。
 
 **依赖**：P0.2（得先有 slot 可放）✅。
 
@@ -397,10 +397,350 @@ tools/write_tools.py, services/recommendation_service.py, api/v1/items.py,
 schemas/item.py}`；前端 `apps/web/src/app/items/[id]/page.tsx` +
 `apps/web/src/app/recommendations/[id]/RecommendationActions.tsx`。
 
-**本批不做**（留 ⏳）：「撤销排除」入口、跨用户偏好共享、`PATCH /placements/{id}`、
-把偏好做成带权重列的结构化模型（现在够用）、P0.3 已记录的并发落位 409 兜底。
+**本批不做**（留 ⏳）：跨用户偏好共享、`PATCH /placements/{id}`、
+把偏好做成带权重列的结构化模型（现在够用）。并发落位的 409 兜底 → **见 P0.5**；撤销排除入口 → **见 P0.6**。
 
 **依赖**：P0.2（有真实 slot 之后，闭环才有意义）✅。
+
+---
+
+## P0.5 — 并发落位 409 兜底 ✅ 已交付（2026-09-22）
+
+**为什么**：P0.3 / P0.4 风险登记都点名。同一物品的两个 `POST /placements`
+几乎同时落到后端，两边都跑「关旧 + 插新」：胜者的 `commit` 落在败者的
+`close` 与 `flush` 之间，败者的 `flush` 撞上 `uq_item_placements_one_active_per_item`，
+PG 抛 `IntegrityError` → 全局 `unhandled_handler` 兜成 **500**。前端看到
+"Internal server error"，无法区分 "请重试" 与 "后端坏了"。
+
+**交付物**
+
+1. ✅ **写路径捕 IntegrityError**（`app/tools/write_tools.py:_create_placement`，flush 周围）：
+   try / except `sqlalchemy.exc.IntegrityError` → `await db.rollback()` →
+   过滤到 `uq_item_placements_one_active_per_item` → 抛 `ConflictError`
+   （http 409 / `code=conflict`）；其他 integrity 错误原样上抛。**单点改动覆盖
+   manual 与 accept 两条路径**（两者都调 `_create_placement`）。
+2. ✅ **辅助函数**（同文件 `_constraint_name_from_integrity_error`）：先看
+   `e.orig.diag.constraint_name`（PG psycopg2），回退到 `str(e.orig)` 文本匹配
+   （SQLite），都拿不到就返 `None` → 走 "未知完整性错误" 兜底（原样上抛，由
+   `unhandled_handler` 走 500 —— 这是我们没见过的索引，不应被静默吞掉）。
+3. ✅ **测试**（2 条）：
+   - `tests/unit/test_placement_service.py::test_place_item_translates_integrity_error_to_conflict`
+   - `tests/api/test_placement_write_api.py::test_concurrent_place_returns_409`
+   - 两条都通过 monkeypatch `AsyncSession.flush` 抛
+     `IntegrityError("...uq_item_placements_one_active_per_item...")`，
+     模拟竞态败者（SQLite 无部分唯一索引，靠 monkeypatch 走同一条代码路径）。
+
+**验收**
+
+- [x] `POST /placements` 遇 `IntegrityError(uq_item_placements_one_active_per_item)` → **409 + `code=conflict`**，DB 里**无新行**（session 同步 rollback）
+- [x] 两条新测试通过；基线 **671 passed / 1 skipped**（+2）
+- [x] ruff 32、mypy 20 —— **零上升**
+- [x] `tsc --noEmit` + `next lint` 干净（无前端改动）
+- [x] 未对**未知** integrity 错误静默吞掉 —— 任何识别不到的约束名都原样上抛为 500（避免把别的 bug 隐藏成 409）
+
+**本批不做**（仍留 ⏳）：SQLite 上的并发安全（无部分唯一索引，要 `BEGIN IMMEDIATE` 或应用层锁，**与本批目标不同**）；前端错误提示文案优化（`code=conflict` 已能被现有 `src/lib/api.ts` 错误处理识别为可重试状态，但还没专门做 toast 文案）；自动 retry。
+
+**落地位置**：`app/tools/write_tools.py`（`_create_placement` + `_constraint_name_from_integrity_error`）；
+测试：`tests/unit/test_placement_service.py` + `tests/api/test_placement_write_api.py`。
+
+**依赖**：无；纯追加行为，不动任何已交付路径的语义。
+
+---
+
+## P0.6 — 撤销排除入口 ✅ 已交付（2026-09-23）
+
+**为什么**：P0.4 把"拒绝 → slot 对该物品永久排除"作为用户偏好的天然存储。优点是
+零新增 schema；缺点是**误拒绝不可恢复** —— 用户点错了、或后来改主意了，slot
+永远进不了候选，直到代码直接改 DB。P0.4 自己的「本批不做」段就留了这条 ⏳。
+本次实现它。
+
+**交付物**
+
+1. ✅ **新状态 `revoked`**（`app/db/enums.py:RecommendationStatus`）：与 `rejected` 对称。
+   `get_rejected_slot_ids` 仍然只过滤 `status='rejected'`；status 一翻，slot 自动
+   重新进候选 —— **读路径零代码改动**。
+2. ✅ **新迁移**（`alembic/versions/0004_recommendation_revoked.py`）：drop + add
+   `ck_recommendations_status`（仿 0003）。无数据迁移（无行起始是 `revoked`）。
+   SQLAlchemy 模型 `app/models/recommendation.py:__table_args__` 同步更新（test
+   conftest 走 `Base.metadata.create_all` 而不走 Alembic，所以必须更新）。
+3. ✅ **`revoke_recommendation` 服务**（`app/agents/placement_service.py`）：新
+   `RevokeOutcome` dataclass + 异步函数，跨 home → 404，非 `rejected` 状态 → 409，
+   不接受 body（撤销是 un-do，不是新事实）。原有 reject 时写在
+   `candidates[0].audit_note` 的拒绝原因**保留**。
+4. ✅ **新端点**（`app/api/v1/recommendations.py`）：`POST /api/v1/recommendations/{rec_id}/revoke`。
+   空 body，固定返 `{recommendation_id, status: "revoked"}`。
+5. ✅ **Pydantic schemas**（`app/schemas/recommendation.py`）：`RevokeRequest` /
+   `RevokeResponse`，`RecommendResponse.status` 描述加 `'revoked'`。
+6. ✅ **前端**：
+   - `apps/web/src/lib/types.ts` —— `RecommendationStatus` 加 `revoked`，新增 `RevokeResponse` 接口。
+   - `apps/web/src/lib/api.ts` —— 新方法 `revokeRecommendation(recId, session)`。
+   - `apps/web/src/app/recommendations/[id]/page.tsx` —— `STATUS_LABELS` 加
+     `revoked: "已撤销排除"`；`rec.status === "rejected"` 时渲染新组件。
+   - `apps/web/src/app/recommendations/[id]/RevokeAction.tsx` —— 新客户端组件，
+     照搬 `RecommendationActions` 的 Spinner + `extract(err, ...)` 风格，按钮文案
+     「撤销排除」+ 提示「撤销后，下一次推荐会把这个位置重新纳入候选」。
+
+**验收**
+
+- [x] `POST /api/v1/recommendations/{rec_id}/revoke` 在 `rejected` 状态 → **200 + status='revoked'**
+- [x] pending / accepted / revoked / superseded 状态 → **409 + code='conflict'**
+- [x] 跨 home / 未知 id → **404**
+- [x] 无凭证 → **401**
+- [x] 端到端：recommend → reject → revoke → 再次 recommend，该 slot 重新在候选集
+      （`tests/unit/test_placement_service.py::test_revoked_slot_reappears_in_next_recommend`
+      断言 `get_rejected_slot_ids` 返空、且新 recommend 的 `chosen_slot_id` 回到
+      撤销前的 slot）
+- [x] 历史保留：recommendation 行还在，status 是 `'revoked'`，reject 时的
+      `audit_note` 完整保留（单元测试断言）
+- [x] 基线：**683 passed / 1 skipped**（+12：6 单元 + 6 API）
+- [x] ruff 32、mypy 20 —— **零上升**
+- [x] `tsc --noEmit` + `next lint` 干净
+
+**本批不做**（仍留 ⏳）：批量撤销（一个 item 一次性撤销所有排除）；撤销即自动跑
+一次推荐（用户决定时机）；撤销原因持久化（撤销是 un-do，不是新事实）；
+跨用户偏好共享；`PATCH /placements/{id}`。
+
+**落地位置**：后端 `app/{db/enums.py, models/recommendation.py, agents/placement_service.py,
+schemas/recommendation.py, api/v1/recommendations.py}` + `alembic/versions/0004_recommendation_revoked.py`；
+前端 `apps/web/src/{lib/types.ts, lib/api.ts, app/recommendations/[id]/{page.tsx, RevokeAction.tsx}}`。
+测试 `tests/unit/test_placement_service.py` + `tests/api/test_recommendation_api.py`。
+
+**依赖**：无；纯追加行为，不动任何已交付路径的语义（`get_rejected_slot_ids` 零改动）。
+
+---
+
+## P0.7 — PATCH /placements/{id}（改备注 / 换位置）✅ 已交付（2026-09-23）
+
+P0.3 / P0.4 都点名了：手动落位后没有 PATCH 入口 —— 用户改不了备注
+（typo / 加「为什么放这里」），也不能保留备注地把物品换到别的 slot。
+"放到别处"按钮已经能用 POST /placements 走 close-old + insert-new 流程，
+但那条路**会丢旧备注**；而且新备注根本没法写，因为手动放置流程只接受
+POST，POST 又必须给 slot_id。
+
+修法：补 `PATCH /api/v1/placements/{id}`，支持：
+
+- **改备注**（`note`）
+- **换位置**（`slot_id`，自动关旧 + 插新，**保留**旧备注作为新行 note 的默认值）
+- **两者一起改**
+
+### 设计与语义
+
+PATCH 字段语义（用 `model_fields_set` 区分「没传」 vs「传了 null」）：
+
+| 字段 | 不传 | 字符串 | `null` |
+| --- | --- | --- | --- |
+| `note` | 不变 | 更新 | 清空 |
+| `slot_id` | 不动 | 迁位置（关旧 + 插新） | 不允许（保留旧） |
+
+- **同时传** → 迁位置，且新行的 `note` 用请求里的新值
+  （**不**保留旧备注 —— 用户主动给了新值就该用新的）。
+- **只传 `slot_id`** → 迁位置，新行 `note` 继承旧行的 `note`
+  （这样"放到别处"改走 PATCH 就能保留备注了）。
+- **空 body（两个字段都没传）→ 400 ValidationFailedError**
+  （项目惯例 —— 业务校验用 `ValidationFailedError` 走 400，
+  Pydantic schema 校验走 422）。
+
+### move 路径：复用 `_create_placement`
+
+`_create_placement` 已经在 `app/tools/write_tools.py` 实现
+"close active + insert new" 的原语 —— 被 manual `place_item` 和 AI
+`accept_recommendation` 共用。本次也走它：
+
+- 旧行被 `close_active_placements` 软关闭（`removed_at` set，行保留）
+- 新行 `source='user_manual'`、`recommendation_id=None`
+- **并发安全同 P0.5**：用 `_create_placement` 自带的
+  `IntegrityError → ConflictError` 兜底
+
+不需要再加 try/except。
+
+### 边界
+
+- 对已关闭（`removed_at` 非空）的 placement 做 PATCH → **409**
+  （不能改历史 —— 调 `DELETE /placements/{id}` 然后 PATCH 新行）
+- 跨 home / 未知 id → **404**
+- `slot_id` 跨 home → **404**（`_create_placement` 内部的 `_ensure_slot_in_home` 兜底）
+- 同 slot_id 重复 PATCH → **no-op**（视作不变，返 200）
+
+### 验收
+
+- [x] PATCH `/placements/{id}` body `{"note": "..."}` → **200**，DB 行 note 更新
+- [x] PATCH `{"note": null}` → **200**，DB 行 note 清空
+- [x] PATCH `{"slot_id": new_id}` → **200**，旧行 closed、新行 active、
+      source=user_manual、**新行 note = 旧行 note**
+- [x] PATCH `{"note": "...", "slot_id": new_id}` → **200**，新行 note 用新值
+- [x] PATCH `{}` → **400 ValidationFailedError**（项目惯例）
+- [x] PATCH `{"hacker": true}` → **422**（Pydantic extra forbid）
+- [x] PATCH 已关闭 placement → **409**
+- [x] PATCH 跨 home / 未知 id → **404**
+- [x] PATCH 无凭证 → **401**
+- [x] 旧行软关闭而非物理删除（历史保留）
+- [x] e2e：`place_item` → PATCH 改 slot → 1 active + 1 closed
+      （`tests/api/test_placement_write_api.py::test_patch_placement_moves_slot` 断言）
+- [x] 基线：**683 → 708 passed / 1 skipped**（+25：12 单元 + 13 API）
+- [x] ruff 32、mypy 20 —— **零上升**
+- [x] `tsc --noEmit` + `next lint` 干净
+
+### 落地位置
+
+后端：
+
+- `app/schemas/item.py` —— 新增 `PlacementUpdateRequest`（`note` + `slot_id` 都 optional，`extra="forbid"`）
+- `app/agents/placement_service.py` —— 新增 `_NoChangeType` 单例哨兵 + `update_placement`
+- `app/api/v1/placements.py` —— 新增 `PATCH /{placement_id}` 路由，422/400 分流
+- 模块 docstring 顶部从 "Two routes" 更新为 "Three routes"
+
+前端：
+
+- `apps/web/src/lib/types.ts` —— 新增 `PlacementUpdateBody`
+- `apps/web/src/lib/api.ts` —— 新增 `updatePlacement`
+- `apps/web/src/components/placements/EditPlacementNote.tsx` —— 新组件，照搬
+  `RevokeAction` 的 Spinner + `extract(err, ...)` 风格，inline 编辑当前 active
+  placement 的备注；空字符串 → `null`（清空）
+- `apps/web/src/app/items/[id]/page.tsx` —— 在「进行中」placement 行后加
+  `<EditPlacementNote>`，把 `data.placements.find(p => p.removed_at === null)`
+  的 id + note 传下去
+
+测试：
+
+- `tests/unit/test_placement_service.py` —— 12 条新增
+  （`# --------------------------------------------------------------- update (P0.7)` section）
+- `tests/api/test_placement_write_api.py` —— 13 条新增
+  （`# ----------------------------------------------------------------------- patch` section）
+
+### 复用
+
+- `app/tools/write_tools.py:_create_placement` —— move 路径
+  （**自动获得 P0.5 的 409 兜底**）
+- `app/tools/write_tools.py:close_active_placements` —— 旧行软关闭
+- `app/tools/write_tools.py:record_preferred_slot` —— move 算正反馈
+- `app/agents/placement_service.py:_load_placement_in_home` —— 404
+- `app/core/exceptions.py:{ConflictError, NotFoundError, ValidationFailedError}` —— 状态码
+- `app/api/v1/placements.py:{_slot_path, _placement_view}` —— 响应装配
+- `apps/web/src/components/RevokeAction.tsx` 模式 —— 新组件的 Spinner + extract
+
+### 一个小坑
+
+`ValidationFailedError` 映射到 **400**（项目惯例 —— 见
+`app/core/exceptions.py:61-64`），不是 422。422 只用于 FastAPI 的
+Pydantic RequestValidationError（schema 校验）。空 body 走的是路由自己的
+业务校验，**正确状态码是 400**，不是 plan 里写的 422。
+（`tests/api/test_placement_write_api.py::test_patch_placement_no_fields_is_400`）
+extra field 走 Pydantic → 422（`test_patch_placement_extra_field_is_422`）。
+
+### 本批不做
+
+- 不做"批量 PATCH"（一次改多条 placement）—— 用批量页逐条 POST 已经覆盖
+- 不动"放到别处"按钮（继续走 POST /placements；本批不切换到 PATCH —— 避免改写既有 UI）
+- 不做 placement 的"创建时间 / 来源"等只读字段的 PATCH
+- 不加 reason 字段（reason 来源是 AI 推荐的 derived 数据，不该用户手填）
+- 不做并发 retry（沿用 P0.5 的 409 兜底）
+
+---
+
+## P0.8 — 成员管理 / 多用户共享家 ✅ 已交付（2026-09-23）
+
+P0 走完七个批次时，"家"仍然是单人体验 —— 注册账号时被 seed
+`我的家` + OWNER membership，**就这一个成员**。整套数据模型是
+多人的（`HomeMembership` 表 + `HomeRole` enum 都已存在），但
+API 没有任何路径把第二个人拉进来。P0.2 的 "本批不做" 就留了这条 ⏳；
+P0.4 又顺手补了一句"偏好是 per-user 的"——那个限制今天**先**
+是 feature，但「同家不同人」必须先打通。
+
+修法：补一个最小可用的成员管理流 —— **按邮箱加已有用户**、
+**改角色**、**移除**。不做邮件邀请（零 SMTP 基础设施不值得为 demo 加）。
+
+### 4 个路由（挂在 `app/api/v1/homes.py`）
+
+- `GET    /homes/{id}/members` —— **任何成员**都能看名单（不只是 owner，
+  便于发现"谁和我共用一个家"）
+- `POST   /homes/{id}/members` body `{email, role}` —— **owner only**
+  - email 对应 User 存在 → 200 + 新成员视图
+  - email 对应 User 不存在 → **404** `code=not_found`
+    「该邮箱还没注册账号」（不发邮件，不存邀请 token）
+  - 重复加 → **409** `code=conflict`（唯一索引命中）
+- `PATCH  /homes/{id}/members/{user_id}` body `{role}` —— **owner only**
+- `DELETE /homes/{id}/members/{user_id}` —— **owner only**
+
+### 错误码惯例
+
+| 情形 | 状态 | code | 说明 |
+| --- | --- | --- | --- |
+| caller 不是 home 成员 | 404 | not_found | 项目惯例，不泄露"这个家存在" |
+| caller 是 member 不是 owner（管理类操作） | 403 | forbidden | **本项目仅此一处允许 403 在 home 内部**（另一处是 PATCH /homes/{id} 非 owner） |
+| email 对应 User 不存在 | 404 | not_found | "该邮箱还没注册账号" |
+| 已经是成员（重复加） | 409 | conflict | |
+| 试图降级 / 移除最后一个 owner | 409 | conflict | "至少需要保留一个 owner" |
+| role 字段不在枚举 | 422 | validation_error | Pydantic extra=forbid + 字面量 |
+
+### 最后一个 owner 保护
+
+`change_role` 和 `remove_member` 都先数一下 `HomeMembership.role == 'owner'`
+的行数；≤ 1 时拒绝操作。这是 P0 的"零自愈"前提：
+现在没有 `POST /homes`，如果最后一个 owner 被降级 / 移除，
+家就再也找不到 admin 入口了——所以这个 guard 是真的必要，不是 over-engineer。
+
+### 复用 / 不动
+
+- **完全复用**：`HomeMembership` 模型 + `HomeRole` enum + `get_actor`
+  + `ensure_member` —— **不需要新表 / 新迁移**。
+- 业务逻辑在新的 `app/services/membership_service.py`（`list_members` /
+  `invite_member` / `change_role` / `remove_member` + `build_member_view` 投影）。
+- 路由都在已有 `app/api/v1/homes.py` 上加，不另起 router —— 一个家就是
+  一个 membership boundary，分开路由只是把 imports 挪位置。
+
+### 前端
+
+- `apps/web/src/lib/types.ts` —— 新增 `Member` / `MemberInviteBody` / `MemberUpdateBody`
+- `apps/web/src/lib/api.ts` —— 新增 4 个方法：
+  `listHomeMembers` / `inviteHomeMember` / `updateHomeMember` / `removeHomeMember`
+- `apps/web/src/app/home/[id]/members/page.tsx` —— **新页面**：
+  server component 渲染列表，client 子组件管 invite / role / remove 三个表单。
+  非 owner 看到只读视图 + 「只有 owner 可以邀请 / 调整成员」提示。
+  「该邮箱还没注册账号」识别 404 后内联提示在 email input 下面；
+  「至少需要保留一个 owner」识别 409 后用顶部红色 toast。
+- `apps/web/src/app/home/page.tsx` —— 在 home 概览加「管理成员 →」链接，
+  **仅 owner 可见**（用 `/auth/me` 比对 `home.owner_id`）
+
+### 验收
+
+- [x] `GET /homes/{id}/members` → 200，所有成员
+      (user_id, display_name, email, role, joined_at)
+- [x] `POST /homes/{id}/members {email, role}` 已存在用户 → 200；
+      不存在 → 404「该邮箱还没注册账号」
+- [x] `PATCH /homes/{id}/members/{user_id} {role}` → 200；
+      最后一个 owner 降级 → 409「至少需要保留一个 owner」
+- [x] `DELETE /homes/{id}/members/{user_id}` → 200；
+      最后一个 owner 移除 → 409
+- [x] 非 owner 调管理类 → 403；非成员 → 404；无凭证 → 401
+- [x] role 字段不在枚举 → 422
+- [x] Web：owner 能在 `/home/{id}/members` 邀请、改角色、移除，看到错误提示
+- [x] 基线：**708 → 739 passed / 1 skipped**
+      （+31：14 单元 + 17 API）
+- [x] ruff 32、mypy 20 —— **零上升**
+- [x] `tsc --noEmit` + `next lint` 干净
+
+### 本批不做
+
+- **不做邮件邀请 / SMTP**（零基础设施，不为 demo 引入）
+- **不做邀请 token / 一次性链接**（无邮件系统支撑）
+- **不做 owner 转让**（"最后一个 owner 不能被降级"已覆盖大部分需求；
+  想换主人先邀请新 owner 再降级自己）
+- **不做跨用户偏好共享**（**单独批次** —— P0.4 ⏳ 留的口子，
+  那是个独立可测的 feature，混进来会把本批不可逆）
+- **不做"加入多家"流程优化**（`POST /homes` 单独批次 —— 现在没有）
+- **不做头像上传** / **不做操作历史审计** / **不做"成员能否上传"权限细分**
+  （owner 全权、member 全权，足够 demo）
+
+### 一个测试细节
+
+`_make_user` 测试 helper 必须按 `auth_service.signup` 的方式 normalize email
+（strip + lower）—— 否则「该邮箱还没注册账号」测试在插入 user 时
+保留大小写，invite 时又 normalize 一次，找不到 → 误报 404。
+Signup 是 lower+strip，invite 同样 lower+strip，**两次都一致**就匹配。
+
+另一个细节：401 测试必须带 `X-Home-Id` 但**不**带 `Authorization`。
+完全没 headers 时 FastAPI 的 header 校验先抛 422，不会走到 `get_actor`。
+要触发「凭证缺失」分支就得让 header 校验过、auth 校验不过。
 
 ---
 
@@ -412,7 +752,7 @@ schemas/item.py}`；前端 `apps/web/src/app/items/[id]/page.tsx` +
 | 推荐接受率低 | 低于 60% | 调 prompt；补强「讲理由」；做用户访谈 |
 | Verifier 误拦截高 | 拦截后用户仍接受的占比 > 5% | 软化 hard 规则；增加 evidence 字段 |
 | AI 提议结构「太啰嗦」 | 用户确认率低 | 减少单次提议数量；优先提议层 / 格而非整个柜子 |
-| 并发落位产生两条 active | 同一物品几乎同时落位 | PG 部分唯一索引抛 `IntegrityError`（500）。单用户 UI 下几乎不可能；要封死就在路由捕 `IntegrityError` 返 409 —— **P0.3 只记录，未实现** |
+| 并发落位产生两条 active | 同一物品几乎同时落位 | PG 部分唯一索引抛 `IntegrityError`（500）。单用户 UI 下几乎不可能；要封死就在路由捕 `IntegrityError` 返 409 —— **已实现**：`_create_placement` 在 `flush` 周围捕 `IntegrityError`，过滤到 `uq_item_placements_one_active_per_item` → `ConflictError`（409），session 同步 rollback；2 条新测试（`tests/unit/test_placement_service.py::test_place_item_translates_integrity_error_to_conflict` + `tests/api/test_placement_write_api.py::test_concurrent_place_returns_409`），基线 669 → 671。SQLite 上的并发安全不在本批范围（无部分唯一索引）。 |
 | Token 成本失控 | 月成本超预算 | 限流；切更便宜模型；缓存空间快照 |
 
 ## 节奏
