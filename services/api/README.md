@@ -22,7 +22,7 @@ OpenAPI 在 `http://localhost:8000/docs`。
 | 路由器 | 内容 |
 | --- | --- |
 | `auth.py` | `POST /auth/signup`、`/auth/login`、`/auth/refresh`、`GET /auth/me` |
-| `homes.py` | `GET /homes`、`/homes/{id}`、`/homes/{id}/rooms`、`/homes/{id}/space-tree`、`/homes/{id}/slots`、`PATCH /homes/{id}`、`/rooms/{id}/storage-units`，以及成员管理 4 个路由（`GET/POST/PATCH/DELETE /homes/{id}/members[/{user_id}]`，P0.8） |
+| `homes.py` | `GET /homes`、`POST /homes`（P0.9）、`/homes/{id}`、`/homes/{id}/rooms`、`/homes/{id}/space-tree`、`/homes/{id}/slots`、`PATCH /homes/{id}`、`/rooms/{id}/storage-units`，以及成员管理 4 个路由（`GET/POST/PATCH/DELETE /homes/{id}/members[/{user_id}]`，P0.8） |
 | `items.py` | 物品 CRUD（`POST/GET/PATCH /items[/{id}]`、`/items/{id}/placements`、`/items/{id}/candidates`、`/items/{id}/vision`、`/items/{id}/infer`、`/items/recognize`） |
 | `recommendations.py` | 推荐：`POST /recommendations/items/{id}/recommend`、`GET /recommendations/{id}`、`POST /recommendations/{id}/accept`、`/reject`（带 note）、`/revoke`（撤销排除，P0.6）、`PATCH /recommendations/{id}` |
 | `placements.py` | 直接摆放（不经 LLM）：`POST /placements`、`PATCH /placements/{id}`（改备注 / 换位置，P0.7）、`DELETE /placements/{id}`（软关闭） |
@@ -149,7 +149,7 @@ curl -X POST localhost:8000/api/v1/auth/login \
 ```bash
 python -m ruff check app/ tests/             # 基线 32
 python -m mypy app/                          # 基线 20
-python -m pytest tests/ --no-header -q       # 基线 739 passed / 1 skipped
+python -m pytest tests/ --no-header -q       # 基线 752 passed / 1 skipped
 ```
 
 跑特定子集：

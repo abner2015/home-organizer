@@ -6,7 +6,7 @@
 >   真实产物路径、真实验收结论、真实基线。已完成的部分不再有「任务」，只有事实。
 > - **下篇 · P0 路线图**（P0.0–P0.4）：唯一还在推进的计划。每个 P0.x 都带交付物与验收标准。
 >
-> 最后更新：2026-09-23 —— P0.8 成员管理 / 多用户共享家 交付；**P0 八个批次全部完成**；基线 626 → 669 → 671 → 683 → 708 → **739**。
+> 最后更新：2026-09-23 —— P0.9 创建新家（POST /homes）交付；**P0 九个批次全部完成**；基线 626 → 669 → 671 → 683 → 708 → 739 → **752**。
 >
 > 背景：本文件原稿写于**开工前**。开工后实际走出来的顺序与原稿并不一致，于是原稿里出现了
 > Phase 9、Phase 10 各两份（旧副本与新副本交织），路径也停留在 `apps/api/`。本次一并归位。
@@ -50,7 +50,7 @@
 
 **当前基线**（任何改动都不得使其上升/下降）：
 
-- `services/api`：**626 passed / 1 skipped**
+- `services/api`：**752 passed / 1 skipped**
 - `ruff check app/ tests/`：**32**（历史遗留，不得上升）
 - `mypy app/`：**20**（历史遗留，不得上升）
 - `apps/web`：`npx tsc --noEmit` 与 `npx next lint` **干净**
@@ -741,6 +741,72 @@ Signup 是 lower+strip，invite 同样 lower+strip，**两次都一致**就匹�
 另一个细节：401 测试必须带 `X-Home-Id` 但**不**带 `Authorization`。
 完全没 headers 时 FastAPI 的 header 校验先抛 422，不会走到 `get_actor`。
 要触发「凭证缺失」分支就得让 header 校验过、auth 校验不过。
+
+---
+
+## P0.9 — `POST /homes` 创建新家 ✅ 已交付（2026-09-23）
+
+### Context
+
+进一个家的路径只有「注册时自动 provision 一个『我的家』」。`GET /homes`
+已经列出当前用户所属的所有 home —— 数据模型**早就**支持多 home，只是没
+HTTP 入口。P0.2 / P0.8 的「本批不做」段都把这条留着 ⏳。
+
+后果：多家庭用户（老家 / 新家 / 工作室）没法在 UI 上加第二个家，只能改 DB；
+owner 转让 / 跨家共享体验都被这条卡住。
+
+修法：补 `POST /homes` 一个最小可用入口 —— **Bearer + name + 可选 timezone**
+→ 201 + 新 `HomeView`，调用者自动 OWNER。**不**做切换家 UI（沿用 `GET /homes`
+现有 read 路径）、不做 owner 转让（单独批次）、不做跨用户偏好共享（单独批次）。
+
+### 接口
+
+```
+POST /api/v1/homes
+Authorization: Bearer <access_token>     ← get_current_user，不要 X-Home-Id
+Content-Type: application/json
+{ "name": "老家", "timezone": "Asia/Shanghai" | null }   ← timezone 可选
+```
+
+| 状态 | code | 含义 |
+| --- | --- | --- |
+| **201** | — | 新 `HomeView`（含 `member_count=1, item_count=0, rule_count=0`） |
+| 401 | unauthenticated | 没 Bearer / token 无效 / user 不存在 |
+| 422 | validation_error | `name` 空 / 超 100 / `extra="forbid"` 命中 |
+| 400 | validation_error | `name.strip() == ""`（业务校验，按 P0.7 惯例走 `ValidationFailedError`） |
+
+### 数据 & 复用
+
+- `Home` 表已存在：`name String(100)`、`owner_id FK users.id (RESTRICT)`、
+  `timezone String(64) default 'Asia/Shanghai'`。**无需迁移**。
+- **抽出 `home_service.create_home_for(db, *, owner_id, name, timezone=None) -> Home`**。
+  P0.2 早就该抽的：`signup` 的内联 `Home + HomeMembership` 逻辑改走这个函数，
+  **单一来源**。`test_signup_provisions_exactly_one_home` 继续通过 —— 行为字节级等价。
+- **不做**：切换家 UI、owner 转让、跨用户偏好共享、邮件邀请、
+  「带模板创建」（一上来附赠客厅 / 主卧 —— `signup` 也没附赠，保持一致）。
+
+### 落地位置
+
+后端 `app/services/home_service.py`（NEW）、`app/schemas/home.py:HomeCreateRequest`、
+`app/api/v1/homes.py:create_home`、`app/services/auth_service.signup`（改用新 primitive）。
+前端 `apps/web/src/app/home/new/{page,CreateHomeForm}.tsx`（NEW）、「+ 新家」链接
+在 `apps/web/src/app/home/page.tsx`。新增测试 `tests/unit/test_home_service.py`（5 条）+
+`tests/api/test_homes_api.py` +8 条。
+
+### 验收
+
+- [x] `POST /homes {"name":"老家"}` 无 `X-Home-Id` → 201 + HomeView（含 `id, name, timezone, owner_id=caller, member_count=1`）
+- [x] `POST /homes {"name":" 老家 "}` → `name == "老家"`（strip 后）
+- [x] `POST /homes {"name":"   "}` → 400 `name 不能为空`
+- [x] `POST /homes {"name":"x" * 101}` → 422
+- [x] `POST /homes {"name":"x", "is_admin": true}` → 422（extra=forbid）
+- [x] 无 Bearer → 401
+- [x] `GET /homes` 返回 2 行（已有 + 新建）
+- [x] Web：在 `/home` 看到 `+ 新家` 链接 → 进 `/home/new` → 提交 → 跳 `/home/setup`
+- [x] 旧测试全过（`signup` 行为不变）
+- [x] 基线：**739 → 752 passed / 1 skipped**（+13：5 单元 + 8 API）
+- [x] ruff 32、mypy 20 —— 零上升
+- [x] `tsc --noEmit` + `next lint` 干净
 
 ---
 

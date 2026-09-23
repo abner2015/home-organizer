@@ -23,8 +23,7 @@
 | 节 | 内容 | 状态 |
 | --- | --- | --- |
 | §2 认证 | signup / login / refresh / me | ✅ |
-| §3 家庭 | `GET /homes`、`GET /homes/{id}`、**`PATCH /homes/{id}`（改名，仅 owner）** | ✅ |
-| | 创建 home、加 / 移除成员 | ⏳ 未排期（成员管理） |
+| §3 家庭 | `GET /homes`、`POST /homes`、`GET /homes/{id}`、**`PATCH /homes/{id}`（改名，仅 owner）**、成员管理 4 个路由 | ✅ |
 | §4 房间 | `GET /homes/{id}/rooms`、`GET /rooms/{id}/storage-units` | ✅ 读 |
 | | **`POST /homes/{id}/rooms`、`PATCH`/`DELETE /rooms/{id}`** | ✅ 写（P0.2） |
 | §5 存储 | `GET /homes/{id}/space-tree`、`GET /homes/{id}/slots` | ✅ 读 |
@@ -46,8 +45,9 @@
 `app/agents/placement_service.py`）。在此之前，**给物品落位的唯一路径是接受 AI 推荐** ——
 一件已经知道该放哪的东西被迫走一遍「拍照 → 识别 → 推荐 → 接受」（`docs/PRD.md` §2.2 旅程 B）。
 
-**仍未实现的 §3 写接口**：`POST /homes` 与成员管理。注册时自动 provision 一个「我的家」
-（见 §2），所以当前没有任何接口需要创建 home。
+**§3 写接口已于 P0.2 / P0.8 / P0.9 全部落地**：结构 CRUD（P0.2） +
+成员管理（P0.8，4 个路由）+ 创建新家（P0.9，1 个路由）。
+**仍未实现的**：⏳ owner 转让 / 多家切换 UI / 跨用户偏好共享 —— 见后续批次。
 
 ---
 
@@ -168,22 +168,32 @@ GET /api/v1/items?page=1&page_size=20
 > `GET /homes/{homeId}/rooms`、`GET /homes/{homeId}/space-tree`、
 > `GET /homes/{homeId}/slots`、`GET /rooms/{roomId}/storage-units`（读，`app/api/v1/homes.py`），
 > 加上 P0.2 的 `PATCH /homes/{homeId}`、`POST /homes/{homeId}/rooms`、
-> `PATCH`/`DELETE /rooms/{roomId}`（写，`app/api/v1/structure.py`）。
-> **仍未实现**：`POST /homes`、成员管理 —— 分别见下方标注。
+> `PATCH`/`DELETE /rooms/{roomId}`（写，`app/api/v1/structure.py`），
+> 加上 P0.8 的成员管理 4 个路由，加上 P0.9 的 `POST /homes`。
+> **仍未实现**：⏳ owner 转让 / 多家切换 UI / 跨用户偏好共享 —— 见后续批次。
 
 ### GET /api/v1/homes
 
 返回当前用户所属的 Home 列表。**不需要 `X-Home-Id`** —— 它的职责恰恰是告诉你该选哪个 home。
 
-### POST /api/v1/homes ⏳
+### POST /api/v1/homes ✅
 
-> **尚未实现。** 注册时自动 provision 一个 home（见 §2），当前没有创建 home 的路径。
+创建新家并把 caller 设为 OWNER。**不需要 `X-Home-Id`**（家还没建出来——
+和 `GET /homes` 是同一类「无 home 可指」调用，使用 `get_current_user` 而非
+`get_actor`）。
 
 ```json
-{ "name": "我的家", "timezone": "Asia/Shanghai" }
+{ "name": "老家", "timezone": "Asia/Shanghai" }
 ```
 
-创建并自动赋予 owner 角色。
+- `name` 1-100 字符（DB 列约束），写入前 `.strip()`；纯空白 → **400** `validation_error`「name 不能为空」。
+- `timezone` 可选；缺省落到 `Asia/Shanghai`（与模型 `server_default` 一致）。
+- 不附赠任何收纳结构 —— `signup` 也没有，新 home 同样空。
+- 返回 `201` + 新 `HomeView`（`member_count=1, item_count=0, rule_count=0`）。
+
+> 业务逻辑统一在 `app/services/home_service.create_home_for` —— `POST /homes`
+> 和 `auth_service.signup` 都走这条路径，避免两处分别构建 Home + HomeMembership
+> 漂移。
 
 ### GET /api/v1/homes/{homeId}
 
