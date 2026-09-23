@@ -1,10 +1,11 @@
 """Pydantic schemas for the recommendation API (Phase 5).
 
-Four endpoints:
+Five endpoints:
 
 - POST /api/v1/recommendations/items/{item_id}/recommend  → RecommendResponse
 - POST /api/v1/recommendations/{rec_id}/accept             → AcceptResponse
 - POST /api/v1/recommendations/{rec_id}/reject             → RejectResponse
+- POST /api/v1/recommendations/{rec_id}/revoke             → RevokeResponse
 - PATCH /api/v1/recommendations/{rec_id}                   → PatchResponse
 """
 from __future__ import annotations
@@ -70,7 +71,7 @@ class RecommendResponse(BaseModel):
     )
     status: str = Field(
         description="Recommendation lifecycle status: 'pending', 'accepted', "
-        "'rejected' or 'superseded'.",
+        "'rejected', 'revoked' or 'superseded'.",
     )
     state: str = Field(description="Final pipeline state: 'answer' or 'failed'.")
     retries_used: int = Field(ge=0, le=10)
@@ -170,6 +171,28 @@ class PatchResponse(BaseModel):
     )
 
 
+# --------------------------------------------------------------------------- revoke
+
+
+class RevokeRequest(BaseModel):
+    """Request body for ``POST /recommendations/{rec_id}/revoke``. Empty.
+
+    Revoke is an un-do of reject — there's no new fact to record, so the body
+    has no fields. ``extra='forbid'`` keeps the contract strict.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RevokeResponse(BaseModel):
+    """Response body for ``POST /recommendations/{rec_id}/revoke``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recommendation_id: uuid.UUID
+    status: str = Field(description="Always 'revoked' on success.")
+
+
 __all__ = [
     "AcceptRequest",
     "AcceptResponse",
@@ -181,6 +204,8 @@ __all__ = [
     "RecommendResponse",
     "RejectRequest",
     "RejectResponse",
+    "RevokeRequest",
+    "RevokeResponse",
 ]
 
 

@@ -24,7 +24,7 @@ class Recommendation(Base):
         Index("ix_recommendations_item_id", "item_id"),
         Index("ix_recommendations_status", "status"),
         CheckConstraint(
-            "status IN ('pending','accepted','rejected','superseded')",
+            "status IN ('pending','accepted','rejected','superseded','revoked')",
             name="ck_recommendations_status",
         ),
     )

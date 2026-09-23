@@ -61,6 +61,13 @@ class RecommendationStatus(StrEnum):
     ``accepted``   — user accepted the recommendation (or its edited form);
                      an ItemPlacement row was created.
     ``rejected``   — user rejected the recommendation; nothing was placed.
+                     The chosen slot is excluded from this item's future
+                     candidates (see :func:`get_rejected_slot_ids`).
+    ``revoked``    — user reversed a previous ``rejected`` decision. The slot
+                     is back in the candidate pool; the original reject's
+                     reason stays on ``candidates[0].audit_note`` for the
+                     audit trail. Symmetric to ``rejected`` — both are
+                     "no placement" outcomes; ``revoked`` is the un-do.
     ``superseded`` — a newer recommendation replaced this one (e.g. the user
                      re-ran ``POST /recommend`` on the same item and accepted
                      the new one). Kept for history / audit.
@@ -69,6 +76,7 @@ class RecommendationStatus(StrEnum):
     PENDING = "pending"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
+    REVOKED = "revoked"
     SUPERSEDED = "superseded"
 
 

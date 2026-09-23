@@ -612,6 +612,155 @@ async def test_accepting_boosts_the_slot_for_a_same_category_item(
     assert without_pref[str(l1s2)] == without_pref[str(l1s1)]
 
 
+# ---------------------------------------------------------------------- revoke
+
+
+async def test_revoke_endpoint_happy_path(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """Reject then revoke → 200, body.status='revoked', the row survives.
+
+    The original reject's note is preserved on candidates[0].audit_note so
+    the user can see "I rejected this for X, then changed my mind" in the
+    audit trail.
+    """
+    cup_id = storage_hierarchy.items["马克杯"]
+    mock = MockAIProvider(ranking_response=_cup_payload(str(storage_hierarchy.slots["L1S1"])))
+    _override_provider(mock)
+    rec_id = _recommend(api_client, seeded_actor, cup_id)
+
+    rejected = api_client.post(
+        f"/api/v1/recommendations/{rec_id}/reject",
+        json={"note": "再想想"},
+        headers=seeded_actor.headers(),
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["status"] == "rejected"
+
+    resp = api_client.post(
+        f"/api/v1/recommendations/{rec_id}/revoke",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["recommendation_id"] == str(rec_id)
+    assert body["status"] == "revoked"
+
+    # The persisted row's audit_note is intact — revoke is an un-do, not
+    # an overwrite. The CandidateView doesn't expose it; the unit test
+    # checks the raw row, here we just confirm the row still exists and
+    # the new status is reflected on the GET.
+    get = api_client.get(
+        f"/api/v1/recommendations/{rec_id}", headers=seeded_actor.headers()
+    )
+    assert get.status_code == 200, get.text
+    assert get.json()["status"] == "revoked"
+
+
+async def test_revoke_pending_is_409(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """Revoking a pending recommendation is meaningless — only rejected rows
+    can be un-done."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    mock = MockAIProvider(ranking_response=_cup_payload(str(storage_hierarchy.slots["L1S1"])))
+    _override_provider(mock)
+    rec_id = _recommend(api_client, seeded_actor, cup_id)
+
+    resp = api_client.post(
+        f"/api/v1/recommendations/{rec_id}/revoke",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "conflict"
+    assert resp.json()["error"]["details"]["status"] == "pending"
+
+
+async def test_revoke_already_revoked_is_409(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """Revoking twice is refused — keeps the audit story clean."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    mock = MockAIProvider(ranking_response=_cup_payload(str(storage_hierarchy.slots["L1S1"])))
+    _override_provider(mock)
+    rec_id = _recommend(api_client, seeded_actor, cup_id)
+
+    api_client.post(
+        f"/api/v1/recommendations/{rec_id}/reject",
+        json={"note": "no"},
+        headers=seeded_actor.headers(),
+    )
+    first = api_client.post(
+        f"/api/v1/recommendations/{rec_id}/revoke",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    assert first.status_code == 200, first.text
+    second = api_client.post(
+        f"/api/v1/recommendations/{rec_id}/revoke",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    assert second.status_code == 409, second.text
+    assert second.json()["error"]["code"] == "conflict"
+
+
+async def test_revoke_cross_home_is_404(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """A recommendation belonging to another home surfaces as 404, never 403."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    mock = MockAIProvider(ranking_response=_cup_payload(str(storage_hierarchy.slots["L1S1"])))
+    _override_provider(mock)
+    rec_id = _recommend(api_client, seeded_actor, cup_id)
+    api_client.post(
+        f"/api/v1/recommendations/{rec_id}/reject",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+
+    resp = api_client.post(
+        f"/api/v1/recommendations/{rec_id}/revoke",
+        json={},
+        headers={**seeded_actor.headers(), "X-Home-Id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["error"]["code"] == "not_found"
+
+
+async def test_revoke_unknown_id_is_404(
+    api_client: TestClient, seeded_actor
+) -> None:
+    resp = api_client.post(
+        f"/api/v1/recommendations/{uuid.uuid4()}/revoke",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_revoke_without_credentials_is_401(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    cup_id = storage_hierarchy.items["马克杯"]
+    mock = MockAIProvider(ranking_response=_cup_payload(str(storage_hierarchy.slots["L1S1"])))
+    _override_provider(mock)
+    rec_id = _recommend(api_client, seeded_actor, cup_id)
+    api_client.post(
+        f"/api/v1/recommendations/{rec_id}/reject",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    resp = api_client.post(
+        f"/api/v1/recommendations/{rec_id}/revoke",
+        json={},
+        headers={"X-Home-Id": str(seeded_actor.home_id)},
+    )
+    assert resp.status_code == 401, resp.text
+
+
 # ---------------------------------------------------------------------- helpers
 
 

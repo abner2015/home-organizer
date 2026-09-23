@@ -1,4 +1,4 @@
-"""Recommendation endpoints (Phase 5).
+"""Recommendation endpoints (Phase 5 + P0.6).
 
 Five endpoints:
 
@@ -10,14 +10,17 @@ Five endpoints:
   ``accepted`` and create an ItemPlacement row.
 - ``POST /api/v1/recommendations/{rec_id}/reject`` — mark recommendation
   ``rejected`` (no placement).
+- ``POST /api/v1/recommendations/{rec_id}/revoke`` — mark a previously
+  ``rejected`` recommendation ``revoked`` (the slot becomes recommendable
+  again for this item; P0.6).
 - ``PATCH /api/v1/recommendations/{rec_id}`` — user moves chosen_slot_id
   before accept (status stays ``pending``).
 
 All endpoints require ``X-User-Id`` + ``X-Home-Id`` headers (stub auth; real
 JWT lands with the user-facing frontend).
 
-Cross-home lookups return 404. Accept / reject on a non-pending recommendation
-return 409.
+Cross-home lookups return 404. Accept / reject / revoke on a recommendation
+in the wrong status return 409.
 """
 from __future__ import annotations
 
@@ -31,6 +34,7 @@ from app.agents.placement_service import (
     accept_recommendation,
     patch_recommendation,
     reject_recommendation,
+    revoke_recommendation,
 )
 from app.ai.factory import get_provider
 from app.ai.provider import AIProvider
@@ -46,6 +50,8 @@ from app.schemas.recommendation import (
     RecommendResponse,
     RejectRequest,
     RejectResponse,
+    RevokeRequest,
+    RevokeResponse,
 )
 from app.services import recommendation_service
 
@@ -203,6 +209,46 @@ async def reject(
         recommendation_id=outcome.recommendation.id,
         status=outcome.recommendation.status,
         note=payload.note,
+    )
+
+
+# ---------------------------------------------------------------------- revoke
+
+
+@router.post(
+    "/{rec_id}/revoke",
+    response_model=RevokeResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Revoke a rejection (slot becomes recommendable again)",
+)
+async def revoke(
+    rec_id: uuid.UUID,
+    _payload: RevokeRequest,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RevokeResponse:
+    """Flip a ``rejected`` recommendation to ``revoked`` (P0.6). No placement
+    is created. The excluded slot is back in the candidate pool for the next
+    ``POST /recommend`` — the read-side filter
+    (:func:`get_rejected_slot_ids`) keys off ``status='rejected'`` and so
+    transparently drops the revoked row.
+
+    The original reject's reason is preserved on
+    ``candidates[0].audit_note`` for the audit trail.
+
+    Failures:
+    - ``404 not_found`` — recommendation doesn't exist or wrong home.
+    - ``409 conflict`` — recommendation is not in ``rejected`` status.
+    """
+    outcome = await revoke_recommendation(
+        db,
+        recommendation_id=rec_id,
+        home_id=actor.home_id,
+    )
+    await db.commit()
+    return RevokeResponse(
+        recommendation_id=outcome.recommendation.id,
+        status=outcome.recommendation.status,
     )
 
 
