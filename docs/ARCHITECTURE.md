@@ -308,24 +308,25 @@ class AIProvider(Protocol):
         *,
         hint: str | None = None,
         context: str = "",            # 家庭真实数据，用于接地（把 category 限制在真实词表）
-        timeout_s: float = 60.0,
+        timeout_s: float = 30.0,
     ) -> VisionOutput: ...
 
-    async def chat(self, messages: list[Message], *, timeout_s: float = 60.0) -> str: ...
+    async def chat(self, messages: list[dict[str, Any]], *, timeout_s: float = 30.0) -> str: ...
 
     async def structured_output(
         self,
         prompt: str,
         schema: type[BaseModel],
         *,
-        timeout_s: float = 60.0,
+        image_url: str | None = None,   # P0.2：一次调用可以带一张图（缺省 None 时与改动前逐字节相同）
+        timeout_s: float = 30.0,
     ) -> BaseModel: ...
 
     async def rank_candidates(
         self,
         *,
         item: ..., candidates: list[...], rules: list[...], preferences: list[...],
-        history: list[...], last_failure: str | None = None, timeout_s: float = 60.0,
+        history: list[...], last_failure: str | None = None, timeout_s: float = 30.0,
     ) -> RankingOutput: ...
 ```
 

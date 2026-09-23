@@ -118,7 +118,7 @@ class AIProvider(Protocol):
 每个 Provider 必须：
 
 - 实现 `name` 属性。
-- 实现 `vision_recognize` / `rank_candidates`。
+- 实现 `vision` / `chat` / `structured_output` / `rank_candidates`（与 §2 Protocol 一致）。
 - 内部将 LLM 原始响应先解析为对应 Pydantic Schema；解析失败抛 `AIOutputParseError`。
 - 抛 `AIProviderError` 表示 Provider 不可用 / 5xx / 超时。
 - **不在异常中泄露 prompt 内容**到日志（只记 SHA256 哈希或前 100 字符）。

@@ -30,7 +30,7 @@
 | §5 存储 | `GET /homes/{id}/space-tree`、`GET /homes/{id}/slots` | ✅ 读 |
 | | **`POST`/`PATCH`/`DELETE` unit / section / slot** | ✅ 写（P0.2） |
 | §6 物品 | presign、assets、files、items（创建 / 查询 / 改 / placements / candidates）、recognize | ✅ |
-| §7 AI | vision、infer、recommend、accept、reject、PATCH、search、**`POST /structures/propose`** | ✅ |
+| §7 AI | vision、infer、recommend（POST + GET）、accept、reject、PATCH、search、**`POST /structures/propose`** | ✅ |
 | | ~~`/recommendations/{recId}/adjust`~~ | ❌ **已废弃**，见 §7 |
 | §8 摆放 | **`POST /placements`（直接落位，不经 LLM）、`DELETE /placements/{id}`（软关闭）** | ✅ 写（P0.3） |
 | §9 规则与偏好 | 规则 / 偏好的 CRUD | 📋 设计稿 |
@@ -433,6 +433,39 @@ Web 拿到 `upload_url` 后 PUT 上去。**签名的 `Content-Type` 是 URL 的�
 
 `object_key` 就是要传给 `POST /api/v1/items` 的 `image_object_keys`。
 
+### GET /api/v1/assets/{assetId} ✅
+
+按 id 取一个资产(含元数据与新签发的下载 URL)。`url` 每次都重新签 ——
+不要把 `asset.uploaded_at` 那一刻的 url 缓存到 UI 上,默认 TTL 1 小时。
+
+```json
+{
+  "asset_id": "uuid",
+  "home_id": "uuid",
+  "created_by": "uuid",
+  "content_type": "image/png",
+  "size": 12345,
+  "width": 800,
+  "height": 600,
+  "sha256": "hex",
+  "original_filename": "tea.png",
+  "status": "ready",
+  "failure_reason": null,
+  "uploaded_at": "2026-09-22T10:00:00+00:00",
+  "created_at": "2026-09-22T10:00:00+00:00",
+  "url": "https://..."
+}
+```
+
+跨 home 的 id 视为不存在(**404**,不泄漏存在性)。无凭证 → 401。
+
+### DELETE /api/v1/assets/{assetId} ✅
+
+**204**。仅当该资产不再被任何 `item_images` 引用时删除;否则 409(对象存储里仍占用,删除会留下悬挂的 URL)。
+
+> ⚠️ 目前**不会**级联清理物品上的引用 —— 删一个被引用的资产会让物品的 `primary_image_url` 变 404。
+> UI 上的「删除」按钮应该先解绑再删,或者只删孤儿资产。
+
 ### GET /api/v1/files/{key}
 
 只在 `STORAGE_BACKEND=local` 下存在，其余后端一律 404。
@@ -494,9 +527,10 @@ MinIO 部署请继续使用 presigned GET。
 
 ### PATCH /api/v1/items/{itemId}
 
-### DELETE /api/v1/items/{itemId}
+### DELETE /api/v1/items/{itemId} ⏳
 
-需先结束所有 active placement。
+> **未实现。** 计划：需先结束所有 active placement,再做软删 / 物理删待定。
+> 当前删除物品请走「结束全部 placement → 删 slot 的引用」两步手动操作,或先归档物品（未来的 ⏳ 接口）。
 
 ### GET /api/v1/items/{itemId}/placements
 
@@ -647,6 +681,15 @@ MinIO 部署请继续使用 presigned GET。
 
 > `_top3` 会把**选中的那条排到第一位**，所以响应里候选的**下标不是分数序**。
 > 需要比较打分时用 `score` 字段，或走 §7 的 `GET …/candidates`。
+
+### GET /api/v1/recommendations/{recId} ✅
+
+把之前一次 `POST /recommend` 的结果再读出来，响应体形状与上节完全一致（`RecommendResponse`）。
+候选里的位置元数据（房间名 / 柜名 / 路径）从**当前** slot 行里重新读，
+所以即便 slot 被改名 / 移动，推荐页仍显示当下正确的路径；`is_recommended`
+按当前的 `chosen_slot_id` 重算 —— 适合 `PATCH …` 之后的页面刷新。
+
+未知 id 或物品属于另一个家 → **404**；无凭证 → 401。**不重新调 LLM**（`agent_traces` 行数不变）。
 
 ### GET /api/v1/items/{itemId}/candidates ✅
 

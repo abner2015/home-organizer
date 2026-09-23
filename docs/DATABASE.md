@@ -341,6 +341,40 @@ users ──< home_memberships >── homes
 
 ---
 
+### 3.17 assets（Phase 3 上传资产）
+
+通用上传二进制对象（图片，最终可扩到任意二进制）。`Item` 通过 `item_images` 间接引用 `Asset`；
+保留独立表是为了 presigned URL 能独立签发、回收被用户放弃的上传。
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| id | uuid | PK | |
+| home_id | uuid | NOT NULL, FK → homes.id ON DELETE CASCADE | |
+| created_by | uuid | NOT NULL, FK → users.id ON DELETE RESTRICT | |
+| bucket | text | NOT NULL | MinIO/S3 bucket 名 |
+| object_key | text | NOT NULL, UNIQUE | 服务端生成的 S3/MinIO key（原始文件名**绝不**作为 key） |
+| content_type | text | NOT NULL | MIME，需在白名单内 |
+| size_bytes | bigint | NOT NULL, CHECK `>= 0` | 上传字节数 |
+| sha256 | text | NULL | 十六进制 SHA-256，用于同 home 内去重 |
+| width | int | NULL | 图片宽（上传时由服务端解析） |
+| height | int | NULL | 图片高 |
+| original_filename | text | NULL | 客户端上传时的文件名；展示用，不入 key |
+| status | text | NOT NULL, default 'pending', CHECK in ('pending','ready','failed') | 上传流程状态 |
+| failure_reason | text | NULL | status='failed' 时的说明 |
+| uploaded_at | timestamptz | NULL | status 转到 'ready' 时设置 |
+| created_at | timestamptz | NOT NULL, default now() | |
+| updated_at | timestamptz | NOT NULL, default now() | |
+
+索引：
+- `ix_assets_home_id_created (home_id, created_at)`
+- `ix_assets_sha256` —— 同 home 内按 sha256 查重
+
+> 删除语义：`POST /api/v1/assets/{id}` 仅当该 asset 不被任何 `item_images` 引用时删得动；
+> 否则返 **409**（对象仍占用、删除会让 `Item.primary_image_url` 变 404）。应用层校验，
+> DB 没有级联触发器。
+
+---
+
 ## 4. 扩展与触发器
 
 第一版启用：
