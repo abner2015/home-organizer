@@ -11,9 +11,10 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError, ValidationFailedError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationFailedError
 from app.db.base import utc_now
 from app.db.enums import (
     AgentTraceStatus,
@@ -285,8 +286,48 @@ async def _create_placement(
         note=note,
     )
     db.add(placement)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError as e:
+        # The partial unique index ``uq_item_placements_one_active_per_item``
+        # makes "one item, one active slot" a database invariant. Two
+        # concurrent POST /placements for the same item both run the
+        # close-then-insert sequence; the loser's flush collides with the
+        # winner's already-committed row and PG raises IntegrityError. The
+        # global unhandled handler would turn this into 500 — translate it to
+        # 409 so the caller knows it's a race they can retry.
+        await db.rollback()
+        constraint = _constraint_name_from_integrity_error(e)
+        if constraint != "uq_item_placements_one_active_per_item":
+            # Not the invariant we know about — bubble up unchanged.
+            raise
+        raise ConflictError(
+            "Item is already being placed in another slot; please retry.",
+            details={"item_id": str(item_id), "constraint": constraint},
+        ) from e
     return placement
+
+
+def _constraint_name_from_integrity_error(e: IntegrityError) -> str | None:
+    """Best-effort extraction of the violated constraint name from a DBAPI
+    IntegrityError.
+
+    PG's psycopg2 exposes ``e.orig.diag.constraint_name``; SQLite's
+    ``sqlite3.IntegrityError`` embeds the index name in the message. We try
+    both and return ``None`` if neither is recognisable, in which case the
+    caller falls through to "not our known invariant → re-raise".
+    """
+    orig = getattr(e, "orig", None)
+    if orig is None:
+        return None
+    diag = getattr(orig, "diag", None)
+    name = getattr(diag, "constraint_name", None) if diag else None
+    if name:
+        return str(name)
+    msg = str(orig)
+    if "uq_item_placements_one_active_per_item" in msg:
+        return "uq_item_placements_one_active_per_item"
+    return None
 
 
 async def save_placement(
