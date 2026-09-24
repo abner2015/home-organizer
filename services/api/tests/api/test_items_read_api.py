@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.enums import PlacementSource
+from app.main import app
 from app.models import AgentTrace, ItemPlacement, Recommendation
 
 pytestmark = pytest.mark.asyncio
@@ -404,6 +405,102 @@ async def test_candidates_endpoint_fills_a_reason_for_every_row(
         assert c["reason"]
         assert any("\u4e00" <= ch <= "\u9fff" for ch in c["reason"])
         assert not any("A" <= ch <= "z" for ch in c["reason"])
+
+
+# ------------------------------------------------------------------------ list-recommendations (P0.B)
+
+
+async def test_list_item_recommendations_filtered_by_status(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """`?status=rejected` returns only rejected recs, newest first.
+
+    Two recs for the same item are created and rejected; a third (pending)
+    is created and *not* rejected — it must NOT appear in the result.
+    """
+    from app.ai.providers.mock import MockAIProvider
+    from app.api.v1.recommendations import _get_ai_provider
+
+    cup_id = storage_hierarchy.items["马克杯"]
+    slot_id = storage_hierarchy.slots["L1S1"]
+    mock = MockAIProvider(
+        ranking_response={
+            "candidates": [
+                {
+                    "slot_id": str(slot_id),
+                    "confidence": 0.9,
+                    "reason": "马克杯放在厨房吊柜第1层",
+                    "matched_rules": [],
+                    "evidence_item_ids": [],
+                }
+            ]
+        }
+    )
+
+    def _get():
+        return mock
+
+    app.dependency_overrides[_get_ai_provider] = _get
+
+    # 2 rejected + 1 pending — only the 2 rejected should come back.
+    rec_ids = []
+    for _ in range(3):
+        r = api_client.post(
+            f"/api/v1/recommendations/items/{cup_id}/recommend",
+            json={},
+            headers=seeded_actor.headers(),
+        )
+        assert r.status_code == 200, r.text
+        rec_ids.append(r.json()["recommendation_id"])
+
+    for rid in rec_ids[:2]:
+        rejected = api_client.post(
+            f"/api/v1/recommendations/{rid}/reject",
+            json={},
+            headers=seeded_actor.headers(),
+        )
+        assert rejected.status_code == 200, rejected.text
+
+    resp = api_client.get(
+        f"/api/v1/items/{cup_id}/recommendations?status=rejected",
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    rows = body["recommendations"]
+    assert len(rows) == 2
+    # Newest first → the second reject (rec_ids[1]) appears before rec_ids[0].
+    assert rows[0]["id"] == rec_ids[1]
+    assert rows[1]["id"] == rec_ids[0]
+    for row in rows:
+        assert row["status"] == "rejected"
+        assert row["chosen_slot_id"] == str(slot_id)
+        assert "马克杯" in row["reason"]
+
+
+async def test_list_item_recommendations_cross_home_is_404(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """An item belonging to a different home → 404 (consistent with the
+    rest of the items API)."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    resp = api_client.get(
+        f"/api/v1/items/{cup_id}/recommendations?status=rejected",
+        headers={**seeded_actor.headers(), "X-Home-Id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["error"]["code"] == "not_found"
+
+
+async def test_list_item_recommendations_no_credentials_is_401(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    cup_id = storage_hierarchy.items["马克杯"]
+    resp = api_client.get(
+        f"/api/v1/items/{cup_id}/recommendations?status=rejected",
+        headers={"X-Home-Id": str(seeded_actor.home_id)},
+    )
+    assert resp.status_code == 401, resp.text
 
 
 # ------------------------------------------------------------------------ auth

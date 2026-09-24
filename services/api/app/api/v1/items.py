@@ -595,3 +595,35 @@ async def list_item_candidates(
             recommendation_service.candidate_view_from_slot(slot) for slot in ranked
         ],
     )
+
+
+@router.get(
+    "/{item_id}/recommendations",
+    response_model=dict,
+    summary="List a persisted recommendation subset for an item (P0.B)",
+)
+async def list_item_recommendations(
+    item_id: uuid.UUID,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        description="Optional filter — one of 'pending' / 'accepted' / "
+        "'rejected' / 'revoked' / 'superseded'. Omit to list all.",
+        max_length=32,
+    ),
+) -> dict[str, Any]:
+    """Return one recommendation row per persisted run for an item.
+
+    Used by the item-detail page's "已被排除的位置" block. Newest first; the
+    UI renders ``chosen_slot_id + reason`` for each. Cross-home lookups return
+    404 (consistent with the rest of the items API).
+    """
+    rows = await recommendation_service.list_recommendations_for_item(
+        db,
+        home_id=actor.home_id,
+        item_id=item_id,
+        status=status_filter,
+    )
+    return {"recommendations": rows}

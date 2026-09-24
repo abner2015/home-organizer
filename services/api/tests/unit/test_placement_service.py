@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.agents.placement_service import (
     accept_recommendation,
+    bulk_revoke,
     patch_recommendation,
     place_item,
     reject_recommendation,
@@ -880,6 +881,146 @@ async def test_revoke_cross_home_is_404(
                 recommendation_id=rec.id,
                 home_id=other_home_id,
             )
+
+
+# ----------------------------------------------------------------- bulk-revoke (P0.B)
+
+
+async def test_bulk_revoke_rejects_all_succeed(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """All-rejected batch — every row flips to 'revoked', errors empty."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    rec1 = await _run_recommendation(db_engine, seeded_actor, storage_hierarchy, cup_id)
+    rec2 = await _run_recommendation(db_engine, seeded_actor, storage_hierarchy, cup_id)
+    rec3 = await _run_recommendation(db_engine, seeded_actor, storage_hierarchy, cup_id)
+
+    for r in (rec1, rec2, rec3):
+        async with _session(db_engine) as session:
+            await reject_recommendation(
+                session,
+                recommendation_id=r.id,
+                home_id=seeded_actor.home_id,
+            )
+
+    async with _session(db_engine) as session:
+        outcome = await bulk_revoke(
+            session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            recommendation_ids=[rec1.id, rec2.id, rec3.id],
+            auto_rerun=False,
+            provider=MockAIProvider(),
+        )
+
+    assert [r.id for r in outcome.revoked] == [rec1.id, rec2.id, rec3.id]
+    assert outcome.errors == []
+    assert outcome.rerun_results == []
+
+    async with _session(db_engine) as session:
+        rows = (
+            await session.execute(
+                select(Recommendation).where(
+                    Recommendation.id.in_([rec1.id, rec2.id, rec3.id])
+                )
+            )
+        ).scalars().all()
+    assert all(r.status == RecommendationStatus.REVOKED.value for r in rows)
+
+
+async def test_bulk_revoke_partial_failure_collects_errors(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """Mix of valid + cross-home recs: only the valid one revokes; the bad
+    ones land in ``errors[]`` with ``code='not_found'`` — no top-level raise.
+    """
+    cup_id = storage_hierarchy.items["马克杯"]
+    good = await _run_recommendation(db_engine, seeded_actor, storage_hierarchy, cup_id)
+    async with _session(db_engine) as session:
+        await reject_recommendation(
+            session,
+            recommendation_id=good.id,
+            home_id=seeded_actor.home_id,
+        )
+
+    bogus = uuid.uuid4()  # never created
+    async with _session(db_engine) as session:
+        outcome = await bulk_revoke(
+            session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            recommendation_ids=[good.id, bogus],
+            auto_rerun=False,
+            provider=MockAIProvider(),
+        )
+
+    assert [r.id for r in outcome.revoked] == [good.id]
+    assert len(outcome.errors) == 1
+    assert outcome.errors[0]["code"] == "not_found"
+    assert outcome.errors[0]["recommendation_id"] == str(bogus)
+
+
+async def test_bulk_revoke_already_revoked_is_error_not_500(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """A rec that's already revoked is a per-row conflict — not a top-level 500."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    rec = await _run_recommendation(db_engine, seeded_actor, storage_hierarchy, cup_id)
+    async with _session(db_engine) as session:
+        await reject_recommendation(
+            session, recommendation_id=rec.id, home_id=seeded_actor.home_id
+        )
+        await revoke_recommendation(
+            session, recommendation_id=rec.id, home_id=seeded_actor.home_id
+        )
+
+    async with _session(db_engine) as session:
+        outcome = await bulk_revoke(
+            session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            recommendation_ids=[rec.id],
+            auto_rerun=False,
+            provider=MockAIProvider(),
+        )
+    assert outcome.revoked == []
+    assert len(outcome.errors) == 1
+    assert outcome.errors[0]["code"] == "conflict"
+    assert outcome.errors[0]["recommendation_id"] == str(rec.id)
+
+
+async def test_bulk_revoke_with_auto_rerun_creates_new_recommendation(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """auto_rerun=True re-runs the pipeline for the affected item and returns
+    the new Recommendation in ``rerun_results[]``."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    rec = await _run_recommendation(db_engine, seeded_actor, storage_hierarchy, cup_id)
+    async with _session(db_engine) as session:
+        await reject_recommendation(
+            session, recommendation_id=rec.id, home_id=seeded_actor.home_id
+        )
+
+    async with _session(db_engine) as session:
+        outcome = await bulk_revoke(
+            session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            recommendation_ids=[rec.id],
+            auto_rerun=True,
+            provider=MockAIProvider(
+                ranking_response=_cup_payload(str(storage_hierarchy.slots["L1S1"]))
+            ),
+        )
+
+    assert len(outcome.rerun_results) == 1
+    item_id, rerun, _err = outcome.rerun_results[0]
+    assert item_id == cup_id
+    assert rerun is not None
+    assert rerun.ok
+    assert rerun.recommendation.id != rec.id
+    # The fresh rec is in pending state (the pipeline starts fresh).
+    assert rerun.recommendation.status == RecommendationStatus.PENDING.value
 
 
 async def test_revoked_slot_reappears_in_next_recommend(

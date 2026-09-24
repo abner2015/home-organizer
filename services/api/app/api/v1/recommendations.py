@@ -1,6 +1,6 @@
-"""Recommendation endpoints (Phase 5 + P0.6).
+"""Recommendation endpoints (Phase 5 + P0.6 + P0.B).
 
-Five endpoints:
+Six endpoints:
 
 - ``POST /api/v1/recommendations/items/{item_id}/recommend`` — run the 9-step
   pipeline, return top-3 candidates + chosen slot.
@@ -13,6 +13,10 @@ Five endpoints:
 - ``POST /api/v1/recommendations/{rec_id}/revoke`` — mark a previously
   ``rejected`` recommendation ``revoked`` (the slot becomes recommendable
   again for this item; P0.6).
+- ``POST /api/v1/recommendations/bulk-revoke`` — bulk un-do many rejections
+  in one round-trip; with ``auto_rerun=true`` the route re-runs the
+  recommendation pipeline for every affected item synchronously and returns
+  the new candidates (P0.B).
 - ``PATCH /api/v1/recommendations/{rec_id}`` — user moves chosen_slot_id
   before accept (status stays ``pending``).
 
@@ -20,7 +24,8 @@ All endpoints require ``X-User-Id`` + ``X-Home-Id`` headers (stub auth; real
 JWT lands with the user-facing frontend).
 
 Cross-home lookups return 404. Accept / reject / revoke on a recommendation
-in the wrong status return 409.
+in the wrong status return 409. ``bulk-revoke`` always returns 200; per-entry
+failures are collected inside ``errors[]``.
 """
 from __future__ import annotations
 
@@ -32,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.placement_service import (
     accept_recommendation,
+    bulk_revoke,
     patch_recommendation,
     reject_recommendation,
     revoke_recommendation,
@@ -43,6 +49,11 @@ from app.db.session import get_db
 from app.schemas.recommendation import (
     AcceptRequest,
     AcceptResponse,
+    BulkRevokeError,
+    BulkRevokeRequest,
+    BulkRevokeRerunItem,
+    BulkRevokeResponse,
+    BulkRevokeRevokedItem,
     PatchRequest,
     PatchResponse,
     PlacementView,
@@ -249,6 +260,117 @@ async def revoke(
     return RevokeResponse(
         recommendation_id=outcome.recommendation.id,
         status=outcome.recommendation.status,
+    )
+
+
+# -------------------------------------------------------------------- bulk-revoke
+
+
+@router.post(
+    "/bulk-revoke",
+    response_model=BulkRevokeResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Bulk-revoke rejections and (optionally) auto-rerun recommend",
+)
+async def bulk_revoke_endpoint(
+    payload: BulkRevokeRequest,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    provider: Annotated[AIProvider, Depends(_get_ai_provider)],
+) -> BulkRevokeResponse:
+    """Bulk-un-do a batch of ``rejected`` recommendations (P0.B).
+
+    Always returns 200; per-entry failures are reported inside ``errors[]``
+    (one of ``not_found`` / ``conflict`` / ``ai_error``). The response has
+    three sections so the front-end can render each independently:
+
+    - ``revoked[]`` — successfully un-done recommendations.
+    - ``rerun_results[]`` — one entry per affected item, only when
+      ``auto_rerun=true`` and at least one revoke succeeded. Each entry
+      carries the same shape as a single ``POST /recommend`` response so the
+      UI can swap the new candidates in without a second round-trip.
+    - ``errors[]`` — per-entry failures with a stable ``code``.
+
+    Top-level failures:
+    - ``422`` — ``recommendation_ids`` empty / over 50 / unknown field
+      (Pydantic ``extra='forbid'``).
+    - ``401`` — missing / bad credentials (handled by ``get_actor``).
+    """
+    outcome = await bulk_revoke(
+        db,
+        home_id=actor.home_id,
+        user_id=actor.user_id,
+        recommendation_ids=payload.recommendation_ids,
+        auto_rerun=payload.auto_rerun,
+        provider=provider,
+    )
+    await db.commit()
+
+    revoked_views = [
+        BulkRevokeRevokedItem(
+            recommendation_id=rec.id,
+            status=rec.status,
+        )
+        for rec in outcome.revoked
+    ]
+
+    rerun_views: list[BulkRevokeRerunItem] = []
+    for item_id, rerun_outcome, _err_code in outcome.rerun_results:
+        if rerun_outcome is None:
+            # Rerun failed — surface an empty failed entry so the UI can show
+            # "still no candidates" instead of a missing row.
+            rerun_views.append(
+                BulkRevokeRerunItem(
+                    item_id=item_id,
+                    new_recommendation_id=None,
+                    state="failed",
+                    chosen_slot_id=None,
+                    candidates=[],
+                )
+            )
+            continue
+        rd = rerun_outcome.to_dict()
+        candidates = [
+            recommendation_service.candidate_view_from_slot(
+                c,
+                is_recommended=(
+                    str(c.get("slot_id") or "") == (rd.get("chosen_slot_id") or "")
+                ),
+            )
+            for c in (rerun_outcome.result.candidates or [])[:3]
+        ]
+        rerun_views.append(
+            BulkRevokeRerunItem(
+                item_id=item_id,
+                new_recommendation_id=rd["recommendation_id"],
+                state=("success" if rerun_outcome.ok else "failed"),
+                chosen_slot_id=(
+                    uuid.UUID(rd["chosen_slot_id"])
+                    if rd.get("chosen_slot_id")
+                    else None
+                ),
+                candidates=candidates,
+            )
+        )
+
+    error_views = [
+        BulkRevokeError(
+            recommendation_id=(
+                uuid.UUID(e["recommendation_id"])
+                if e.get("recommendation_id")
+                else None
+            ),
+            item_id=uuid.UUID(e["item_id"]) if e.get("item_id") else None,
+            code=e["code"],
+            message=e["message"],
+        )
+        for e in outcome.errors
+    ]
+
+    return BulkRevokeResponse(
+        revoked=revoked_views,
+        rerun_results=rerun_views,
+        errors=error_views,
     )
 
 

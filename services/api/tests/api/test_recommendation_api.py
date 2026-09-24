@@ -761,6 +761,163 @@ async def test_revoke_without_credentials_is_401(
     assert resp.status_code == 401, resp.text
 
 
+# ----------------------------------------------------------------- bulk-revoke (P0.B)
+
+
+async def test_bulk_revoke_happy_path(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """3 rejected recs → 200, revoked=[3], errors=[]."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    mock = MockAIProvider(
+        ranking_response=_cup_payload(str(storage_hierarchy.slots["L1S1"]))
+    )
+    _override_provider(mock)
+    rec_ids = [
+        _recommend(api_client, seeded_actor, cup_id),
+        _recommend(api_client, seeded_actor, cup_id),
+        _recommend(api_client, seeded_actor, cup_id),
+    ]
+    for rid in rec_ids:
+        r = api_client.post(
+            f"/api/v1/recommendations/{rid}/reject",
+            json={"note": "nope"},
+            headers=seeded_actor.headers(),
+        )
+        assert r.status_code == 200, r.text
+
+    resp = api_client.post(
+        "/api/v1/recommendations/bulk-revoke",
+        json={"recommendation_ids": [str(r) for r in rec_ids], "auto_rerun": False},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["revoked"]) == 3
+    assert {row["recommendation_id"] for row in body["revoked"]} == {
+        str(r) for r in rec_ids
+    }
+    assert all(row["status"] == "revoked" for row in body["revoked"])
+    assert body["errors"] == []
+    # auto_rerun=False ⇒ no rerun_results.
+    assert body["rerun_results"] == []
+
+
+async def test_bulk_revoke_with_auto_rerun_returns_new_recommendation(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """auto_rerun=true → rerun_results[0].new_recommendation_id is a fresh
+    rec id, state='success', candidates non-empty."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    mock = MockAIProvider(
+        ranking_response=_cup_payload(str(storage_hierarchy.slots["L1S1"]))
+    )
+    _override_provider(mock)
+    rec_id = _recommend(api_client, seeded_actor, cup_id)
+    api_client.post(
+        f"/api/v1/recommendations/{rec_id}/reject",
+        json={"note": "nope"},
+        headers=seeded_actor.headers(),
+    )
+
+    resp = api_client.post(
+        "/api/v1/recommendations/bulk-revoke",
+        json={"recommendation_ids": [str(rec_id)], "auto_rerun": True},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["rerun_results"]) == 1
+    rr = body["rerun_results"][0]
+    assert rr["item_id"] == str(cup_id)
+    assert rr["new_recommendation_id"] is not None
+    assert rr["new_recommendation_id"] != str(rec_id)
+    assert rr["state"] == "success"
+    assert len(rr["candidates"]) >= 1
+
+
+async def test_bulk_revoke_cross_home_recs_become_errors(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """A rec that belongs to a different home goes into errors[].code='not_found',
+    not a top-level 404. The valid rec on the same call still succeeds."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    mock = MockAIProvider(
+        ranking_response=_cup_payload(str(storage_hierarchy.slots["L1S1"]))
+    )
+    _override_provider(mock)
+    good = _recommend(api_client, seeded_actor, cup_id)
+    api_client.post(
+        f"/api/v1/recommendations/{good}/reject",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+
+    resp = api_client.post(
+        "/api/v1/recommendations/bulk-revoke",
+        json={
+            "recommendation_ids": [str(good), str(uuid.uuid4())],
+            "auto_rerun": False,
+        },
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["revoked"]) == 1
+    assert body["revoked"][0]["recommendation_id"] == str(good)
+    assert len(body["errors"]) == 1
+    assert body["errors"][0]["code"] == "not_found"
+
+
+async def test_bulk_revoke_pending_rec_becomes_conflict_error(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """A pending rec is not eligible for revoke — surfaces as conflict, not 409
+    at the top level."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    mock = MockAIProvider(
+        ranking_response=_cup_payload(str(storage_hierarchy.slots["L1S1"]))
+    )
+    _override_provider(mock)
+    rec_id = _recommend(api_client, seeded_actor, cup_id)
+    # Do NOT reject — leave it pending.
+
+    resp = api_client.post(
+        "/api/v1/recommendations/bulk-revoke",
+        json={"recommendation_ids": [str(rec_id)], "auto_rerun": False},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["revoked"] == []
+    assert len(body["errors"]) == 1
+    assert body["errors"][0]["code"] == "conflict"
+
+
+async def test_bulk_revoke_empty_array_is_422(
+    api_client: TestClient, seeded_actor
+) -> None:
+    """An empty recommendation_ids list fails Pydantic validation → 422."""
+    resp = api_client.post(
+        "/api/v1/recommendations/bulk-revoke",
+        json={"recommendation_ids": [], "auto_rerun": False},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_bulk_revoke_no_credentials_is_401(
+    api_client: TestClient, seeded_actor
+) -> None:
+    """No Bearer → 401 from ``get_current_user``."""
+    resp = api_client.post(
+        "/api/v1/recommendations/bulk-revoke",
+        json={"recommendation_ids": [str(uuid.uuid4())], "auto_rerun": False},
+        headers={"X-Home-Id": str(seeded_actor.home_id)},
+    )
+    assert resp.status_code == 401, resp.text
+
+
 # ---------------------------------------------------------------------- helpers
 
 

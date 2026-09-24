@@ -513,6 +513,57 @@ export interface PatchResponse {
   candidates: CandidateView[];
 }
 
+// Bulk-revoke (P0.B): POST /recommendations/bulk-revoke. The endpoint always
+// returns 200; per-entry failures live in `errors[]`. With `auto_rerun=true`,
+// `rerun_results[]` carries one entry per *unique* affected item so the UI can
+// render the new candidates without a second round-trip.
+export interface BulkRevokeRequest {
+  recommendation_ids: UUID[];
+  auto_rerun?: boolean;
+}
+
+export interface BulkRevokeRevokedItem {
+  recommendation_id: UUID;
+  status: RecommendationStatus;
+}
+
+export interface BulkRevokeRerunItem {
+  item_id: UUID;
+  new_recommendation_id: UUID | null;
+  state: "success" | "failed";
+  chosen_slot_id: UUID | null;
+  candidates: CandidateView[];
+}
+
+export interface BulkRevokeError {
+  recommendation_id: UUID | null;
+  item_id: UUID | null;
+  code: "not_found" | "conflict" | "ai_error";
+  message: string;
+}
+
+export interface BulkRevokeResponse {
+  revoked: BulkRevokeRevokedItem[];
+  rerun_results: BulkRevokeRerunItem[];
+  errors: BulkRevokeError[];
+}
+
+// GET /items/{id}/recommendations?status=rejected — the row the rejected-list
+// UI consumes. Lightweight on purpose: only what the chip needs to render.
+export interface ItemRecommendationRow {
+  id: UUID;
+  item_id: UUID;
+  chosen_slot_id: UUID | null;
+  status: RecommendationStatus;
+  reason: string;
+  audit_note: string;
+  created_at: ISODateTime | null;
+}
+
+export interface ItemRecommendationsResponse {
+  recommendations: ItemRecommendationRow[];
+}
+
 // ------------------------------------------------------------- search
 
 export type SearchState =

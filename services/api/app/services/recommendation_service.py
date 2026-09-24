@@ -413,9 +413,67 @@ async def get_recommendation_view(
     }
 
 
+async def list_recommendations_for_item(
+    db: AsyncSession,
+    *,
+    home_id: uuid.UUID,
+    item_id: uuid.UUID,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    """List a recommendation subset for one item (P0.B).
+
+    Used by the item-detail page to render "已被排除的位置". Returns the
+    ``{id, chosen_slot_id, status, candidates[0].reason, candidates[0].audit_note,
+    created_at}`` subset the UI needs to show each excluded slot with its
+    reason.
+
+    ``status`` filters by ``Recommendation.status``; pass ``None`` (the default)
+    for "all statuses" — the UI never asks for that today, but the read path is
+    cheaper than a second endpoint.
+
+    Newest first; ties broken by id for determinism.
+
+    Raises:
+        NotFoundError: item missing or owned by another home.
+    """
+    # Ownership check up-front so a wrong-home item returns 404 (not an empty
+    # list, which would silently mislead the UI).
+    await _ensure_item_in_home(db, item_id, home_id)
+
+    stmt = select(Recommendation).where(Recommendation.item_id == item_id)
+    if status is not None:
+        stmt = stmt.where(Recommendation.status == status)
+    stmt = stmt.order_by(Recommendation.created_at.desc(), Recommendation.id)
+    rows = (await db.execute(stmt)).scalars().all()
+
+    out: list[dict[str, Any]] = []
+    for rec in rows:
+        first = next(
+            (c for c in (rec.candidates or []) if isinstance(c, dict)),
+            {},
+        )
+        out.append(
+            {
+                "id": str(rec.id),
+                "item_id": str(rec.item_id),
+                "chosen_slot_id": (
+                    str(rec.chosen_slot_id) if rec.chosen_slot_id else None
+                ),
+                "status": rec.status,
+                "reason": str(first.get("reason") or ""),
+                "audit_note": str(first.get("audit_note") or ""),
+                "created_at": (
+                    rec.created_at.isoformat() if rec.created_at else None
+                ),
+            }
+        )
+    return out
+
+
 __all__ = [
     "RecommendOutcome",
     "candidate_view_from_slot",
     "get_recommendation_view",
+    "list_recommendations_for_item",
     "run_recommendation",
 ]

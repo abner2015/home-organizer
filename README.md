@@ -115,7 +115,7 @@ npx tsc --noEmit && npx next lint          # 应当无输出
 | Phase 1-13 | 骨架 / DB / 上传 / Vision / 推荐 Agent / NL 搜索 / JWT / Web MVP / 评测 / 接线 / 存储后端 / 去英文 + 助手记忆 / 收纳助手「看懂家里布局」 | ✅ |
 | P0.1-0.9 | 真实账号 / 拍照即建模 / 反向录入 / 闭环讲理由 / 并发 409 / 撤销排除 / PATCH 摆放 / 成员管理 / 创建新家 | ✅ 全部完成 |
 
-基线：**后端 752 passed / 1 skipped**、ruff 32、mypy 20、tsc + next lint 干净。
+基线：**后端 765 passed / 1 skipped**、ruff 32、mypy 20、tsc + next lint 干净。
 详细里程碑 + 真实产物路径见 `docs/DEVELOPMENT_PLAN.md`。
 
 ---

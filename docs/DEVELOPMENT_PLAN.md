@@ -497,8 +497,8 @@ PG 抛 `IntegrityError` → 全局 `unhandled_handler` 兜成 **500**。前端�
 - [x] ruff 32、mypy 20 —— **零上升**
 - [x] `tsc --noEmit` + `next lint` 干净
 
-**本批不做**（仍留 ⏳）：批量撤销（一个 item 一次性撤销所有排除）；撤销即自动跑
-一次推荐（用户决定时机）；撤销原因持久化（撤销是 un-do，不是新事实）；
+**本批不做**（留 ⏳ → P0.B 收口）：**批量撤销 + 撤销即自动重跑推荐**
+（→ 已交付，见 P0.B）；撤销原因持久化（撤销是 un-do，不是新事实）；
 跨用户偏好共享；`PATCH /placements/{id}`。
 
 **落地位置**：后端 `app/{db/enums.py, models/recommendation.py, agents/placement_service.py,
@@ -871,6 +871,121 @@ cookie + `router.refresh()` 让 server component 用新 X-Home-Id 重渲染。
 - **不**做「设为默认家」（cookie 已经是默认）
 - **不**做删除家（P1+，需要 owner + cascade 思考）
 - **不**做键盘快捷键（Cmd/Ctrl+K 之类的命令面板 —— 等 P1+ 思考）
+
+---
+
+## P0.B — 批量撤销 + 同步重跑推荐 ✅ 已交付（2026-09-24）
+
+P0.6 收尾时自己的「本批不做」挂着两条 ⏳：**批量撤销**（一个 item 一次性撤销所有排除）和**撤销即自动重跑推荐**（用户决定时机）。两条都痛：物品被多 slot 拒绝后要循环点 N 次撤销，撤销完还得再点一次「再推荐一次」。
+
+修法：补 `POST /api/v1/recommendations/bulk-revoke` —— 请求带
+`recommendation_ids[]` + `auto_rerun: bool`，响应分三个区：
+`revoked[]` / `rerun_results[]` / `errors[]`。**同步重跑**：成功撤销后立即
+`await run_recommendation()` 给每件受影响物品（用户已确认走同步方案）。
+
+前端：`/items/{id}` 详情页加「已被排除的位置」区块，列出该物品的
+`rejected` 推荐；区块底部放「撤销全部排除」按钮 → 调 bulk-revoke +
+`auto_rerun=true` → 页面 `router.refresh()` 让新推荐可见。
+
+### 接口
+
+```
+POST /api/v1/recommendations/bulk-revoke
+Authorization: Bearer <token>
+X-Home-Id: <home_uuid>
+
+{
+  "recommendation_ids": ["uuid", ...],   // 1..50
+  "auto_rerun": true                     // 默认 false
+}
+
+→ 200 OK
+{
+  "revoked":         [{"recommendation_id", "status": "revoked"}, ...],
+  "rerun_results":    [{"item_id", "new_recommendation_id", "state",
+                       "chosen_slot_id", "candidates[<=3]"}, ...],
+  "errors":           [{"recommendation_id"|"item_id", "code",
+                        "message"}, ...]
+}
+```
+
+| 状态 | 含义 |
+| --- | --- |
+| **200** | 永远返 200；per-item 失败入 `errors[]` |
+| 401 | unauthenticated |
+| 422 | `recommendation_ids` 为空 / 超 50 / `extra="forbid"` 命中 |
+
+`bulk-revoke` 路径整体永远不返 4xx —— per-rec 的 not_found / conflict
+都入 `errors[]`，**包括**「rec 已被撤销」这种 conflict（避免半成功状态）。
+
+### 关键实现点
+
+- **两阶段执行**（`app/agents/placement_service.py:bulk_revoke`）：
+  Phase 1 顺序 `revoke_recommendation` 每条 rec，Phase 2 仅在
+  `auto_rerun=True` 且至少一条撤销成功时跑 `run_recommendation` 给
+  每件受影响物品。
+- **每条原子提交**：`revoke_recommendation` / `run_recommendation` 各自
+  self-commit（placement_service:401, recommendation_service:305）—— bulk 整体
+  不需额外 commit，**部分成功是正常的**：成功的撤销不会被失败的 rerun 回滚。
+- **`AIProviderError` 单捕**：rerun 阶段 provider 抛错入 `errors[].code='ai_error'`，
+  不冒到顶层 503。
+- **新读端点** `GET /api/v1/items/{item_id}/recommendations?status=`：跨 home → 404，
+  无凭证 → 401；项目惯例。
+- **新前端块**：`apps/web/src/components/items/RejectedRecsList.tsx`
+  + 物品详情页的 server-side `loadRejectedRecs` 调用。
+
+### 验收
+
+- [x] `POST /recommendations/bulk-revoke` 一次撤销 3 条 rejected rec → 200, revoked=[3], errors=[]
+- [x] `auto_rerun=true` → 同响应 `rerun_results[]` 包含每件受影响物品的新推荐
+- [x] 部分失败（not_found / conflict）→ `errors[]` 收集，**不影响**成功项
+- [x] 空数组 → 422；超 50 → 422；extra 字段 → 422
+- [x] 无凭证 → 401
+- [x] 跨 home rec → `errors[].code='not_found'`（不是顶层 404）
+- [x] pending rec → `errors[].code='conflict'`（不是顶层 409）
+- [x] `GET /items/{id}/recommendations?status=rejected` → 列表按 created_at desc
+- [x] 前端：物品页显示「已被排除的位置」+「撤销全部排除」按钮；点击 →
+      bulk-revoke + auto_rerun=true → 页面 `router.refresh()` 让新候选可见
+- [x] 基线 **752 → 765 passed / 1 skipped**（+13：4 单元 + 6 API bulk + 3 API list）
+- [x] ruff 32 / mypy 20 / tsc / next lint 干净
+
+### 本批不做
+
+- **不**做撤销即自动重跑的「异步」版本（用户已选同步；生产环境异步走
+  FastAPI BackgroundTasks，单独批次）
+- **不**做撤销历史页面（单个 rec 的 status 在 `GET /recommendations/{id}` 已经能看到）
+- **不**做「撤销全部」按物品（`bulk_revoke` 已通过 `recommendation_ids` 实现等价
+  功能 —— 客户端传同一物品的 N 条 rec 即可）
+- **不**做撤销原因持久化（撤销是 un-do，不是新事实 —— P0.6 决策）
+
+### 落地位置
+
+后端：
+
+- `app/schemas/recommendation.py` —— 新增 5 个 schema（`BulkRevokeRequest` /
+  `BulkRevokeRevokedItem` / `BulkRevokeRerunItem` / `BulkRevokeError` /
+  `BulkRevokeResponse`），`__all__` 更新
+- `app/agents/placement_service.py` —— 新增 `BulkRevokeOutcome` dataclass +
+  `bulk_revoke()` 两阶段函数 + TYPE_CHECKING import 防循环依赖
+- `app/services/recommendation_service.py` —— 新增 `list_recommendations_for_item()`
+- `app/api/v1/recommendations.py` —— 新增 `bulk_revoke_endpoint` 路由
+- `app/api/v1/items.py` —— 新增 `list_item_recommendations` 路由（`?status=` query）
+
+前端：
+
+- `apps/web/src/lib/types.ts` —— `BulkRevokeRequest/Response/RevokedItem/RerunItem/Error` +
+  `ItemRecommendationRow` / `ItemRecommendationsResponse`
+- `apps/web/src/lib/api.ts` —— `bulkRevokeRecommendations` + `listItemRecommendations`
+- `apps/web/src/components/items/RejectedRecsList.tsx` —— 新客户端组件，列出 rejected
+  recs + 「撤销全部排除（n）并重跑推荐」按钮
+- `apps/web/src/app/items/[id]/page.tsx` —— server component fetch rejected_recs +
+  slot_paths map，传给 `RejectedRecsList` 客户端组件
+
+测试：
+
+- `tests/unit/test_placement_service.py` —— 4 条 `bulk_revoke` 单元测试
+- `tests/api/test_recommendation_api.py` —— 6 条 `bulk_revoke` API 测试
+- `tests/api/test_items_read_api.py` —— 3 条 `list_item_recommendations` API 测试
 
 ---
 

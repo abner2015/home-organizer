@@ -7,9 +7,10 @@ import { ErrorState } from "@/components/States";
 import { PlaceItemButton } from "@/components/placements/PlaceItemButton";
 import { RemovePlacementButton } from "@/components/placements/RemovePlacementButton";
 import { EditPlacementNote } from "@/components/placements/EditPlacementNote";
+import { RejectedRecsList } from "@/components/items/RejectedRecsList";
 import { formatDateTime, formatSlotPath, formatCategory, formatSize } from "@/lib/format";
 import type { ApiSession } from "@/lib/api";
-import type { Item, ItemPlacement } from "@/lib/types";
+import type { Item, ItemPlacement, ItemRecommendationRow, StorageSlot } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +35,38 @@ async function loadItem(id: string): Promise<DetailData> {
   }
 }
 
+// Build a `slot_id → "room / unit / section / label"` lookup so the rejected
+// list can show a friendly path next to every entry. Cheap: at most ~hundreds
+// of slots per home, walked once per page render.
+async function loadSlotPaths(session: ApiSession): Promise<Record<string, string>> {
+  try {
+    const slots: StorageSlot[] = await api.listAllSlots(session);
+    const out: Record<string, string> = {};
+    for (const s of slots) {
+      const label = s.label || s.code || "—";
+      out[s.id] = label;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+async function loadRejectedRecs(
+  session: ApiSession,
+  itemId: string,
+): Promise<ItemRecommendationRow[]> {
+  try {
+    const res = await api.listItemRecommendations(itemId, session, "rejected");
+    return res.recommendations;
+  } catch (err) {
+    // The block is "nice to have" — a 404 (item missing) or 500 shouldn't
+    // blow up the whole page.
+    console.error("rejected recs load failed", err);
+    return [];
+  }
+}
+
 export default async function ItemDetail({ params }: { params: { id: string } }) {
   const data = await loadItem(params.id);
   if (data.error && !data.item) {
@@ -55,6 +88,10 @@ export default async function ItemDetail({ params }: { params: { id: string } })
   const activePlacement = data.placements.find((p) => p.removed_at === null) ?? null;
   const activeId = activePlacement?.id ?? null;
   const activeNote = activePlacement?.note ?? null;
+  const [slotPaths, rejectedRecs] = await Promise.all([
+    loadSlotPaths(data.session),
+    loadRejectedRecs(data.session, item.id),
+  ]);
   return (
     <div className="space-y-6">
       <PageHeader
@@ -142,6 +179,22 @@ export default async function ItemDetail({ params }: { params: { id: string } })
           </div>
         </div>
       </div>
+
+      {rejectedRecs.length > 0 ? (
+        <section className="card p-5">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-400">
+            已被排除的位置
+          </h2>
+          <div className="mt-3">
+            <RejectedRecsList
+              itemId={item.id}
+              session={data.session}
+              rejected={rejectedRecs}
+              slotPaths={slotPaths}
+            />
+          </div>
+        </section>
+      ) : null}
 
       <section className="card p-5">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-400">摆放历史</h2>

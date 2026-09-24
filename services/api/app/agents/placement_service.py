@@ -35,11 +35,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.errors import AIProviderError
+from app.ai.provider import AIProvider
 from app.core.exceptions import ConflictError, NotFoundError, ValidationFailedError
 from app.db.base import utc_now
 from app.db.enums import PlacementSource, RecommendationStatus
@@ -49,6 +51,9 @@ from app.tools.write_tools import (
     _ensure_slot_in_home,
     record_preferred_slot,
 )
+
+if TYPE_CHECKING:
+    from app.services.recommendation_service import RecommendOutcome
 
 # --------------------------------------------------------------------------- value objects
 
@@ -81,6 +86,23 @@ class RevokeOutcome:
     """Return shape of :func:`revoke_recommendation`."""
 
     recommendation: Recommendation
+
+
+@dataclass(slots=True)
+class BulkRevokeOutcome:
+    """Return shape of :func:`bulk_revoke`.
+
+    ``revoked`` is the list of :class:`Recommendation` rows that flipped from
+    ``rejected`` to ``revoked`` in this call. ``rerun_results`` is a list of
+    ``{item_id, outcome}`` tuples — one entry per *unique affected item* — only
+    populated when ``auto_rerun=True`` and at least one revoke succeeded.
+    ``errors`` collects per-entry failures so the route can return them inside
+    a single 200 envelope.
+    """
+
+    revoked: list[Recommendation]
+    rerun_results: list[tuple[uuid.UUID, RecommendOutcome | None, str | None]]
+    errors: list[dict[str, Any]]
 
 
 # --------------------------------------------------------------------------- sentinels
@@ -581,12 +603,132 @@ def _recommendation_to_dict(rec: Recommendation) -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------- bulk-revoke (P0.B)
+
+
+async def bulk_revoke(
+    db: AsyncSession,
+    *,
+    home_id: uuid.UUID,
+    user_id: uuid.UUID,
+    recommendation_ids: list[uuid.UUID],
+    auto_rerun: bool,
+    provider: AIProvider,
+) -> BulkRevokeOutcome:
+    """Bulk un-do of a batch of ``rejected`` recommendations (P0.B).
+
+    Two phases, both best-effort:
+
+    1. **Revoke** — for every id in ``recommendation_ids`` call
+       :func:`revoke_recommendation`. ``NotFoundError`` / ``ConflictError`` are
+       caught and collected into ``errors[]``; ``rejected`` rows flip to
+       ``revoked`` and end up in ``revoked[]``.
+    2. **Rerun** — only when ``auto_rerun=True`` AND at least one revoke
+       succeeded. For every **unique** ``item_id`` in the revoked set, run
+       :func:`app.services.recommendation_service.run_recommendation`. The
+       ``provider`` is injected so tests can swap a mock.
+
+    Each call to ``revoke_recommendation`` and ``run_recommendation`` self-commits,
+    so partial success is fine: a failed rerun never rolls back a successful
+    revoke. ``NotFoundError`` during rerun is also a known partial-failure case
+    (item was deleted between revoke and rerun) and lands in ``errors[]``.
+
+    Always returns — never raises for per-item failures.
+    """
+    # Local import to keep this module's import graph from pulling in the
+    # agent + provider chain when the route is only importing value objects.
+    from app.services.recommendation_service import run_recommendation
+
+    revoked: list[Recommendation] = []
+    errors: list[dict[str, Any]] = []
+    affected_items: set[uuid.UUID] = set()
+
+    # -- Phase 1: revoke each id --
+    for rec_id in recommendation_ids:
+        try:
+            outcome = await revoke_recommendation(
+                db, recommendation_id=rec_id, home_id=home_id
+            )
+        except NotFoundError as e:
+            errors.append(
+                {
+                    "recommendation_id": str(rec_id),
+                    "code": "not_found",
+                    "message": str(e),
+                }
+            )
+            continue
+        except ConflictError as e:
+            errors.append(
+                {
+                    "recommendation_id": str(rec_id),
+                    "code": "conflict",
+                    "message": str(e),
+                }
+            )
+            continue
+        revoked.append(outcome.recommendation)
+        affected_items.add(outcome.recommendation.item_id)
+
+    # -- Phase 2: rerun for every affected item, when asked --
+    rerun_results: list[tuple[uuid.UUID, Any, str | None]] = []
+    if auto_rerun and affected_items:
+        for item_id in sorted(affected_items):
+            try:
+                rerun = await run_recommendation(
+                    db,
+                    provider=provider,
+                    home_id=home_id,
+                    user_id=user_id,
+                    item_id=item_id,
+                )
+            except NotFoundError as e:
+                errors.append(
+                    {
+                        "item_id": str(item_id),
+                        "code": "not_found",
+                        "message": str(e),
+                    }
+                )
+                rerun_results.append((item_id, None, "not_found"))
+                continue
+            except AIProviderError as e:
+                errors.append(
+                    {
+                        "item_id": str(item_id),
+                        "code": "ai_error",
+                        "message": str(e),
+                    }
+                )
+                rerun_results.append((item_id, None, "ai_error"))
+                continue
+            except Exception as e:  # pragma: no cover - defensive last line
+                errors.append(
+                    {
+                        "item_id": str(item_id),
+                        "code": "ai_error",
+                        "message": str(e),
+                    }
+                )
+                rerun_results.append((item_id, None, "ai_error"))
+                continue
+            rerun_results.append((item_id, rerun, None))
+
+    return BulkRevokeOutcome(
+        revoked=revoked,
+        rerun_results=rerun_results,
+        errors=errors,
+    )
+
+
 __all__ = [
     "AcceptOutcome",
+    "BulkRevokeOutcome",
     "PatchOutcome",
     "RejectOutcome",
     "RevokeOutcome",
     "accept_recommendation",
+    "bulk_revoke",
     "get_recommendation_dict",
     "patch_recommendation",
     "place_item",

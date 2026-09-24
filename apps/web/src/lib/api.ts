@@ -14,6 +14,8 @@ import type {
   AcceptResponse,
   AssetRecognizeResponse,
   AssetUploadResponse,
+  BulkRevokeRequest,
+  BulkRevokeResponse,
   CandidateListResponse,
   Home,
   HomeCreateBody,
@@ -23,6 +25,7 @@ import type {
   Item,
   ItemCreateBody,
   ItemPlacement,
+  ItemRecommendationsResponse,
   ItemUpsertBody,
   ItemVisionResponse,
   LoginBody,
@@ -535,6 +538,38 @@ export const api = {
     return request<CandidateListResponse>(`/api/v1/items/${itemId}/candidates`, {
       method: "GET",
       session,
+    });
+  },
+
+  // P0.B — read the rejected-recs list for an item so the detail page can
+  // render a "已被排除的位置" block. `status` is the optional filter
+  // (omit / 'rejected' / 'revoked' / …); new endpoint mirrors
+  // GET /api/v1/items/{id}/recommendations.
+  async listItemRecommendations(
+    itemId: UUID,
+    session: ApiSession,
+    status?: string,
+  ): Promise<ItemRecommendationsResponse> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    return request<ItemRecommendationsResponse>(
+      `/api/v1/items/${itemId}/recommendations${qs}`,
+      { method: "GET", session },
+    );
+  },
+
+  // P0.B — bulk un-do of a batch of `rejected` recommendations. The single
+  // round-trip returns 200 with three arrays (revoked / rerun_results /
+  // errors); when `autoRerun=true` the route re-ran the recommendation
+  // pipeline synchronously and the new candidates ride along in
+  // `rerun_results[]`.
+  async bulkRevokeRecommendations(
+    body: BulkRevokeRequest,
+    session: ApiSession,
+  ): Promise<BulkRevokeResponse> {
+    return request<BulkRevokeResponse>("/api/v1/recommendations/bulk-revoke", {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
     });
   },
 

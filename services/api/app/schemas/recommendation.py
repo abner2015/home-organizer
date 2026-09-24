@@ -1,11 +1,12 @@
 """Pydantic schemas for the recommendation API (Phase 5).
 
-Five endpoints:
+Six endpoints:
 
 - POST /api/v1/recommendations/items/{item_id}/recommend  → RecommendResponse
 - POST /api/v1/recommendations/{rec_id}/accept             → AcceptResponse
 - POST /api/v1/recommendations/{rec_id}/reject             → RejectResponse
 - POST /api/v1/recommendations/{rec_id}/revoke             → RevokeResponse
+- POST /api/v1/recommendations/bulk-revoke                → BulkRevokeResponse
 - PATCH /api/v1/recommendations/{rec_id}                   → PatchResponse
 """
 from __future__ import annotations
@@ -142,6 +143,108 @@ class RejectResponse(BaseModel):
     note: str | None = None
 
 
+# --------------------------------------------------------------------------- bulk-revoke (P0.B)
+
+
+class BulkRevokeRequest(BaseModel):
+    """Request body for ``POST /recommendations/bulk-revoke``.
+
+    Bulk-revoke un-does a batch of ``rejected`` recommendations in one round-trip
+    and, when ``auto_rerun=True``, immediately re-runs the recommendation pipeline
+    for every affected item so the user sees fresh candidates without a second
+    click.
+
+    Hard cap at 50 IDs keeps the request cheap enough for an online UI round-trip
+    — if a user somehow accumulated more rejected recs than that, the front-end
+    can page its own list and call this endpoint twice.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    recommendation_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=50)
+    auto_rerun: bool = False
+
+
+class BulkRevokeRevokedItem(BaseModel):
+    """One successfully-revoked recommendation. ``status`` is always ``'revoked'``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recommendation_id: uuid.UUID
+    status: str = Field(description="Always 'revoked' on success.")
+
+
+class BulkRevokeRerunItem(BaseModel):
+    """Per-item outcome of an auto-rerun triggered by bulk-revoke.
+
+    Mirrors the top-level fields of ``RecommendResponse`` so the UI can render the
+    new candidates without a second GET. ``new_recommendation_id`` is ``None`` and
+    ``state='failed'`` when the rerun pipeline returned no safe candidate.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: uuid.UUID
+    new_recommendation_id: uuid.UUID | None = Field(
+        default=None,
+        description="None when the rerun pipeline ended in FAILED.",
+    )
+    state: str = Field(description="'success' or 'failed'.")
+    chosen_slot_id: uuid.UUID | None = Field(
+        default=None,
+        description="None when state='failed'.",
+    )
+    candidates: list[CandidateView] = Field(
+        min_length=0, max_length=3,
+        description="Top-3 candidates from the rerun; empty when failed.",
+    )
+
+
+class BulkRevokeError(BaseModel):
+    """One failed entry inside a bulk-revoke response.
+
+    Exactly one of ``recommendation_id`` (revoke-side failure) or ``item_id``
+    (rerun-side failure) is set, never both — this keeps the error stream
+    unambiguous to the UI's per-row rendering.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    recommendation_id: uuid.UUID | None = Field(
+        default=None,
+        description="Set when the failure happened during the revoke phase.",
+    )
+    item_id: uuid.UUID | None = Field(
+        default=None,
+        description="Set when the failure happened during the auto-rerun phase.",
+    )
+    code: str = Field(
+        description="'not_found' | 'conflict' | 'ai_error' — stable for client branching.",
+    )
+    message: str
+
+
+class BulkRevokeResponse(BaseModel):
+    """Response body for ``POST /recommendations/bulk-revoke``.
+
+    The endpoint always returns 200; per-entry failures are reported inside
+    ``errors[]``. This keeps the front-end from needing to handle a half-success
+    top-level 4xx — it always reads three arrays and renders each.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    revoked: list[BulkRevokeRevokedItem] = Field(
+        description="Successfully-revoked recommendations.",
+    )
+    rerun_results: list[BulkRevokeRerunItem] = Field(
+        description="One entry per affected item when auto_rerun=True; empty otherwise.",
+    )
+    errors: list[BulkRevokeError] = Field(
+        description="Per-entry failures; empty when everything succeeded.",
+    )
+
+
 # --------------------------------------------------------------------------- patch
 
 
@@ -196,6 +299,11 @@ class RevokeResponse(BaseModel):
 __all__ = [
     "AcceptRequest",
     "AcceptResponse",
+    "BulkRevokeError",
+    "BulkRevokeRequest",
+    "BulkRevokeRerunItem",
+    "BulkRevokeResponse",
+    "BulkRevokeRevokedItem",
     "CandidateView",
     "PatchRequest",
     "PatchResponse",
