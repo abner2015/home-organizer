@@ -378,6 +378,13 @@ async def record_preferred_slot(
     ranker only boosts the slot for *similar* items: accepting a slot for a mug
     should not push medicine into the same drawer.
 
+    Per P1.1: the entry also carries ``is_personal`` (set from the item's
+    ``is_sensitive`` flag) so sensitive items (medicine, lock-worthy things)
+    stay personal to the actor who placed them. The ranker's
+    :func:`app.agents.ranking._is_pref_visible_to` honours that flag and skips
+    the entry for other home members. Legacy entries written before this
+    field existed have no ``is_personal`` key and are treated as shared.
+
     Flush-level only; the caller owns the commit, so the accept path keeps
     placement + status flip + preference in one transaction.
 
@@ -386,9 +393,17 @@ async def record_preferred_slot(
     (the test DB) enforces it just like Postgres and a second insert for the
     same (user, home, key) would raise ``IntegrityError``.
     """
-    category = (
-        await db.execute(select(Item.category).where(Item.id == item_id))
-    ).scalar_one_or_none()
+    row = (
+        await db.execute(
+            select(Item.category, Item.is_sensitive).where(Item.id == item_id)
+        )
+    ).one_or_none()
+    category: str | None
+    is_sensitive: bool
+    if row is None:
+        category, is_sensitive = None, False
+    else:
+        category, is_sensitive = row
 
     pref = (
         await db.execute(
@@ -403,6 +418,7 @@ async def record_preferred_slot(
     entry: dict[str, object] = {
         "category": (category or "").strip().lower(),
         "count": 1,
+        "is_personal": bool(is_sensitive),
     }
     if pref is None:
         created: dict[str, object] = {"slots": {str(slot_id): entry}}

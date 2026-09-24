@@ -210,7 +210,7 @@ class RecommendationAgent:
             ctx.tools.get_home(home_id=ctx.home_id),
             ctx.tools.get_rooms(home_id=ctx.home_id),
             ctx.tools.get_storage_slots(home_id=ctx.home_id),
-            ctx.tools.get_user_preferences(home_id=ctx.home_id, user_id=ctx.user_id),
+            ctx.tools.get_user_preferences(home_id=ctx.home_id),
             ctx.tools.get_home_rules(home_id=ctx.home_id),
             ctx.tools.get_item_placements(home_id=ctx.home_id, item_id=ctx.item_id),
         )
@@ -289,6 +289,7 @@ class RecommendationAgent:
             preferences=ctx.preferences,
             history=ctx.history,
             soft_rules=soft_rules,
+            actor_user_id=ctx.user_id,
             limit=20,
         )
         ctx.ranked_candidates = ranked

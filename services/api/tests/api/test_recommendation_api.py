@@ -612,6 +612,253 @@ async def test_accepting_boosts_the_slot_for_a_same_category_item(
     assert without_pref[str(l1s2)] == without_pref[str(l1s1)]
 
 
+# --------------------------------------------- cross-user preference sharing (P1.1)
+
+
+async def _seeded_roommate(
+    db_engine, *, home_id: uuid.UUID, email: str | None = None
+) -> dict[str, str]:
+    """Insert a second user + HomeMembership, return ready-to-use auth headers.
+
+    Mirrors ``tests/api/test_home_members_api._make_user`` but bundles the
+    JWT signing + ``X-Home-Id`` so a recommendation test can speak for the
+    roommate end-to-end.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.models import HomeMembership
+    from app.models import User as UserModel
+    from app.services.security import create_access_token
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    user_id = uuid.uuid4()
+    email = email or f"mate-{user_id.hex}@example.com"
+    async with factory() as session:
+        session.add(
+            UserModel(
+                id=user_id,
+                email=email,
+                password_hash="x",
+                display_name="Roommate",
+            )
+        )
+        await session.flush()
+        session.add(
+            HomeMembership(home_id=home_id, user_id=user_id, role="member")
+        )
+        await session.commit()
+    return {
+        "Authorization": f"Bearer {create_access_token(user_id)}",
+        "X-Home-Id": str(home_id),
+    }
+
+
+async def test_roommates_accept_boosts_other_users_recommendation(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """P1.1: roommate A's accept for a non-sensitive item category must boost
+    roommate B's recommend in the same home."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.models import Item
+
+    l1s1 = storage_hierarchy.slots["L1S1"]
+    l1s2 = storage_hierarchy.slots["L1S2"]
+    cup_id = storage_hierarchy.items["马克杯"]
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    # A different utensil item so the roommate's recommend is not affected
+    # by A's history signal on the cup.
+    async with factory() as session:
+        other = Item(
+            id=uuid.uuid4(),
+            home_id=seeded_actor.home_id,
+            name="备用盘",
+            category="utensil",
+            estimated_size="small",
+            created_by=seeded_actor.user_id,
+        )
+        session.add(other)
+        await session.commit()
+        other_id = other.id
+
+    # Seeded actor (A) accepts L1S2 for the cup.
+    _override_provider(MockAIProvider(ranking_response=_cup_payload(str(l1s2))))
+    rec_id = _recommend(api_client, seeded_actor, cup_id)
+    accept = api_client.post(
+        f"/api/v1/recommendations/{rec_id}/accept",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    assert accept.status_code == 200, accept.text
+
+    # Add a roommate + give them the same X-Home-Id.
+    mate_headers = await _seeded_roommate(db_engine, home_id=seeded_actor.home_id)
+
+    _override_provider(MockAIProvider(ranking_response=_cup_payload(str(l1s1))))
+    with_mate = api_client.post(
+        f"/api/v1/recommendations/items/{other_id}/recommend",
+        json={},
+        headers=mate_headers,
+    )
+    assert with_mate.status_code == 200, with_mate.text
+    with_mate_scores = {
+        c["slot_id"]: int(c["score"]) for c in with_mate.json()["candidates"]
+    }
+
+    # Drop the pref; same call shouldn't see the boost anymore.
+    from sqlalchemy import delete
+
+    from app.models.preference import UserPreference
+
+    async with factory() as session:
+        await session.execute(delete(UserPreference))
+        await session.commit()
+
+    without_mate = api_client.post(
+        f"/api/v1/recommendations/items/{other_id}/recommend",
+        json={},
+        headers=mate_headers,
+    )
+    assert without_mate.status_code == 200, without_mate.text
+    without_mate_scores = {
+        c["slot_id"]: int(c["score"]) for c in without_mate.json()["candidates"]
+    }
+
+    # Roommate sees exactly +10 on L1S2 — same delta as the seeded actor sees.
+    # The relative ordering vs L1S1 isn't asserted because capacity_fit swings
+    # once A's accept places the cup in L1S2 (it's now occupied).
+    assert with_mate_scores[str(l1s2)] - without_mate_scores[str(l1s2)] == 10
+
+
+async def test_sensitive_accept_does_not_leak_to_other_home_member(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """P1.1: a sensitive (is_sensitive=True) accept is tagged ``is_personal``
+    and must NOT influence the roommate's ranker — even in the same home."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.models import Item
+
+    d1 = storage_hierarchy.slots["D1"]
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async with factory() as session:
+        medicine = Item(
+            id=uuid.uuid4(),
+            home_id=seeded_actor.home_id,
+            name="备用处方药",
+            category="medicine",
+            is_sensitive=True,
+            needs_lock=True,
+            estimated_size="small",
+            created_by=seeded_actor.user_id,
+        )
+        session.add(medicine)
+        await session.commit()
+        medicine_id = medicine.id
+
+    # Seeded actor (A) places the medicine into D1 (the locked drawer).
+    # ``place_item`` is the same primitive the recommend-accept path uses,
+    # and writes a category-scoped + is_personal=True pref.
+    from app.tools.write_tools import save_placement
+
+    async with factory() as session:
+        await save_placement(
+            db=session,
+            home_id=seeded_actor.home_id,
+            user_id=seeded_actor.user_id,
+            item_id=medicine_id,
+            slot_id=d1,
+        )
+
+    # Roommate asks for a *different* medicine — gets D1 scored baseline
+    # only (no cross-user leak for sensitive items).
+    async with factory() as session:
+        other = Item(
+            id=uuid.uuid4(),
+            home_id=seeded_actor.home_id,
+            name="另一份处方药",
+            category="medicine",
+            is_sensitive=True,
+            needs_lock=True,
+            estimated_size="small",
+            created_by=seeded_actor.user_id,
+        )
+        session.add(other)
+        await session.commit()
+        other_id = other.id
+
+    mate_headers = await _seeded_roommate(db_engine, home_id=seeded_actor.home_id)
+
+    _override_provider(MockAIProvider(ranking_response=_cup_payload(str(d1))))
+    with_pref = api_client.post(
+        f"/api/v1/recommendations/items/{other_id}/recommend",
+        json={},
+        headers=mate_headers,
+    )
+    assert with_pref.status_code == 200, with_pref.text
+    with_pref_scores = {
+        c["slot_id"]: int(c["score"]) for c in with_pref.json()["candidates"]
+    }
+
+    # Drop the pref; same roommate call should not change the score on D1
+    # (their pref is hidden, so dropping it shouldn't shift things).
+    from sqlalchemy import delete
+
+    from app.models.preference import UserPreference
+
+    async with factory() as session:
+        await session.execute(delete(UserPreference))
+        await session.commit()
+
+    without_pref = api_client.post(
+        f"/api/v1/recommendations/items/{other_id}/recommend",
+        json={},
+        headers=mate_headers,
+    )
+    assert without_pref.status_code == 200, without_pref.text
+    without_pref_scores = {
+        c["slot_id"]: int(c["score"]) for c in without_pref.json()["candidates"]
+    }
+
+    # No leak: the roommate's score on D1 is identical with and without
+    # the pref — sensitive prefs are invisible to non-owners.
+    assert with_pref_scores[str(d1)] == without_pref_scores[str(d1)]
+
+
+async def test_accept_does_not_leak_across_homes(
+    api_client: TestClient, seeded_actor, storage_hierarchy, db_engine
+) -> None:
+    """P1.1: prefs are scoped by home — a user in *another* home cannot pick
+    up the seeded actor's accept signal even though preferences are now
+    home-scoped (would-be cross-user sharing must not break home isolation)."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    l1s2 = storage_hierarchy.slots["L1S2"]
+
+    # Seeded actor accepts L1S2 for the cup.
+    _override_provider(MockAIProvider(ranking_response=_cup_payload(str(l1s2))))
+    rec_id = _recommend(api_client, seeded_actor, cup_id)
+    accept = api_client.post(
+        f"/api/v1/recommendations/{rec_id}/accept",
+        json={},
+        headers=seeded_actor.headers(),
+    )
+    assert accept.status_code == 200, accept.text
+
+    # A brand-new user from a brand-new home tries to recommend the cup.
+    # They own the cup? No — the cup belongs to seeded_actor's home. So
+    # the response must 404 (cross-home), not 200 with the pref-boosted
+    # candidates.
+    other_headers = await _seeded_roommate(db_engine, home_id=uuid.uuid4())
+    resp = api_client.post(
+        f"/api/v1/recommendations/items/{cup_id}/recommend",
+        json={},
+        headers=other_headers,
+    )
+    assert resp.status_code == 404, resp.text
+
+
 # ---------------------------------------------------------------------- revoke
 
 

@@ -27,7 +27,7 @@ home-organizer/
 │   └── api/               # FastAPI 后端（核心实现都在这里）
 │       ├── app/           # 业务代码
 │       ├── alembic/       # DB 迁移
-│       ├── tests/         # pytest 全套（776 passed / 1 skipped）
+│       ├── tests/         # pytest 全套（784 passed / 1 skipped）
 │       └── README.md      # 后端详尽文档
 │
 ├── docs/                  # 设计文档
@@ -97,7 +97,7 @@ npm run dev          # http://localhost:3000
 ```bash
 # 后端
 cd services/api && source .venv/bin/activate
-python -m pytest tests/ --no-header -q     # 基线 776 passed / 1 skipped
+python -m pytest tests/ --no-header -q     # 基线 784 passed / 1 skipped
 
 # 前端
 cd apps/web
@@ -108,14 +108,15 @@ npx tsc --noEmit && npx next lint          # 应当无输出
 
 ---
 
-## 项目当前状态（2026-09-23）
+## 项目当前状态（2026-09-24）
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | Phase 1-13 | 骨架 / DB / 上传 / Vision / 推荐 Agent / NL 搜索 / JWT / Web MVP / 评测 / 接线 / 存储后端 / 去英文 + 助手记忆 / 收纳助手「看懂家里布局」 | ✅ |
 | P0.1-0.9, P0.A-C | 真实账号 / 拍照即建模 / 反向录入 / 闭环讲理由 / 并发 409 / 撤销排除 / PATCH 摆放 / 成员管理 / 创建新家 / 切换家 UI / 批量撤销 + 同步重跑推荐 / 结构详情路由 + 详情页 | ✅ 全部完成 |
+| P1.1 | 跨用户偏好共享 —— 普通物品偏好以家为单位共享；敏感物品偏好（药品 / 贵重）永远个人 | ✅ |
 
-基线：**后端 776 passed / 1 skipped**、ruff 32、mypy 20、tsc + next lint 干净。
+基线：**后端 784 passed / 1 skipped**、ruff 32、mypy 20、tsc + next lint 干净。
 详细里程碑 + 真实产物路径见 `docs/DEVELOPMENT_PLAN.md`。
 
 ---

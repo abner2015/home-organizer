@@ -9,6 +9,7 @@ deterministic tie-break §4.4 demands.
 """
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from app.agents.ranking import (
@@ -231,3 +232,118 @@ def test_every_ranked_row_carries_a_chinese_reason() -> None:
         assert row["reason"]
         assert "空气炸锅" in row["reason"]
         assert not any("A" <= ch <= "z" for ch in row["reason"])
+
+
+# ----------------------------------------------- cross-user preferences (P1.1)
+
+
+def _owned_pref(
+    slot_id: str,
+    category: str,
+    owner_id: uuid.UUID,
+    *,
+    is_personal: bool | None = None,
+) -> dict[str, Any]:
+    """A preference dict that carries the owner + an optional is_personal flag.
+
+    Pass ``is_personal=None`` (default) to simulate a legacy entry that has no
+    ``is_personal`` key at all; the ranker must treat that as shared.
+    """
+    entry: dict[str, Any] = {"category": category, "count": 1}
+    if is_personal is not None:
+        entry["is_personal"] = is_personal
+    return {
+        "user_id": str(owner_id),
+        "value": {"slots": {slot_id: entry}},
+    }
+
+
+def test_non_sensitive_pref_from_another_user_boosts_the_actor() -> None:
+    """P1.1: roommate's accept for a non-sensitive item is shared."""
+    item = _item("utensil")
+    slot = _slot(room_type="kitchen", path="厨房/吊柜/第1层/S-1", slot_id="a")
+    roommate = uuid.uuid4()
+    me = uuid.uuid4()
+    pref = _owned_pref("a", "utensil", roommate, is_personal=False)
+    boosted = deterministic_score(
+        slot,
+        item=item,
+        preferences=[pref],
+        history=[],
+        soft_rules=[],
+        actor_user_id=me,
+    )
+    baseline = deterministic_score(
+        slot, item=item, preferences=[], history=[], soft_rules=[],
+        actor_user_id=me,
+    )
+    assert boosted - baseline == 10
+
+
+def test_personal_pref_is_hidden_from_a_different_user() -> None:
+    """P1.1: sensitive (is_personal=True) pref only influences the owner."""
+    item = _item("medicine")
+    slot = _slot(room_type="bedroom", path="主卧/床头柜/抽屉/S-1", slot_id="a")
+    owner = uuid.uuid4()
+    intruder = uuid.uuid4()
+    pref = _owned_pref("a", "medicine", owner, is_personal=True)
+    intruder_view = deterministic_score(
+        slot,
+        item=item,
+        preferences=[pref],
+        history=[],
+        soft_rules=[],
+        actor_user_id=intruder,
+    )
+    baseline = deterministic_score(
+        slot,
+        item=item,
+        preferences=[],
+        history=[],
+        soft_rules=[],
+        actor_user_id=intruder,
+    )
+    assert intruder_view == baseline
+
+
+def test_personal_pref_remains_visible_to_its_owner() -> None:
+    """P1.1: the actor must still see their own sensitive pref (+10)."""
+    item = _item("medicine")
+    slot = _slot(room_type="bedroom", path="主卧/床头柜/抽屉/S-1", slot_id="a")
+    me = uuid.uuid4()
+    pref = _owned_pref("a", "medicine", me, is_personal=True)
+    own_score = deterministic_score(
+        slot,
+        item=item,
+        preferences=[pref],
+        history=[],
+        soft_rules=[],
+        actor_user_id=me,
+    )
+    baseline = deterministic_score(
+        slot, item=item, preferences=[], history=[], soft_rules=[],
+        actor_user_id=me,
+    )
+    assert own_score - baseline == 10
+
+
+def test_legacy_pref_without_is_personal_is_treated_as_shared() -> None:
+    """P1.1: entries written before this field was added must still boost."""
+    item = _item("utensil")
+    slot = _slot(room_type="kitchen", path="厨房/吊柜/第1层/S-1", slot_id="a")
+    roommate = uuid.uuid4()
+    me = uuid.uuid4()
+    pref = _owned_pref("a", "utensil", roommate, is_personal=None)
+    boosted = deterministic_score(
+        slot,
+        item=item,
+        preferences=[pref],
+        history=[],
+        soft_rules=[],
+        actor_user_id=me,
+    )
+    baseline = deterministic_score(
+        slot, item=item, preferences=[], history=[], soft_rules=[],
+        actor_user_id=me,
+    )
+    assert boosted - baseline == 10

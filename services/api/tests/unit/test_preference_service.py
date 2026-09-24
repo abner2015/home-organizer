@@ -138,3 +138,69 @@ async def test_item_without_a_category_stores_an_empty_one(
         ] == ""
     finally:
         await session.close()
+
+
+async def test_sensitive_item_stores_is_personal_true(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """P1.1: an ``is_sensitive=True`` accept must tag the pref as personal so
+    other home members' rankers skip it."""
+    session = _factory(db_engine)()
+    try:
+        item = Item(
+            id=uuid.uuid4(),
+            home_id=seeded_actor.home_id,
+            name="处方药",
+            category="药品",
+            is_sensitive=True,
+            created_by=seeded_actor.user_id,
+        )
+        session.add(item)
+        await session.flush()
+        await record_preferred_slot(
+            db=session,
+            user_id=seeded_actor.user_id,
+            home_id=seeded_actor.home_id,
+            item_id=item.id,
+            slot_id=storage_hierarchy.slots["D1"],
+        )
+        await session.commit()
+        rows = await _rows(session)
+        entry = rows[0].value["slots"][str(storage_hierarchy.slots["D1"])]
+        assert entry["category"] == "药品"
+        assert entry["is_personal"] is True
+    finally:
+        await session.close()
+
+
+async def test_non_sensitive_item_stores_is_personal_false(
+    seeded_actor, db_engine, storage_hierarchy
+) -> None:
+    """P1.1: a plain accept stamps ``is_personal=False`` so the ranker can
+    distinguish it from sensitive ones (``is_personal`` key still present
+    so legacy data and new data behave identically)."""
+    session = _factory(db_engine)()
+    try:
+        item = Item(
+            id=uuid.uuid4(),
+            home_id=seeded_actor.home_id,
+            name="马克杯",
+            category="餐具",
+            is_sensitive=False,
+            created_by=seeded_actor.user_id,
+        )
+        session.add(item)
+        await session.flush()
+        await record_preferred_slot(
+            db=session,
+            user_id=seeded_actor.user_id,
+            home_id=seeded_actor.home_id,
+            item_id=item.id,
+            slot_id=storage_hierarchy.slots["L1S1"],
+        )
+        await session.commit()
+        rows = await _rows(session)
+        entry = rows[0].value["slots"][str(storage_hierarchy.slots["L1S1"])]
+        assert entry["is_personal"] is False
+    finally:
+        await session.close()

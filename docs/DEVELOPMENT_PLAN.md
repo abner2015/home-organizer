@@ -6,8 +6,8 @@
 >   真实产物路径、真实验收结论、真实基线。已完成的部分不再有「任务」，只有事实。
 > - **下篇 · P0 路线图**（P0.0–P0.4）：唯一还在推进的计划。每个 P0.x 都带交付物与验收标准。
 >
-> 最后更新：2026-09-23 —— P0.9 创建新家（POST /homes）交付；**P0 九个批次全部完成**；基线 626 → 669 → 671 → 683 → 708 → 739 → **752**。
-> （2026-09-23 补：**P0.A 切换家 UI** 交付，仅前端 0 后端改动；基线不变 752。）
+> 最后更新：2026-09-24 —— P0 全部 11 批次 + P1.1 跨用户偏好共享交付；基线 765 → **776 → 784**。
+> （2026-09-24 补：**P0.C 结构详情路由 + 详情页** 交付，**+P1.1 跨用户偏好共享**，基线 776 → 784。）
 >
 > 背景：本文件原稿写于**开工前**。开工后实际走出来的顺序与原稿并不一致，于是原稿里出现了
 > Phase 9、Phase 10 各两份（旧副本与新副本交织），路径也停留在 `apps/api/`。本次一并归位。
@@ -51,7 +51,7 @@
 
 **当前基线**（任何改动都不得使其上升/下降）：
 
-- `services/api`：**752 passed / 1 skipped**
+- `services/api`：**784 passed / 1 skipped**
 - `ruff check app/ tests/`：**32**（历史遗留，不得上升）
 - `mypy app/`：**20**（历史遗留，不得上升）
 - `apps/web`：`npx tsc --noEmit` 与 `npx next lint` **干净**
@@ -1136,6 +1136,148 @@ apps/web/src/app/home/storage/slots/[id]/page.tsx        # slot 详情
 - `apps/web/src/app/home/rooms/page.tsx` —— room 名 + unit 卡片包 `<Link>`
 - `apps/web/src/app/home/storage/page.tsx` —— room / unit / section / slot 都包
   `<Link>`，slot badge 加 `e.stopPropagation()`
+
+---
+
+## P1.1 — 跨用户偏好共享 ✅ 已交付（2026-09-24）
+
+**为什么**：P0.4 做了「接受 / 拒绝反馈写入 `user_preferences`」的闭环，但
+`pipeline.py:213` 调 `get_user_preferences(home_id, user_id)` 时按 `user_id`
+过滤掉了 —— **同一屋檐下两个人的接受 / 拒绝对彼此完全不可见**。
+
+合住家庭场景下：室友 A 在厨房接受了杯子，B 再加餐具 AI 还是要靠
+`category` / `room` 重新摸索一遍；A 拒绝过的格 B 还会被推荐到。
+
+期望：**偏好以家为单位共享**，单个成员的接受 / 拒绝信号对其他成员都生效；
+但「敏感物品」（`is_sensitive=True`）偏好永远只对本人生效 —— 药品 / 贵重
+物品的容错率为 0。
+
+本批是 P1 路线的第一棒（顺序：**P1.1 → P1.4 → P1.2 → P1.3**）。
+
+### 行为变化
+
+| | P0.4 | P1.1 |
+| --- | --- | --- |
+| A 接受厨房吊柜 L1S1 给 杯子（普通） | 只有 A 后续 +10 | A + 全家都 +10 |
+| B 接受床头柜抽屉 给 处方药（敏感） | 只有 B +10 | 只有 B +10；A 看不见 |
+| A 拒绝了 slot X | A 看不到，B 仍可见 | 全家都看不到（FILTER 本来就 home-scoped via `Recommendation.status='rejected'`） |
+| Legacy pref（无 `is_personal` 字段） | — | 按 shared 走 = 老数据兼容 |
+
+### 关键设计点
+
+1. **`is_personal` 嵌在 JSON `value` 里`, 不动表结构
+   - 旧值格式：`{"slots": {"<id>": {"category": "x", "count": 1}}}`
+   - 新值格式：`{"slots": {"<id>": {"category": "x", "count": 1, "is_personal": True/False}}}`
+   - SQLite / PG 都无 schema 变化 → **零 migration**
+
+2. **写入端按 `is_sensitive` 自动设 `is_personal`**
+   - 用户接受 / 手动放一件 `is_sensitive=True` 的物品时，`is_personal=True` 自动落库
+   - 用户**不能**自己手动把药品偏好转成共享 —— 敏感偏好永远是个人
+   - 「敏感」勾选框 P0.10（web 「推荐位置后填物品信息」）已经有了 —— 用户不需新增 UI
+
+3. **读取端**, `pipeline.py:213` 去掉 `user_id` 过滤
+   - `get_user_preferences(home_id=ctx.home_id)` → 全家成员偏好
+   - `_preference_dict` 已经返回 `user_id`，ranker 直接拿来用
+
+4. **ranker 跳过敏感 / 跨用户**
+   - `_preference_match` 加 `actor_user_id` 参数
+   - `_is_pref_visible_to(entry, owner_id, actor_user_id)` —— 规则：
+     - legacy（无 `is_personal`） → shared
+     - `is_personal=False` → shared
+     - `is_personal=True` 且 `actor_user_id != owner` → 跳过
+     - `actor_user_id=None` → 信任所有（老 P0.4 测试路径）
+
+### 接口 / 数据
+
+不变：
+- `POST /recommendations/items/{id}/recommend` —— 响应不变
+- `GET /items/{id}/recommendations` —— 不变
+- `record_preferred_slot` —— 签名不变
+- `get_user_preferences` —— 签名不变（已有 `user_id: None` 默认全家）
+
+`is_personal` 写入 (write_tools.py:record_preferred_slot)：
+
+```python
+row = (
+    await db.execute(
+        select(Item.category, Item.is_sensitive).where(Item.id == item_id)
+    )
+).one_or_none()
+category, is_sensitive = (row if row else (None, False))
+
+entry = {
+    "category": (category or "").strip().lower(),
+    "count": 1,
+    "is_personal": bool(is_sensitive),   # ← 新键
+}
+```
+
+`_preference_match` (ranking.py) 加 `actor_user_id: uuid.UUID | None = None` 参数。
+`score_terms` / `deterministic_score` / `rank_slots` 同步加可选 kwarg —— 默认 None = P0.4 行为 = 既有测试零成本通过。
+
+3 个生产 call site 显式传 `actor_user_id`：
+
+| File:Line | 调用方 | 传值 |
+| --- | --- | --- |
+| `app/agents/pipeline.py:_step_rank` | 推荐 (9-step agent) | `ctx.user_id` |
+| `app/api/v1/items.py:583` | `GET /items/{id}/candidates` | `actor.user_id` |
+| `app/agents/search/agent.py:487` | search agent 的 slot ranking | `user_id` |
+
+### 拒绝本来已 home-scoped
+
+`Recommendation.status='rejected'` 行的排除集按 `(item_id, home_id, status)` 查，
+**本来就是 home-scoped**，不在本批范围内。
+
+### 验收
+
+- [x] `tests/unit/test_ranking.py` 4 新增 passed
+- [x] `tests/unit/test_preference_service.py` +2（sensitive / non-sensitive `is_personal`）
+- [x] `tests/api/test_recommendation_api.py` +3（双用户 shared happy / sensitive 隔离 / 跨 home 不漏）
+- [x] `python -m pytest tests/ --no-header -q` —— 基线 776 → **784** passed / 1 skipped, **不 regress**
+- [x] `python -m ruff check app/ tests/` —— 32 不变
+- [x] `python -m mypy app/` —— 20 不变
+
+### 端到端行为
+
+- A 接受厨房 slot 给 mug → B 后续给别的 mug → 推荐包含该 slot（`+10` delta）
+- A 接受床头柜给 处方药 → B 给 处方药 → 推荐**不**含该 slot（score 相同 with/without pref）
+- A 给 处方药 接受 → A 后续给别的 处方药 → 推荐**仍**含该 slot（自己可见自己的敏感偏好）
+- Legacy pref（无 `is_personal`）行为不变（= shared）
+- 跨 home / 随机 `X-Home-Id` → 仍 404（不破 `get_actor` 的 cross-home 校验）
+
+### 落地位置
+
+**修改**
+
+- `app/tools/write_tools.py:record_preferred_slot` —— 同一次 SELECT 拿 `category` + `is_sensitive`，写 `is_personal`
+- `app/agents/ranking.py:_preference_match` —— 加 `actor_user_id` + `_is_pref_visible_to` helper
+- `app/agents/ranking.py:score_terms / deterministic_score / rank_slots` —— 加可选 kwarg
+- `app/agents/pipeline.py:_step_retrieve` —— 去掉 `user_id=ctx.user_id`
+- `app/agents/pipeline.py:_step_rank` —— 传 `actor_user_id=ctx.user_id`
+- `app/api/v1/items.py:583` —— `GET /items/{id}/candidates` 传 `actor.user_id`，同步去掉 `user_id` 过滤
+- `app/agents/search/agent.py:487` —— search agent 传 `actor_user_id=user_id`，同步去掉 `user_id` 过滤
+
+**测试**
+
+- `tests/unit/test_ranking.py` —— +4（legacy / shared / 敏感跨用户 / 自己敏感可见）
+- `tests/unit/test_preference_service.py` —— +2（sensitive / non-sensitive 写 `is_personal`）
+- `tests/api/test_recommendation_api.py` —— +3 + helper `_seeded_roommate`（共享 happy、sensitive 隔离、跨 home 不漏）
+
+### 本批不做
+
+- **不**做「查看别人的偏好」UI（用户不需要知道 A 接受了什么）
+- **不**做 opt-out 「我不想让室友看到我的偏好」开关（共享默认；sensitive 自动 personal 已是隐私护栏）
+- **不**做「偏好加权」（A 接受 +1, B 接受 +2）—— 加权逻辑会和 verifier 联动，未来 batch
+- **不**做 `user_preferences` schema 变更（`is_personal` 嵌 JSON）
+- **不**做 `OPT-IN 共享偏好` 按钮 UI（sensitive 自动护栏已够）
+
+### Trap
+
+- **新 uvicorn process**: uvicorn 不热加载 —— `pipeline._step_retrieve` 等改了逻辑必须重启 demo 进程
+- **`_preference_match` 默认 `None`**: 新参数默认 None 让既有测试零成本通过；None = 「信任所有」= P0.4 行为
+- **legacy 数据**: 老 `value` 没有 `is_personal`，按 shared 走 —— 用户视角下「别人之前同意的事」= 共享 = 没毛病
+- **不动 FILTER**: `get_rejected_slot_ids` 本来就 `home_id` 过滤，home-scoped；不要顺手改
+- **`actor_user_id` 类型**: `_preference_dict` 把 `user_id` 序列化成 `str` —— helper 用 `str(...)` 两边对齐
 
 ---
 

@@ -553,7 +553,7 @@ async def list_item_candidates(
     slots = await get_storage_slots(db=db, home_id=actor.home_id)
     rules = await get_home_rules(db=db, home_id=actor.home_id)
     preferences = await get_user_preferences(
-        db=db, home_id=actor.home_id, user_id=actor.user_id
+        db=db, home_id=actor.home_id
     )
     history = await get_item_placements(
         db=db, home_id=actor.home_id, item_id=item_id
@@ -586,6 +586,7 @@ async def list_item_candidates(
         preferences=preferences,
         history=history,
         soft_rules=[r for r in rules if r.get("rule_type") == "soft"],
+        actor_user_id=actor.user_id,
         limit=20,
     )
     return CandidateListResponse(

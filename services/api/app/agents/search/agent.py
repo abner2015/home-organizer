@@ -472,7 +472,7 @@ class SearchAgent:
         slots = await self._call(self._tools.get_storage_slots, home_id=home_id)
         rules = await self._call(self._tools.get_home_rules, home_id=home_id)
         preferences = await self._call(
-            self._tools.get_user_preferences, home_id=home_id, user_id=user_id
+            self._tools.get_user_preferences, home_id=home_id
         )
 
         generated = generate_candidates(slots, item)
@@ -491,6 +491,7 @@ class SearchAgent:
             # A hypothetical item has no placement history to match against.
             history=[],
             soft_rules=[r for r in rules if r.get("rule_type") == "soft"],
+            actor_user_id=user_id,
             limit=3,
         )
 

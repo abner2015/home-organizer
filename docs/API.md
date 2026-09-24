@@ -2,7 +2,10 @@
 
 > FastAPI，OpenAPI 自动生成。所有路径以 `/api/v1` 开头。
 >
-> 最后更新：2026-09-22 —— **P0.4**：`ItemPlacementView` 加 `reason`
+> 最后更新：2026-09-24 —— **P1.1**：偏好**以家为单位共享** —— A 接受 / 拒绝
+> 某 slot 对全家都生效；**唯独敏感物品**（`is_sensitive=True`）的偏好
+> 只对本人生效（药品 / 贵重物品的容错率为 0）。详见 §7 的备注与 `docs/AGENT.md` §15.1。
+> 2026-09-22：**P0.4**：`ItemPlacementView` 加 `reason`
 > （「为什么放这里」）；候选端点/推荐响应里的理由**一律非空且不含 ASCII**；
 > accept / 手动落位写入类别偏好、reject 派生出该物品的永久排除（§7 / §8）。
 > 同日上一版：§8 摆放接口随 P0.3 落地（`POST /placements` / `DELETE /placements/{id}`）。
@@ -872,6 +875,15 @@ MinIO 部署请继续使用 presigned GET。
 用 `chosen_slot_id` 而不是模型最初的建议 —— PATCH 覆盖后的**用户真实选择**才是正信号。
 写入与落位共用一个 `commit`，所以 accept 仍然是单事务。见 `docs/AGENT.md` §15.1。
 
+**偏好以家为单位共享（P1.1）**：上述偏好**对同一家里的所有用户都生效** —— A 接受
+某个 slot，B 推荐同类物品时该 slot 也会得到 +10。唯一例外是**敏感物品**
+（`is_sensitive=True`，如药品 / 贵重物品 / 家门钥匙）：accept 时这条偏好会被
+自动打上 `is_personal=True` 标记，**只对本人生效**，其他成员推荐同类物品时
+不会看到该 slot。`is_sensitive` 字段来自 `POST /items` 的请求体（用户手动
+勾选）或 `POST /items/{id}/vision` 的 vision 输出（模型识别为药品时会建议
+`is_sensitive=true`）。详见 `docs/DEVELOPMENT_PLAN.md` P1.1 与
+`memory/p1.1-shared-prefs.md`。
+
 ### PATCH /api/v1/recommendations/{recId}
 
 用户想换一个位置时，**先 PATCH 再 accept**：
@@ -901,6 +913,12 @@ PATCH 之后 `status` 仍是 `pending` —— 直到 accept 才落 `ItemPlacemen
 （`app/tools/recommendation_tools.py:get_rejected_slot_ids`），**不落任何新存储、无迁移**。
 下次对**同一物品**推荐时，FILTER 步会把这个 slot 过滤掉，`GET /items/{itemId}/candidates`
 （§6）走同一口径。排除是**永久**的，只增不减；`superseded` 的推荐**不**计入。
+
+**排除以家为单位（P1.1 同源）**：`Recommendation` 行的 `home_id` 已经把拒绝限定在本家
+范围内（`status='rejected' AND home_id=ctx.home_id`）—— 「A 拒绝过的 slot 全家都看不到」
+这条规则**本来就是对的**，P1.1 没有改它，只是不再因 `user_id` 把它进一步限到个人。
+所以**接受产生的偏好是新增的跨用户**（P1.1）；**拒绝产生的偏好从来没有按用户过滤过**，
+直接是 home-scoped。
 
 `note`（可选，≤ 512）只是给**人**看的原因，存在该推荐 `candidates[0]` 的 `audit_note` 上
 —— 它**不参与**排除逻辑。物品的候选被全部排除后，`POST …/recommend` 返回
@@ -1075,6 +1093,13 @@ AI 落位那条才有值（见 §6 的 `GET /items/{itemId}/placements`）。字
 > 但 `user_preferences` 表**已经在被写**：`POST …/accept` 与 §8 的
 > `POST /placements` 会 upsert `preferred_slots`（P0.4，见 `docs/AGENT.md` §15.1）。
 > 目前没有开放给客户端直接读写的接口 —— 「撤销偏好」的入口也在 ⏳ 里。
+>
+> **P1.1**：`preferred_slots` 的存储形状现在是
+> `{"slots": {"<slot_id>": {"category": "...", "count": 1, "is_personal": false}}}`。
+> 旧数据没有 `is_personal` 键 —— 视为 **shared**（P0.4 时代的接受按 shared 解读
+> 没有问题：要么是用户自己接受、要么是迁移过来的）。`is_personal=True`
+> 由 `record_preferred_slot` 在写入时根据 `Item.is_sensitive` 自动标记，
+> 用户不能手动改成共享。
 
 ---
 

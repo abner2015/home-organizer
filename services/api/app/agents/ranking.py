@@ -20,6 +20,7 @@ above) and a deterministic Chinese ``reason`` built from it (P0.4).
 """
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from app.agents.reason import build_reason
@@ -118,8 +119,40 @@ def _capacity_fit(slot: dict[str, Any]) -> int:
     return 1 if (slot.get("active_count") or 0) == 0 else 0
 
 
+def _is_pref_visible_to(
+    entry: dict[str, Any],
+    pref_owner_id: str,
+    actor_user_id: uuid.UUID | None,
+) -> bool:
+    """True if this preference entry is allowed to influence the actor.
+
+    Per P1.1: ``user_preferences`` are home-scoped — every member of the home
+    can see everyone else's accept signals. Each entry carries an
+    ``is_personal`` flag (set on accept when the item is ``is_sensitive``)
+    so medicine / lock-worthy slots stay personal to the actor who placed
+    them.
+
+    Rules:
+      - Legacy entries (no ``is_personal`` key) are shared with everyone.
+      - ``is_personal=False`` is shared.
+      - ``is_personal=True`` is only visible to the owner (``pref_owner_id``).
+      - ``actor_user_id=None`` means "trust everything" — the P0.4 legacy
+        path used by unit tests and any caller that hasn't threaded the
+        actor's identity through.
+    """
+    is_personal = entry.get("is_personal")
+    if not is_personal:
+        return True
+    if actor_user_id is None:
+        return True
+    return str(actor_user_id) == pref_owner_id
+
+
 def _preference_match(
-    slot: dict[str, Any], item: dict[str, Any], preferences: list[dict[str, Any]]
+    slot: dict[str, Any],
+    item: dict[str, Any],
+    preferences: list[dict[str, Any]],
+    actor_user_id: uuid.UUID | None = None,
 ) -> int:
     """1 if a stored positive preference covers this slot for this item.
 
@@ -128,10 +161,15 @@ def _preference_match(
     **category-scoped**: accepting a slot for a mug must not boost it for
     medicine. A preference with no stored category matches any item, and the
     legacy ``preferred_slot_ids`` shape (no category at all) is still honoured.
+
+    Per P1.1 each preference carries the owner (``pref.user_id``); entries
+    marked ``is_personal`` (sensitive items) are skipped unless the actor is
+    the owner.
     """
     sid = str(slot["id"])
     category = (item.get("category") or "").strip().lower()
     for pref in preferences:
+        owner_id = str(pref.get("user_id") or "")
         value = pref.get("value") or {}
         if not isinstance(value, dict):
             continue
@@ -139,6 +177,8 @@ def _preference_match(
         if isinstance(slots, dict):
             entry = slots.get(sid)
             if isinstance(entry, dict):
+                if not _is_pref_visible_to(entry, owner_id, actor_user_id):
+                    continue
                 entry_category = str(entry.get("category") or "").strip().lower()
                 if not entry_category or entry_category == category:
                     return 1
@@ -204,6 +244,7 @@ def score_terms(
     preferences: list[dict[str, Any]],
     history: list[dict[str, Any]],
     soft_rules: list[dict[str, Any]],
+    actor_user_id: uuid.UUID | None = None,
 ) -> dict[str, int]:
     """The per-term 0/1 breakdown behind :func:`deterministic_score`."""
     return {
@@ -211,7 +252,7 @@ def score_terms(
         "room": _room_match(slot, item),
         "path": _path_match(slot, item),
         "capacity": _capacity_fit(slot),
-        "preference": _preference_match(slot, item, preferences),
+        "preference": _preference_match(slot, item, preferences, actor_user_id),
         "history": _history_match(slot, history),
         "soft_rule": _soft_rule_match(slot, soft_rules),
     }
@@ -224,6 +265,7 @@ def deterministic_score(
     preferences: list[dict[str, Any]],
     history: list[dict[str, Any]],
     soft_rules: list[dict[str, Any]],
+    actor_user_id: uuid.UUID | None = None,
 ) -> int:
     """Return the weighted score for one slot."""
     terms = score_terms(
@@ -232,6 +274,7 @@ def deterministic_score(
         preferences=preferences,
         history=history,
         soft_rules=soft_rules,
+        actor_user_id=actor_user_id,
     )
     return sum(_WEIGHTS[term] * value for term, value in terms.items())
 
@@ -243,6 +286,7 @@ def rank_slots(
     preferences: list[dict[str, Any]],
     history: list[dict[str, Any]],
     soft_rules: list[dict[str, Any]],
+    actor_user_id: uuid.UUID | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """Return ``candidates`` sorted by descending score; each row gains a
@@ -252,6 +296,11 @@ def rank_slots(
     on the DB's row order (``get_storage_slots`` orders by ``sort_order, code``,
     which ties for many real and synthetic slots). §4.4 requires the ranker to
     be fully deterministic.
+
+    ``actor_user_id`` (P1.1) honours each preference entry's ``is_personal``
+    flag — sensitive items' accept signals only influence their owner. Pass
+    ``None`` (the default) to treat every pref as shared, matching P0.4
+    behaviour and keeping the existing unit-test surface zero-cost.
     """
     scored = []
     for c in candidates:
@@ -261,6 +310,7 @@ def rank_slots(
             preferences=preferences,
             history=history,
             soft_rules=soft_rules,
+            actor_user_id=actor_user_id,
         )
         score = sum(_WEIGHTS[term] * value for term, value in terms.items())
         scored.append((score, terms, c))
