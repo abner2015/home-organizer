@@ -51,6 +51,7 @@ import type {
   SectionCreateBody,
   SignupBody,
   SlotCreateBody,
+  SlotDetail,
   SpaceTree,
   StorageSection,
   StorageSlot,
@@ -277,6 +278,36 @@ export const api = {
 
   async listAllSlots(session: ApiSession): Promise<StorageSlot[]> {
     return request<StorageSlot[]>(`/api/v1/homes/${session.homeId}/slots`, {
+      method: "GET",
+      session,
+    });
+  },
+
+  // ---------------------------------------------------------- detail reads (P0.C)
+
+  async getRoom(roomId: UUID, session: ApiSession): Promise<Room> {
+    return request<Room>(`/api/v1/rooms/${roomId}`, {
+      method: "GET",
+      session,
+    });
+  },
+
+  async getStorageUnit(unitId: UUID, session: ApiSession): Promise<StorageUnit> {
+    return request<StorageUnit>(`/api/v1/storage-units/${unitId}`, {
+      method: "GET",
+      session,
+    });
+  },
+
+  async getSection(sectionId: UUID, session: ApiSession): Promise<StorageSection> {
+    return request<StorageSection>(`/api/v1/sections/${sectionId}`, {
+      method: "GET",
+      session,
+    });
+  },
+
+  async getSlot(slotId: UUID, session: ApiSession): Promise<SlotDetail> {
+    return request<SlotDetail>(`/api/v1/slots/${slotId}`, {
       method: "GET",
       session,
     });

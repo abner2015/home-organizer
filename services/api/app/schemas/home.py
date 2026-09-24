@@ -107,6 +107,38 @@ class StorageUnitView(BaseModel):
     sections: list[StorageSectionView] = Field(default_factory=list)
 
 
+class SlotCurrentItem(BaseModel):
+    """One item currently placed in a slot — for ``GET /slots/{id}`` (P0.C).
+
+    The slot detail page is the only place that needs both ``item_name`` (to
+    render without a second round-trip per row) and ``placed_at`` (so the UI
+    can sort by recency). Kept separate from :class:`ItemPlacementView` (which
+    is the canonical placement shape — see :mod:`app.schemas.recommendation`)
+    because this one drops fields irrelevant to the slot's view, like
+    ``reason`` and ``source``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: uuid.UUID
+    item_name: str
+    placed_at: datetime
+
+
+class SlotDetailView(BaseModel):
+    """A slot plus the items currently sitting in it (P0.C).
+
+    Built from ``StorageSlotView`` + a list of :class:`SlotCurrentItem`. Empty
+    ``current_items`` is the normal state for a freshly-built slot, not an
+    error, so it defaults to ``[]`` rather than being nullable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    slot: StorageSlotView
+    current_items: list[SlotCurrentItem] = Field(default_factory=list)
+
+
 class RoomTreeView(RoomView):
     """A room with its units (and their sections/slots) nested."""
 
@@ -236,6 +268,8 @@ __all__ = [
     "MemberView",
     "RoomTreeView",
     "RoomView",
+    "SlotCurrentItem",
+    "SlotDetailView",
     "SpaceTreeView",
     "StorageSectionView",
     "StorageSlotView",

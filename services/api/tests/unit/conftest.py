@@ -85,6 +85,7 @@ class StorageHierarchy:
     cabinet_id: uuid.UUID  # 客厅装饰柜
     kitchen_cabinet_id: uuid.UUID
     bedside_id: uuid.UUID  # 床头柜
+    sections: dict[str, uuid.UUID]  # section name → id (P0.C detail tests)
     slots: dict[str, uuid.UUID]  # code → id
     items: dict[str, uuid.UUID]  # name → id
 
@@ -101,6 +102,7 @@ async def storage_hierarchy(
     """
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     slots: dict[str, uuid.UUID] = {}
+    sections: dict[str, uuid.UUID] = {}
     items: dict[str, uuid.UUID] = {}
 
     async with factory() as session:
@@ -172,6 +174,7 @@ async def storage_hierarchy(
             )
             session.add(section)
             await session.flush()
+            sections[name] = section.id
             # Labels mirror `app/db/seed.py`: a human-readable Chinese name,
             # never the ASCII `code`. `get_storage_slots` builds `full_path`
             # from the label, and that path is what the UI and the prompts show.
@@ -272,6 +275,7 @@ async def storage_hierarchy(
         cabinet_id=cabinet.id,
         kitchen_cabinet_id=kcab.id,
         bedside_id=bedside.id,
+        sections=sections,
         slots=slots,
         items=items,
     )

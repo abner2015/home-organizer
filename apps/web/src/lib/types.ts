@@ -140,6 +140,20 @@ export interface SpaceTree {
   rooms: Array<Room & { units: StorageUnit[] }>;
 }
 
+// One item currently sitting in a slot — the answer to "what's in this slot?"
+// for `GET /api/v1/slots/{id}` (P0.C). ``item_name`` is inlined so the slot
+// detail page doesn't have to fetch every item it lists.
+export interface SlotCurrentItem {
+  item_id: UUID;
+  item_name: string;
+  placed_at: string; // ISO timestamp
+}
+
+export interface SlotDetail {
+  slot: StorageSlot;
+  current_items: SlotCurrentItem[];
+}
+
 export interface SlotRef {
   slot_id: UUID;
   code: string;

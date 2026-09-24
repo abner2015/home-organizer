@@ -233,6 +233,245 @@ async def test_list_storage_units_other_home_room_is_404(
     assert resp.status_code == 404
 
 
+# ---------------------------------------------------------------- P0.C detail
+#
+# Single-node GET routes (``/rooms/:id``, ``/storage-units/:id``,
+# ``/sections/:id``, ``/slots/:id``). Cross-home and unknown-id both 404 —
+# never 403, never 200 with empty body.
+
+
+# --------------------------------------------------------------- room detail
+
+
+async def test_get_room_happy_path(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    resp = api_client.get(
+        f"/api/v1/rooms/{storage_hierarchy.living_room_id}",
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == str(storage_hierarchy.living_room_id)
+    assert body["name"] == "客厅"
+    assert body["room_type"] == "living"
+    assert body["unit_count"] == 1
+    assert body["home_id"] == str(seeded_actor.home_id)
+
+
+async def test_get_room_unknown_is_404(
+    api_client: TestClient, seeded_actor
+) -> None:
+    resp = api_client.get(
+        f"/api/v1/rooms/{uuid.uuid4()}", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 404
+
+
+async def test_get_room_other_home_is_404(
+    api_client: TestClient, seeded_actor, db_engine
+) -> None:
+    """A real room id that lives in somebody else's home still 404s."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.enums import RoomType
+    from app.models import Home
+    from app.models.room import Room
+
+    other_home_id = uuid.uuid4()
+    other_room_id = uuid.uuid4()
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add(Home(id=other_home_id, name="别人的家", owner_id=uuid.uuid4()))
+        session.add(
+            Room(
+                id=other_room_id,
+                home_id=other_home_id,
+                name="别人的客厅",
+                room_type=RoomType.LIVING.value,
+                sort_order=1,
+            )
+        )
+        await session.commit()
+
+    resp = api_client.get(
+        f"/api/v1/rooms/{other_room_id}", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------- storage-unit detail
+
+
+async def test_get_storage_unit_happy_path_includes_sections(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    resp = api_client.get(
+        f"/api/v1/storage-units/{storage_hierarchy.cabinet_id}",
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == str(storage_hierarchy.cabinet_id)
+    assert body["name"] == "客厅装饰柜"
+    assert body["room_id"] == str(storage_hierarchy.living_room_id)
+    sections = {s["name"]: s for s in body["sections"]}
+    assert set(sections) == {"左玻璃柜", "右玻璃柜", "中间开放区"}
+    # Each section carries its real slots — same shape as the write PATCH.
+    layer = sections["左玻璃柜"]
+    assert [s["code"] for s in layer["slots"]] == ["L1", "L2", "L3"]
+
+
+async def test_get_storage_unit_unknown_is_404(
+    api_client: TestClient, seeded_actor
+) -> None:
+    resp = api_client.get(
+        f"/api/v1/storage-units/{uuid.uuid4()}", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 404
+
+
+async def test_get_storage_unit_other_home_is_404(
+    api_client: TestClient, seeded_actor, db_engine
+) -> None:
+    """A real storage_unit that lives in somebody else's home still 404s.
+
+    Cross-home check walks ``unit → room → home_id`` because
+    ``storage_units`` has no ``home_id`` column of its own — the test makes
+    sure that join path is wired correctly.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.enums import HomeRole, RoomType, StorageUnitType
+    from app.models import Home, HomeMembership
+    from app.models.room import Room
+    from app.models.storage import StorageUnit
+
+    other_home_id = uuid.uuid4()
+    other_room_id = uuid.uuid4()
+    other_unit_id = uuid.uuid4()
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add(Home(id=other_home_id, name="别人的家", owner_id=uuid.uuid4()))
+        session.add(
+            HomeMembership(
+                home_id=other_home_id,
+                user_id=uuid.uuid4(),
+                role=HomeRole.OWNER.value,
+            )
+        )
+        session.add(
+            Room(
+                id=other_room_id,
+                home_id=other_home_id,
+                name="别人的客厅",
+                room_type=RoomType.LIVING.value,
+                sort_order=1,
+            )
+        )
+        session.add(
+            StorageUnit(
+                id=other_unit_id,
+                room_id=other_room_id,
+                name="别人的柜",
+                unit_type=StorageUnitType.CABINET.value,
+                sort_order=1,
+            )
+        )
+        await session.commit()
+
+    resp = api_client.get(
+        f"/api/v1/storage-units/{other_unit_id}", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------- section detail
+
+
+async def test_get_section_happy_path_includes_slots(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    section_id = storage_hierarchy.sections["左玻璃柜"]
+    resp = api_client.get(
+        f"/api/v1/sections/{section_id}", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == str(section_id)
+    assert body["name"] == "左玻璃柜"
+    assert body["unit_id"] == str(storage_hierarchy.cabinet_id)
+    assert body["section_type"] == "layer"
+    assert [s["code"] for s in body["slots"]] == ["L1", "L2", "L3"]
+    # ``allowed_categories`` survives the projection through the tools layer.
+    assert body["slots"][0]["allowed_categories"] == ["decor"]
+
+
+async def test_get_section_unknown_is_404(
+    api_client: TestClient, seeded_actor
+) -> None:
+    resp = api_client.get(
+        f"/api/v1/sections/{uuid.uuid4()}", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 404
+
+
+# ----------------------------------------------------------------- slot detail
+
+
+async def test_get_slot_happy_path_includes_active_items(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """Place an item into a slot, then GET it — current_items reflects the placement."""
+    cup_id = storage_hierarchy.items["马克杯"]
+    slot_id = storage_hierarchy.slots["L1S1"]
+
+    place_resp = api_client.post(
+        "/api/v1/placements",
+        headers=seeded_actor.headers(),
+        json={"item_id": str(cup_id), "slot_id": str(slot_id)},
+    )
+    assert place_resp.status_code == 201, place_resp.text
+
+    resp = api_client.get(
+        f"/api/v1/slots/{slot_id}", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["slot"]["id"] == str(slot_id)
+    assert body["slot"]["code"] == "L1S1"
+    assert body["slot"]["active_count"] == 1
+    assert len(body["current_items"]) == 1
+    row = body["current_items"][0]
+    assert row["item_id"] == str(cup_id)
+    assert row["item_name"] == "马克杯"
+    # placed_at is an ISO string from the JSON model dump.
+    assert row["placed_at"]
+
+
+async def test_get_slot_empty_is_ok(
+    api_client: TestClient, seeded_actor, storage_hierarchy
+) -> None:
+    """Empty slot → current_items=[], not an error."""
+    slot_id = storage_hierarchy.slots["L1S1"]
+    resp = api_client.get(
+        f"/api/v1/slots/{slot_id}", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["slot"]["active_count"] == 0
+    assert body["current_items"] == []
+
+
+async def test_get_slot_unknown_is_404(
+    api_client: TestClient, seeded_actor
+) -> None:
+    resp = api_client.get(
+        f"/api/v1/slots/{uuid.uuid4()}", headers=seeded_actor.headers()
+    )
+    assert resp.status_code == 404
+
+
 # ------------------------------------------------------------------------ auth
 
 

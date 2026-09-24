@@ -42,11 +42,12 @@ from app.api.deps import Actor, ensure_member, get_actor, get_current_user
 from app.core.exceptions import ForbiddenError, NotFoundError, ValidationFailedError
 from app.db.enums import HomeRole
 from app.db.session import get_db
-from app.models import HomeMembership, User
+from app.models import HomeMembership, ItemPlacement, User
 from app.models.home import Home
 from app.models.item import Item
 from app.models.room import Room
 from app.models.rule import HomeRule
+from app.models.storage import StorageSection, StorageSlot, StorageUnit
 from app.schemas.home import (
     HomeCreateRequest,
     HomeView,
@@ -55,6 +56,8 @@ from app.schemas.home import (
     MemberView,
     RoomTreeView,
     RoomView,
+    SlotCurrentItem,
+    SlotDetailView,
     SpaceTreeView,
     StorageSectionView,
     StorageSlotView,
@@ -72,6 +75,11 @@ from app.services.membership_service import (
     list_members,
     remove_member,
 )
+from app.services.projection import (
+    section_view_with_slots,
+    slot_view_with_enrichment,
+    unit_view_with_sections,
+)
 from app.tools.home_tools import (
     get_home,
     get_rooms,
@@ -82,6 +90,9 @@ from app.tools.home_tools import (
 
 router = APIRouter(prefix="/homes", tags=["homes"])
 rooms_router = APIRouter(prefix="/rooms", tags=["homes"])
+units_router = APIRouter(prefix="/storage-units", tags=["homes"])
+sections_router = APIRouter(prefix="/sections", tags=["homes"])
+slots_router = APIRouter(prefix="/slots", tags=["homes"])
 
 
 # --------------------------------------------------------------------- guards
@@ -326,6 +337,151 @@ async def list_storage_units(
     )]
 
 
+# ---------------------------------------------------------------- P0.C detail
+# Single-node GET routes. They mirror the write side's PATCH responses in
+# shape (a unit view comes back with its real sections and slots, etc.) so
+# a drill-down from the list pages doesn't have to make the write endpoints
+# do double duty. Cross-home / unknown-id uniformly return 404; never 403.
+
+
+@rooms_router.get(
+    "/{room_id}", response_model=RoomView, summary="Fetch one room"
+)
+async def get_room(
+    room_id: uuid.UUID,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RoomView:
+    """Single room with its unit count. Non-member → 404."""
+    room = (
+        await db.execute(select(Room).where(Room.id == room_id))
+    ).scalar_one_or_none()
+    if room is None or room.home_id != actor.home_id:
+        raise NotFoundError("Room not found")
+    units = await get_storage_units(db=db, home_id=room.home_id, room_id=room_id)
+    return room_view(
+        {
+            "id": str(room.id),
+            "home_id": str(room.home_id),
+            "name": room.name,
+            "room_type": room.room_type,
+            "sort_order": int(room.sort_order or 0),
+        },
+        unit_count=len(units),
+    )
+
+
+@units_router.get(
+    "/{unit_id}", response_model=StorageUnitView, summary="Fetch one storage unit"
+)
+async def get_storage_unit(
+    unit_id: uuid.UUID,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StorageUnitView:
+    """Single storage unit with its sections and their slots.
+
+    Cross-home check walks ``unit → room → home_id`` because ``storage_units``
+    has no ``home_id`` column of its own — the home is the room's parent.
+    """
+    unit = (
+        await db.execute(select(StorageUnit).where(StorageUnit.id == unit_id))
+    ).scalar_one_or_none()
+    if unit is None:
+        raise NotFoundError("Storage unit not found")
+    room = (
+        await db.execute(select(Room).where(Room.id == unit.room_id))
+    ).scalar_one()
+    if room.home_id != actor.home_id:
+        raise NotFoundError("Storage unit not found")
+    return await unit_view_with_sections(db, home_id=actor.home_id, unit=unit)
+
+
+@sections_router.get(
+    "/{section_id}", response_model=StorageSectionView, summary="Fetch one section"
+)
+async def get_section(
+    section_id: uuid.UUID,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StorageSectionView:
+    """Single section with its slots. Cross-home walks section → unit → room."""
+    section = (
+        await db.execute(
+            select(StorageSection).where(StorageSection.id == section_id)
+        )
+    ).scalar_one_or_none()
+    if section is None:
+        raise NotFoundError("Section not found")
+    unit = (
+        await db.execute(select(StorageUnit).where(StorageUnit.id == section.unit_id))
+    ).scalar_one()
+    room = (
+        await db.execute(select(Room).where(Room.id == unit.room_id))
+    ).scalar_one()
+    if room.home_id != actor.home_id:
+        raise NotFoundError("Section not found")
+    return await section_view_with_slots(
+        db, home_id=actor.home_id, section=section
+    )
+
+
+@slots_router.get(
+    "/{slot_id}", response_model=SlotDetailView, summary="Fetch one slot"
+)
+async def get_slot(
+    slot_id: uuid.UUID,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SlotDetailView:
+    """Single slot with the items currently placed in it.
+
+    ``current_items`` is the answer to the user's most common question about a
+    slot — "what's in here right now?" — and it would cost an extra round-trip
+    per slot if the web page fetched it separately. ``placed_at`` is joined so
+    the UI can sort by recency without re-querying.
+    """
+    slot = (
+        await db.execute(select(StorageSlot).where(StorageSlot.id == slot_id))
+    ).scalar_one_or_none()
+    if slot is None:
+        raise NotFoundError("Slot not found")
+    section = (
+        await db.execute(
+            select(StorageSection).where(StorageSection.id == slot.section_id)
+        )
+    ).scalar_one()
+    unit = (
+        await db.execute(select(StorageUnit).where(StorageUnit.id == section.unit_id))
+    ).scalar_one()
+    room = (
+        await db.execute(select(Room).where(Room.id == unit.room_id))
+    ).scalar_one()
+    if room.home_id != actor.home_id:
+        raise NotFoundError("Slot not found")
+    stmt = (
+        select(ItemPlacement, Item)
+        .join(Item, Item.id == ItemPlacement.item_id)
+        .where(
+            ItemPlacement.slot_id == slot_id, ItemPlacement.removed_at.is_(None)
+        )
+        .order_by(ItemPlacement.placed_at.desc())
+    )
+    rows = (await db.execute(stmt)).all()
+    current_items = [
+        SlotCurrentItem(
+            item_id=p.item_id,
+            item_name=item.name,
+            placed_at=p.placed_at,
+        )
+        for p, item in rows
+    ]
+    slot_view = await slot_view_with_enrichment(
+        db, home_id=actor.home_id, slot=slot
+    )
+    return SlotDetailView(slot=slot_view, current_items=current_items)
+
+
 # --------------------------------------------------------------------- P0.8
 # Member management
 #
@@ -469,4 +625,4 @@ async def delete_home_member(
     return build_member_view(row)
 
 
-__all__ = ["rooms_router", "router"]
+__all__ = ["rooms_router", "router", "sections_router", "slots_router", "units_router"]

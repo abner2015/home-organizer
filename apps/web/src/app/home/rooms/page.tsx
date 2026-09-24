@@ -63,7 +63,12 @@ export default async function RoomsPage() {
             <div key={room.id} className="card p-4">
               <div className="flex items-start justify-between">
                 <div>
-                  <h3 className="font-semibold text-ink-900">{room.name}</h3>
+                  <Link
+                    href={`/home/rooms/${room.id}`}
+                    className="font-semibold text-ink-900 transition-colors hover:text-brand-600"
+                  >
+                    {room.name}
+                  </Link>
                   <p className="text-xs text-ink-500">
                     {ROOM_TYPE_LABEL[room.room_type ?? "other"] ?? room.room_type}
                   </p>
@@ -72,15 +77,16 @@ export default async function RoomsPage() {
               </div>
               <div className="mt-3 space-y-1.5">
                 {(room.units ?? []).map((u) => (
-                  <div
+                  <Link
                     key={u.id}
-                    className="flex items-center justify-between rounded-lg bg-ink-50 px-3 py-2"
+                    href={`/home/storage/units/${u.id}`}
+                    className="flex items-center justify-between rounded-lg bg-ink-50 px-3 py-2 transition-colors hover:bg-brand-50"
                   >
                     <span className="text-sm text-ink-800">{u.name}</span>
                     <span className="text-xs text-ink-500">
                       {(u.sections?.length ?? 0)} 层
                     </span>
-                  </div>
+                  </Link>
                 ))}
               </div>
             </div>

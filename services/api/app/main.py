@@ -70,6 +70,10 @@ app.include_router(assets_v1.router, prefix="/api/v1")
 app.include_router(files_v1.router, prefix="/api/v1")
 app.include_router(homes_v1.router, prefix="/api/v1")
 app.include_router(homes_v1.rooms_router, prefix="/api/v1")
+# P0.C — single-node detail reads on the same prefixes the write side uses.
+app.include_router(homes_v1.units_router, prefix="/api/v1")
+app.include_router(homes_v1.sections_router, prefix="/api/v1")
+app.include_router(homes_v1.slots_router, prefix="/api/v1")
 app.include_router(items_v1.router, prefix="/api/v1")
 # Manual item placement ("反向录入"): item → slot with no LLM in the path.
 app.include_router(placements_v1.router, prefix="/api/v1")

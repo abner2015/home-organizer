@@ -261,7 +261,8 @@ prompt `app/agent/prompts/structure.v1.md`；前端 `apps/web/src/app/home/setup
 与改动前逐字节相同，既有调用点零改动。
 
 **本批不做**（留 ⏳）：`POST /homes`、成员管理、`GET /storage-units/{id}` /
-`GET /sections/{id}` 详情路由、`structure_proposals` 持久化、完整的结构编辑器。
+`GET /sections/{id}` 详情路由（[已随 P0.C 补齐](#p0c--结构详情路由--已交付-2026-09-24)）、
+`structure_proposals` 持久化、完整的结构编辑器。
 
 ---
 
@@ -986,6 +987,155 @@ X-Home-Id: <home_uuid>
 - `tests/unit/test_placement_service.py` —— 4 条 `bulk_revoke` 单元测试
 - `tests/api/test_recommendation_api.py` —— 6 条 `bulk_revoke` API 测试
 - `tests/api/test_items_read_api.py` —— 3 条 `list_item_recommendations` API 测试
+
+---
+
+## P0.C — 结构详情路由 + 详情页 ✅ 已交付（2026-09-24）
+
+**为什么**：P0.2 已经把读写结构（room → unit → section → slot）落地了，
+`GET /space-tree` 一次性拉全树也能用，但**单节点详情**这一档还缺：
+`docs/API.md` 四处挂着 ⏳（`GET /rooms/{roomId}` / `GET /storage-units/{unitId}` /
+`GET /sections/{sectionId}` / `GET /slots/{slotId}`），前端 `/home/rooms` 和
+`/home/storage` 是纯列表，**drill-down 无路**。用户看到「厨房吊柜第二层」就到头了，
+看不到这一格里现在放了什么。
+
+提议持久化（`structure_proposals` 表）经用户确认从本批移除 —— `AGENTS.md` §3.3
+「未确认的提议不得落库」的设计决策不动。详情路由**只读**，写接口走 P0.2 已有的
+PATCH。
+
+### 接口
+
+```
+GET /api/v1/rooms/{room_id}                  → RoomView（带 unit_count）
+GET /api/v1/storage-units/{unit_id}          → StorageUnitView（含 sections + slots）
+GET /api/v1/sections/{section_id}            → StorageSectionView（含 slots）
+GET /api/v1/slots/{slot_id}                  → SlotDetailView  ⭐ 新 schema
+```
+
+`SlotDetailView`：
+
+```python
+class SlotCurrentItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    item_id: uuid.UUID
+    item_name: str
+    placed_at: datetime
+
+class SlotDetailView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    slot: StorageSlotView                      # 复用
+    current_items: list[SlotCurrentItem] = Field(default_factory=list)
+```
+
+`current_items` 来自 `ItemPlacement JOIN Item WHERE removed_at IS NULL ORDER BY placed_at DESC`。
+
+#### 跨 home 校验
+
+`StorageUnit` / `StorageSection` / `StorageSlot` **自己没有 `home_id` 字段**，
+所以跨 home 校验必须走父链：
+
+| 表 | 父链 |
+| --- | --- |
+| room | (自身就是根) `home_id == actor.home_id` |
+| unit | unit → room → home_id |
+| section | section → unit → room → home_id |
+| slot | slot → section → unit → room → home_id |
+
+**结果仍返 404**（与现有 read 路由同口径 —— §1.2）。
+
+#### 新 Projection 模块
+
+`structure.py` 里 `_unit_view` / `_section_view` / `_slot_view` / `_room_view`
+等私有投影器只服务 PATCH 路径；详情路由也要用同一组投影。抽到
+`app/services/projection.py`：
+
+```python
+async def row_dict(db, row, fields) -> dict[str, Any]: ...
+async def room_view_with_units(db, *, home_id: uuid.UUID, row: Room) -> RoomView: ...
+async def unit_view_with_sections(db, *, home_id: uuid.UUID, row: StorageUnit) -> StorageUnitView: ...
+async def section_view_with_slots(db, *, home_id: uuid.UUID, row: StorageSection) -> StorageSectionView: ...
+async def slot_view_with_enrichment(db, *, home_id: uuid.UUID, row: StorageSlot) -> StorageSlotView: ...
+```
+
+`structure.py` 的 5 个 PATCH 路由改 import 新位置，函数签名 / 行为一字不动。
+`homes.py` 路由也走同一个模块 —— **净增**: ~120 行新代码（投影 + 4 detail 路由 + 测试），
+`structure.py` 减 ~40 行重复。
+
+#### 详情页 + 列表页链接
+
+新增 4 个 server component：
+
+```
+apps/web/src/app/home/rooms/[id]/page.tsx                # room 详情
+apps/web/src/app/home/storage/units/[id]/page.tsx        # unit 详情
+apps/web/src/app/home/storage/sections/[id]/page.tsx     # section 详情
+apps/web/src/app/home/storage/slots/[id]/page.tsx        # slot 详情
+```
+
+| 页 | 关键内容 |
+| --- | --- |
+| room | 基本信息（name / type）+ 收纳家具列表（每件点进 unit 详情） |
+| unit | 基本信息 + 层 / 抽屉列表（点进 section 详情） |
+| section | 基本信息 + slot 网格（带 `active_count` 圆点，点进 slot 详情） |
+| slot ⭐ | 基本信息 + **当前格里的物品**（每件可点回 `/items/{id}`） |
+
+列表页 `/home/rooms` 和 `/home/storage` 的卡片都加 `<Link>`：列表上的卡片能
+点进自己的详情，下层节点也能点击 —— slot badge 上 `onClick={(e) => e.stopPropagation()}`
+防止父 section `<Link>` 误触发。
+
+详情页拉子节点用同一个 `getSpaceTree`（一次拉全，比为每个详情加「父节点」端点更省）。
+
+### 验收
+
+- [x] `GET /rooms/{id}` → 200 + RoomView（unit_count 真实）；跨 home → 404
+- [x] `GET /storage-units/{id}` → 200 + StorageUnitView（含嵌套 sections + slots）
+- [x] `GET /sections/{id}` → 200 + StorageSectionView（含 slots）
+- [x] `GET /slots/{id}` → 200 + SlotDetailView；先 `POST /placements` 再 GET
+      → `current_items` 出现该物品
+- [x] 4 个详情页能渲染：列表页卡片点进去 → 详情页能列下层节点
+- [x] slot 详情页「当前格里的物品」每件可点进 `/items/{id}`
+- [x] 列表页 /home/rooms /home/storage 卡片全部可点
+- [x] `docs/API.md` 4 处 ⏳ → ✅
+- [x] 基线 **765 → 776 passed / 1 skipped**（+11：4 GET detail happy + 4 unknown/跨 home +
+       3 GET slot 含/不含 active）
+- [x] ruff 32 / mypy 20 / tsc / next lint 干净
+
+### 本批不做
+
+- **不**做提议持久化（用户确认移除 —— `AGENTS.md` §3.3 不动）
+- **不**做完整的结构编辑器（P0.2 写接口已够，详情页只放跳转链接）
+- **不**做 slot 详情页的「推荐去这个格」（推荐是反向：物品 → slot，不是 slot → 物品；
+  详情只承担「事实」这一个职责）
+- **不**做 4 个端点的 422 校验（路径参数 UUID，跨 home 走 404，没有 body）
+- **不**做端点的分页 / 排序（树深度 ≤ 5 层，节点数有限）
+
+### 落地位置
+
+**后端新建**
+
+- `app/services/projection.py` —— 4 个 `*_with_*` 投影函数 + `row_dict` + 字段元组
+
+**后端修改**
+
+- `app/api/v1/structure.py` —— 删本地私有副本，改 import 新位置（`__all__` 改 projection）
+- `app/schemas/home.py` —— 加 `SlotCurrentItem` + `SlotDetailView`；`__all__` 更新
+- `app/api/v1/homes.py` —— 加 3 个 router（units / sections / slots）+ 4 个 GET 路由
+- `app/main.py` —— 把新 router 也 include
+- `tests/unit/conftest.py:StorageHierarchy` —— 多暴露一个 `sections` dict 供
+  slot-detail 测试复用
+- `tests/api/test_homes_api.py` —— +11 测试
+
+**前端新建**
+
+- 4 个详情页（见上）
+- `apps/web/src/lib/types.ts` —— `SlotCurrentItem` + `SlotDetail`
+- `apps/web/src/lib/api.ts` —— `getRoom` / `getStorageUnit` / `getSection` / `getSlot`
+
+**前端修改**
+
+- `apps/web/src/app/home/rooms/page.tsx` —— room 名 + unit 卡片包 `<Link>`
+- `apps/web/src/app/home/storage/page.tsx` —— room / unit / section / slot 都包
+  `<Link>`，slot badge 加 `e.stopPropagation()`
 
 ---
 

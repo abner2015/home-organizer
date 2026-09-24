@@ -22,7 +22,7 @@ to them.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import select
@@ -36,8 +36,6 @@ from app.db.enums import HomeRole
 from app.db.session import get_db
 from app.models import HomeMembership
 from app.models.home import Home
-from app.models.room import Room
-from app.models.storage import StorageSection, StorageSlot, StorageUnit
 from app.schemas.home import (
     HomeView,
     RoomView,
@@ -63,10 +61,16 @@ from app.schemas.structure import (
     UnitUpdateRequest,
 )
 from app.services import structure_proposal_service, structure_service
-from app.tools.home_tools import (
-    get_storage_sections,
-    get_storage_slots,
-    get_storage_units,
+from app.services.projection import (
+    ROOM_FIELDS,
+    SECTION_FIELDS,
+    SLOT_FIELDS,
+    UNIT_FIELDS,
+    room_view_with_units,
+    row_dict,
+    section_view_with_slots,
+    slot_view_with_enrichment,
+    unit_view_with_sections,
 )
 
 router = APIRouter(prefix="/homes", tags=["structure"])
@@ -80,68 +84,6 @@ structures_router = APIRouter(prefix="/structures", tags=["structure"])
 def _get_ai_provider() -> AIProvider:
     """FastAPI dependency. Overridden in tests to inject a mock."""
     return get_provider()
-
-_ROOM_FIELDS = ("id", "home_id", "name", "room_type", "sort_order")
-_UNIT_FIELDS = ("id", "room_id", "name", "unit_type", "description", "sort_order")
-_SECTION_FIELDS = ("id", "unit_id", "name", "section_type", "sort_order")
-_SLOT_FIELDS = (
-    "id",
-    "section_id",
-    "code",
-    "label",
-    "capacity_hint",
-    "allowed_categories",
-    "sort_order",
-)
-
-
-def _row_dict(row: Any, fields: tuple[str, ...]) -> dict[str, Any]:
-    """ORM row → the JSON-shaped dict :mod:`app.schemas.home`'s factories read."""
-    return {name: getattr(row, name, None) for name in fields}
-
-
-# The tools below return the same dict shape, but scoped to one parent, which
-# is what a PATCH response needs: the updated node *and* its real children.
-
-
-async def _room_view(db: AsyncSession, *, home_id: uuid.UUID, room: Room) -> RoomView:
-    units = await get_storage_units(db=db, home_id=home_id, room_id=room.id)
-    return room_view(_row_dict(room, _ROOM_FIELDS), unit_count=len(units))
-
-
-async def _unit_view(
-    db: AsyncSession, *, home_id: uuid.UUID, unit: StorageUnit
-) -> StorageUnitView:
-    sections = await get_storage_sections(db=db, home_id=home_id, unit_id=unit.id)
-    slots = await get_storage_slots(db=db, home_id=home_id)
-    by_section: dict[str, list[StorageSlotView]] = {}
-    for slot in slots:
-        by_section.setdefault(slot["section_id"], []).append(slot_view(slot))
-    return unit_view(
-        _row_dict(unit, _UNIT_FIELDS),
-        sections=[
-            section_view(section, slots=by_section.get(section["id"], []))
-            for section in sections
-        ],
-    )
-
-
-async def _section_view(
-    db: AsyncSession, *, home_id: uuid.UUID, section: StorageSection
-) -> StorageSectionView:
-    slots = await get_storage_slots(db=db, home_id=home_id, section_id=section.id)
-    return section_view(_row_dict(section, _SECTION_FIELDS), slots=[slot_view(s) for s in slots])
-
-
-async def _slot_view(
-    db: AsyncSession, *, home_id: uuid.UUID, slot: StorageSlot
-) -> StorageSlotView:
-    siblings = await get_storage_slots(db=db, home_id=home_id, section_id=slot.section_id)
-    enriched = next(
-        (item for item in siblings if item["id"] == str(slot.id)),
-        _row_dict(slot, _SLOT_FIELDS),
-    )
-    return slot_view(enriched)
 
 
 # ------------------------------------------------------------------------ homes
@@ -221,7 +163,7 @@ async def create_room(
     )
     await db.commit()
     await db.refresh(room)
-    return room_view(_row_dict(room, _ROOM_FIELDS), unit_count=0)
+    return room_view(row_dict(room, ROOM_FIELDS), unit_count=0)
 
 
 @rooms_router.patch(
@@ -239,7 +181,7 @@ async def update_room(
     )
     await db.commit()
     await db.refresh(room)
-    return await _room_view(db, home_id=actor.home_id, room=room)
+    return await room_view_with_units(db, home_id=actor.home_id, room=room)
 
 
 @rooms_router.delete(
@@ -286,7 +228,7 @@ async def create_unit(
     )
     await db.commit()
     await db.refresh(unit)
-    return unit_view(_row_dict(unit, _UNIT_FIELDS), sections=[])
+    return unit_view(row_dict(unit, UNIT_FIELDS), sections=[])
 
 
 @units_router.patch(
@@ -304,7 +246,7 @@ async def update_unit(
     )
     await db.commit()
     await db.refresh(unit)
-    return await _unit_view(db, home_id=actor.home_id, unit=unit)
+    return await unit_view_with_sections(db, home_id=actor.home_id, unit=unit)
 
 
 @units_router.delete(
@@ -350,7 +292,7 @@ async def create_section(
     )
     await db.commit()
     await db.refresh(section)
-    return section_view(_row_dict(section, _SECTION_FIELDS), slots=[])
+    return section_view(row_dict(section, SECTION_FIELDS), slots=[])
 
 
 @sections_router.patch(
@@ -368,7 +310,7 @@ async def update_section(
     )
     await db.commit()
     await db.refresh(section)
-    return await _section_view(db, home_id=actor.home_id, section=section)
+    return await section_view_with_slots(db, home_id=actor.home_id, section=section)
 
 
 @sections_router.delete(
@@ -417,7 +359,7 @@ async def create_slot(
     )
     await db.commit()
     await db.refresh(slot)
-    return slot_view({**_row_dict(slot, _SLOT_FIELDS), "active_count": 0})
+    return slot_view({**row_dict(slot, SLOT_FIELDS), "active_count": 0})
 
 
 @slots_router.patch(
@@ -434,7 +376,7 @@ async def update_slot(
     )
     await db.commit()
     await db.refresh(slot)
-    return await _slot_view(db, home_id=actor.home_id, slot=slot)
+    return await slot_view_with_enrichment(db, home_id=actor.home_id, slot=slot)
 
 
 @slots_router.delete(

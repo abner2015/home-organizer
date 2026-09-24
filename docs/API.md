@@ -254,6 +254,16 @@ GET /api/v1/items?page=1&page_size=20
 `room_type` 取值见 `app/db/enums.py:RoomType`（`bedroom`/`kitchen`/`bathroom`/`study`/
 `living`/`storage`/`other`）；传中文（`"厨房"`）→ **422**，不是 500。
 
+### GET /api/v1/rooms/{roomId} ✅
+
+详情（带真实 `unit_count`）。跨 home / 未知 → **404**。
+
+```json
+// response 200
+{ "id": "uuid", "name": "厨房", "room_type": "kitchen",
+  "sort_order": 0, "unit_count": 3 }
+```
+
 ### PATCH /api/v1/rooms/{roomId} ✅
 
 稀疏 PATCH：只改请求里出现的字段。可改 `name` / `room_type` / `sort_order`。
@@ -292,11 +302,29 @@ GET /api/v1/items?page=1&page_size=20
 
 `unit_type` ∈ `cabinet` / `shelf` / `drawer_cabinet` / `box` / `other`（`app/db/enums.py`）。
 
-### GET /api/v1/storage-units/{unitId} ⏳
+### GET /api/v1/storage-units/{unitId} ✅
 
-> **尚未实现。** 需要详情时用 `GET /homes/{homeId}/space-tree`（一次拉全）。
+详情（含 sections + 每节下的 slots）。跨 home / 未知 → **404**。
 
-详情（含 sections）。
+```json
+// response 200
+{
+  "id": "uuid", "name": "橱柜 A", "unit_type": "cabinet",
+  "description": null, "sort_order": 0,
+  "sections": [
+    { "id": "uuid", "name": "第一层", "section_type": "layer", "sort_order": 0,
+      "slots": [
+        { "id": "uuid", "code": "A-1-1", "label": "左",
+          "capacity_hint": "小 / 餐具", "allowed_categories": ["餐具"],
+          "sort_order": 0, "active_count": 0 }
+      ]
+    }
+  ]
+}
+```
+
+跨 home 校验：unit 没有自己的 `home_id` 字段 —— 走 `unit → room → home_id`。
+不知道 slot 的 room 时用 unit 接口详情是最便宜的入口。
 
 ### PATCH /api/v1/storage-units/{unitId} ✅
 
@@ -315,11 +343,23 @@ GET /api/v1/items?page=1&page_size=20
 
 `section_type` ∈ `layer` / `drawer` / `box` / `compartment` / `other`。
 
-### GET /api/v1/sections/{sectionId} ⏳
+### GET /api/v1/sections/{sectionId} ✅
 
-> **尚未实现。** 同上，用 `GET /homes/{homeId}/space-tree`。
+详情（含 slots）。跨 home / 未知 → **404**。
 
-详情（含 slots）。
+```json
+// response 200
+{
+  "id": "uuid", "name": "第一层", "section_type": "layer", "sort_order": 0,
+  "slots": [
+    { "id": "uuid", "code": "A-1-1", "label": "左",
+      "capacity_hint": "小 / 餐具", "allowed_categories": ["餐具"],
+      "sort_order": 0, "active_count": 0 }
+  ]
+}
+```
+
+跨 home 校验走 `section → unit → room → home_id`。
 
 ### PATCH /api/v1/sections/{sectionId} ✅
 
@@ -354,6 +394,30 @@ GET /api/v1/items?page=1&page_size=20
 - `(section_id, code)` 唯一；**同分区内重复 code → 409**（预检，不靠捕获唯一索引的
   `IntegrityError`）。`details.code` 回带冲突的 code。
 - `code` ≤50、`name`/`description`/`capacity_hint` ≤100、`label` ≤200。
+
+### GET /api/v1/slots/{slotId} ✅
+
+slot 详情 + **当前 active 物品列表**（`ItemPlacement JOIN Item`，按 `placed_at DESC`）。
+跨 home / 未知 → **404**。
+
+```json
+// response 200 — SlotDetailView
+{
+  "slot": {
+    "id": "uuid", "code": "A-1-1", "label": "左",
+    "capacity_hint": "小 / 餐具", "allowed_categories": ["餐具"],
+    "sort_order": 0, "active_count": 2
+  },
+  "current_items": [
+    { "item_id": "uuid", "item_name": "马克杯", "placed_at": "2026-09-22T10:30:00Z" }
+  ]
+}
+```
+
+- 视图是只读的，写仍然用 `POST/DELETE /placements`（见 §10）。
+- 一个 slot 可能同时塞多个 active 项（容量上限由 `verifier/checks.py` 把关；
+  本接口负责"事实"，不负责"允许")。
+- `placed_at` 是 UTC ISO 8601。
 
 ### PATCH /api/v1/slots/{slotId} ✅
 
