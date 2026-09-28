@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Literal, cast
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.prompts import render
@@ -37,9 +38,11 @@ from app.agents.structure.template import build_template_proposal
 from app.agents.structure.validate import ProposalWarning, validate_proposal
 from app.ai.observability import hash_prompt, timed
 from app.ai.provider import AIProvider, StructureProposalOutput
-from app.core.exceptions import NotFoundError, ValidationFailedError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationFailedError
 from app.core.logging import get_logger
-from app.models import AgentTrace, Asset
+from app.db.base import utc_now
+from app.models import AgentTrace, Asset, StructureProposal
+from app.services import structure_service
 from app.services.image_payload import to_data_uri
 from app.services.vision_service import (
     MAX_PARSE_RETRIES,
@@ -63,7 +66,13 @@ STEP_TYPE = "structure_proposal"
 
 @dataclass(slots=True)
 class ProposalResult:
-    """Outcome of one proposal run."""
+    """Outcome of one proposal run.
+
+    As of P1.3 the proposal is **persisted** (status=pending) before this
+    object is returned. ``proposal_id`` is the row's UUID; the route handler
+    hands it back to the client so the user can ``accept`` / ``reject`` it
+    later from ``/home/proposals``.
+    """
 
     proposal: StructureProposalOutput
     warnings: list[ProposalWarning]
@@ -73,6 +82,7 @@ class ProposalResult:
     #: ``None`` on the template branch — no model was involved, so there is
     #: nothing to trace.
     trace_id: uuid.UUID | None
+    proposal_id: uuid.UUID
 
 
 async def propose_structure(
@@ -104,12 +114,24 @@ async def propose_structure(
             room_names=context.room_names,
             unit_names=context.unit_names,
         )
+        row = await _persist_proposal(
+            db,
+            home_id=home_id,
+            user_id=user_id,
+            source=SOURCE_TEMPLATE,
+            asset_id=None,
+            description=None,
+            proposal=proposal,
+            warnings=warnings,
+            trace_id=None,
+        )
         return ProposalResult(
             proposal=proposal,
             warnings=warnings,
             source=SOURCE_TEMPLATE,
             attempts=0,
             trace_id=None,
+            proposal_id=row.id,
         )
 
     if asset_id is not None:
@@ -235,12 +257,24 @@ async def propose_structure(
         rooms=len(proposal.rooms),
         warning_kinds=[warning.kind for warning in warnings],
     )
+    row = await _persist_proposal(
+        db,
+        home_id=home_id,
+        user_id=user_id,
+        source=source,
+        asset_id=asset_id,
+        description=description,
+        proposal=proposal,
+        warnings=warnings,
+        trace_id=trace.id,
+    )
     return ProposalResult(
         proposal=proposal,
         warnings=warnings,
         source=source,
         attempts=attempt,
         trace_id=trace.id,
+        proposal_id=row.id,
     )
 
 
@@ -343,11 +377,237 @@ async def _load_asset(
     return asset
 
 
+# ----------------------------------------------------------- persistence (P1.3)
+
+
+async def _persist_proposal(
+    db: AsyncSession,
+    *,
+    home_id: uuid.UUID,
+    user_id: uuid.UUID,
+    source: ProposalSource,
+    asset_id: uuid.UUID | None,
+    description: str | None,
+    proposal: StructureProposalOutput,
+    warnings: list[ProposalWarning],
+    trace_id: uuid.UUID | None,
+) -> StructureProposal:
+    """Write the pending proposal row and flush.
+
+    The route handler's :func:`AsyncSession.commit` covers both this row and
+    the just-written ``AgentTrace``; we only ``flush`` here so the
+    proposal's id is available before :func:`propose_structure` returns.
+    """
+    row = StructureProposal(
+        home_id=home_id,
+        user_id=user_id,
+        source=source,
+        asset_id=asset_id,
+        description=description,
+        # ``proposal.rooms`` etc. are Pydantic models; the JSONBCompat column
+        # wants plain dicts. ``model_dump`` is the cheapest way to round-trip.
+        proposal=proposal.model_dump(mode="json"),
+        warnings=[w.model_dump(mode="json") for w in warnings],
+        trace_id=trace_id,
+        status="pending",
+    )
+    db.add(row)
+    await db.flush()
+    return row
+
+
+# --------------------------------------------------------------- read / list
+
+
+async def get_proposal(
+    db: AsyncSession,
+    *,
+    proposal_id: uuid.UUID,
+    home_id: uuid.UUID,
+) -> StructureProposal:
+    """Load a single proposal owned by ``home_id`` or 404.
+
+    Cross-home access is 404, matching the project's "you can't even see that
+    it exists" policy (see ``docs/AGENT.md`` and ``Recommendation`` reads).
+    """
+    row = (
+        await db.execute(
+            select(StructureProposal).where(StructureProposal.id == proposal_id)
+        )
+    ).scalar_one_or_none()
+    if row is None or row.home_id != home_id:
+        raise NotFoundError("Proposal not found")
+    return row
+
+
+async def list_proposals(
+    db: AsyncSession,
+    *,
+    home_id: uuid.UUID,
+    status: str | None = None,
+) -> list[StructureProposal]:
+    """List proposals owned by ``home_id``, newest first.
+
+    ``status`` is an optional filter (``pending`` / ``accepted`` / ``rejected``
+    / ``superseded``). No filter returns everything; the UI defaults to
+    ``pending`` because accepted / rejected rows are inert.
+    """
+    stmt = select(StructureProposal).where(StructureProposal.home_id == home_id)
+    if status is not None:
+        stmt = stmt.where(StructureProposal.status == status)
+    stmt = stmt.order_by(StructureProposal.created_at.desc())
+    return list((await db.execute(stmt)).scalars().all())
+
+
+# ----------------------------------------------------------- accept / reject
+
+
+@dataclass(slots=True)
+class AcceptOutcome:
+    """Result of accepting a proposal — what got created and the row state."""
+
+    proposal: StructureProposal
+    counts: dict[str, int]
+
+
+async def accept_proposal(
+    db: AsyncSession,
+    *,
+    proposal_id: uuid.UUID,
+    home_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> AcceptOutcome:
+    """Materialise a pending proposal as real rooms/units/sections/slots.
+
+    One transaction — if any slot code collides with an existing row (or a
+    duplicate within the proposal itself), ``IntegrityError`` / ``ConflictError``
+    rolls the whole batch back and the home is left untouched. The user can
+    then reject this proposal and re-propose.
+    """
+    proposal = await get_proposal(db, proposal_id=proposal_id, home_id=home_id)
+    if proposal.status != "pending":
+        raise ConflictError(
+            f"提议状态为 {proposal.status}，不能重复 accept",
+            details={"proposal_id": str(proposal.id), "status": proposal.status},
+        )
+
+    counts = {"rooms": 0, "units": 0, "sections": 0, "slots": 0}
+    try:
+        proposal_data = cast(dict[str, object], proposal.proposal)
+        rooms = cast(list[dict[str, object]], proposal_data.get("rooms") or [])
+        for room in rooms:
+            new_room = await structure_service.create_room(
+                db,
+                home_id=home_id,
+                name=str(room["name"]),
+                room_type=str(room["room_type"]),
+            )
+            counts["rooms"] += 1
+            for unit in cast(list[dict[str, object]], room.get("units") or []):
+                new_unit = await structure_service.create_unit(
+                    db,
+                    home_id=home_id,
+                    room_id=new_room.id,
+                    name=str(unit["name"]),
+                    unit_type=str(unit["unit_type"]),
+                )
+                counts["units"] += 1
+                for section in cast(
+                    list[dict[str, object]], unit.get("sections") or []
+                ):
+                    new_section = await structure_service.create_section(
+                        db,
+                        home_id=home_id,
+                        unit_id=new_unit.id,
+                        name=str(section["name"]),
+                        section_type=str(section["section_type"]),
+                    )
+                    counts["sections"] += 1
+                    for slot in cast(
+                        list[dict[str, object]], section.get("slots") or []
+                    ):
+                        await structure_service.create_slot(
+                            db,
+                            home_id=home_id,
+                            section_id=new_section.id,
+                            code=str(slot["code"]),
+                            label=(
+                                str(slot["label"])
+                                if slot.get("label") is not None
+                                else None
+                            ),
+                            capacity_hint=(
+                                str(slot["capacity_hint"])
+                                if slot.get("capacity_hint") is not None
+                                else None
+                            ),
+                            allowed_categories=cast(
+                                list[str] | None, slot.get("allowed_categories")
+                            ),
+                        )
+                        counts["slots"] += 1
+        proposal.status = "accepted"
+        proposal.accepted_at = utc_now()
+        await db.commit()
+        await db.refresh(proposal)
+        logger.info(
+            "structure_proposal.accepted",
+            proposal_id=str(proposal.id),
+            home_id=str(home_id),
+            **counts,
+        )
+        return AcceptOutcome(proposal=proposal, counts=counts)
+    except ConflictError:
+        await db.rollback()
+        raise
+    except IntegrityError as exc:
+        # Belt-and-braces: ``create_slot`` already raises ``ConflictError`` for
+        # duplicate (section_id, code); the partial unique index on PG will
+        # surface here for races we cannot catch in Python (two accepts).
+        await db.rollback()
+        raise ConflictError(
+            "提议里有 slot code 与现有冲突",
+            details={"proposal_id": str(proposal.id)},
+        ) from exc
+
+
+async def reject_proposal(
+    db: AsyncSession,
+    *,
+    proposal_id: uuid.UUID,
+    home_id: uuid.UUID,
+    note: str | None = None,
+) -> StructureProposal:
+    """Mark a pending proposal rejected. 409 if not pending."""
+    proposal = await get_proposal(db, proposal_id=proposal_id, home_id=home_id)
+    if proposal.status != "pending":
+        raise ConflictError(
+            f"提议状态为 {proposal.status}，不能 reject",
+            details={"proposal_id": str(proposal.id), "status": proposal.status},
+        )
+    proposal.status = "rejected"
+    proposal.rejected_at = utc_now()
+    proposal.rejection_note = (note or "").strip() or None
+    await db.commit()
+    await db.refresh(proposal)
+    logger.info(
+        "structure_proposal.rejected",
+        proposal_id=str(proposal.id),
+        home_id=str(home_id),
+    )
+    return proposal
+
+
 __all__ = [
     "SOURCE_PHOTO",
     "SOURCE_TEMPLATE",
     "SOURCE_TEXT",
+    "AcceptOutcome",
     "ProposalResult",
     "ProposalSource",
+    "accept_proposal",
+    "get_proposal",
+    "list_proposals",
     "propose_structure",
+    "reject_proposal",
 ]

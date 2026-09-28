@@ -8,7 +8,12 @@
 > 解决的是"用户的家是空树"这个问题：推荐链路的**输入**是已存在的 Slot，而结构提议链路的
 > **输出**正是 Slot 本身。
 >
-> 最后更新：2026-09-22 —— 新增 **§15 反馈闭环与理由（P0.4）**；此前 2026-09-21 新增 §14，
+> 最后更新：2026-09-28 —— P1.3 让结构提议**持久化**：`POST /structures/propose` 现在会写
+> 一行 `structure_proposals.status='pending'`，新增 `GET /proposals[/...]` /
+> `POST /proposals/{id}/accept`（**单事务**原子建 4 层结构）/ `POST …/reject`；
+> `/home/proposals` 列表页可看历史提议。§14.2 / §14.5 已据此订正，
+> `AGENTS.md` §3.3 同步修订（pending 提案可持久化，但**只有 accept 单事务**才创建真实结构）。
+> 此前 2026-09-22 —— 新增 **§15 反馈闭环与理由（P0.4）**；2026-09-21 新增 §14，
 > 并**整体订正 §1 / §2 / §10 的步骤名与状态机**（原稿用的
 > `Vision → Structured Item → Storage Retrieval → …` 这套名字与代码里的 `RecommendationState`
 > 是两套，且把 Vision 错列为 pipeline 的第一步，见下），订正 §3.1 的工具名。
@@ -497,15 +502,16 @@ class RecommendationState(StrEnum):
 
 ---
 
-## 14. 结构提议 pipeline（拍照即建模 · P0.2）
+## 14. 结构提议 pipeline（拍照即建模 · P0.2 + 持久化 P1.3）
 
-> ✅ **已交付（2026-09-22）。** 它要回答的是当时最致命的一个事实：
+> ✅ **P0.2 已交付（2026-09-22）、P1.3 已交付（2026-09-28）。** 它要回答的是当时最致命的一个事实：
 > **收纳结构只能靠 `python -m app.db.seed` 建立。** 没有任何接口能创建
 > room / unit / section / slot，所以新注册账号的家是一棵空树，推荐永远
 > `pre_filter_count == 0`、`state = failed`。用户根本没机会把自己的家告诉系统。
 >
-> 见 `AGENTS.md` §3.3（2026-09-21 修订：AI 可以**提议**结构，但必须用户显式确认才落库）、
-> `docs/PRD.md` §2.2 旅程 A、`docs/DEVELOPMENT_PLAN.md` 下篇 P0.2。
+> 见 `AGENTS.md` §3.3（**两次**修订：2026-09-21 允许提议但不落库 → 2026-09-28 P1.3
+> 允许 pending 持久化但**只有 accept 单事务**才创建真实结构）、
+> `docs/PRD.md` §2.2 旅程 A、`docs/DEVELOPMENT_PLAN.md` 下篇 P0.2 + P1.3。
 
 **落地位置**
 
@@ -517,8 +523,8 @@ class RecommendationState(StrEnum):
 | 确定性校验（Step 4） | `app/agents/structure/validate.py:validate_proposal` |
 | 零输入模板 | `app/agents/structure/template.py:build_template_proposal` |
 | 编排 + 重试 + trace | `app/services/structure_proposal_service.py:propose_structure` |
-| Step 5 出口 | `POST /api/v1/structures/propose`（`app/api/v1/structure.py`） |
-| Step 6–7 确认与落库 | Web `/home/setup` + 本批的四个写接口 |
+| Step 5 出口 | `POST /api/v1/structures/propose`（`app/api/v1/structure.py`，P1.3 后**多**写一行 `structure_proposals.status='pending'`） |
+| Step 6–7 确认与落库 | `POST /proposals/{id}/accept`（**单事务**原子建 4 层，P1.3）+ `POST /proposals/{id}/reject`（仅标记）+ Web `/home/proposals` 列表 + `/home/setup` 即时确认 |
 
 **两处设计稿修正（实现时才发现，已按修正后的方案交付）**
 
@@ -558,20 +564,32 @@ Step 6–7 就是本批的普通写接口。**代码里没有 7 值 step 枚举*
 一次 LLM 调用   (provider.structured_output, 可带 image_url)  → StructureProposalOutput
 一次 DB 读      (build_structure_context)                     → 接地块 + 词表 + 现有名称
 一个纯函数      (validate_proposal)                           → 改写后的提议 + warnings
-一次响应        (POST /structures/propose)                    → **到此为止，不落库**
+一次响应        (POST /structures/propose)                    → 响应 + 落一行 pending 提案
+一次单事务 accept  (POST /proposals/{id}/accept)              → 4 层真实结构
 ```
 
-对应到设计稿的编号：Step 1+3 = 那次调用，Step 2 = DB 读，Step 4 = 纯函数，Step 5 = 响应，
-Step 6 = Web `/home/setup` 的确认界面，Step 7 = 逐节点调用写接口。
+**P1.3 后 Step 5 会写一行 `structure_proposals.status='pending'`**（`app/services/structure_proposal_service.py:_persist_proposal`），
+但**不**写 `rooms` / `storage_units` / `storage_sections` / `storage_slots` 的任何一行——
+pending 提案对外**不**出现在 `/homes/{homeId}/space-tree`、不参与 `/recommendations` 检索。
+直到 `POST /proposals/{id}/accept` 单事务调用 `create_room / create_unit /
+create_section / create_slot`，真实结构才一次性落库。`AgentTrace` 仍如往常
+记录那次 LLM 调用（`template` 支路连 trace 也不写，`trace_id = null`）。
 
-**Step 5 → Step 7 之间没有任何数据库写入。** 提议不是一个资源，它是**一次响应的 payload**。
-（唯一的行是 `AgentTrace`：它记录这次调用发生了什么，不是提议本身。）
+对应到设计稿的编号：Step 1+3 = 那次调用，Step 2 = DB 读，Step 4 = 纯函数，
+Step 5 = 响应（现在**持久化为 pending**），Step 6 = `POST /proposals/{id}/accept`
+单事务落库，Step 7 = Web `/home/storage` 显示新结构。
 
-> **取舍（需确认）**：代价是提议**不能跨页面刷新保留** —— 用户关掉页面就重新提议一次。
-> 替代方案是建一张 `structure_proposals` 表（`status=pending`）持久化待确认提议，
-> 但那会把一个 AI 产物变成数据库实体，需要新 migration + 新实体类型，
-> 与 `AGENTS.md` §3.3 的字面表述（"未确认的提议不得落库"）也有张力。
-> **当前选择无状态方案**；若后续要做"提议给我，我明天再看"，再改。
+**为什么 accept 是单事务而不是「一个一个 POST」**（P1.3 决策）：原来的
+Web 端 `materialize()` 跑 N 个独立 POST，**失败时已创建的留下、用户被迫重试剩下的**
+（详见 `docs/DEVELOPMENT_PLAN.md` P1.3「已知缺口」）。`accept_proposal` 单事务
+调 `create_room/unit/section/slot`，**4 个 `create_*` 任一失败**就 `db.rollback()`，
+**house 结构一行都不变**（与 `_create_placement` 同款原语）。
+
+> **取值（已落地，P1.3）**：pending 提案持久化的代价是 schema 多一张 JSONB 表
+> + `structure_proposal_service.py` 多 4 个 service；收益是用户在 `/home/proposals`
+> 看得到历史、跨刷新保留、accept 一次到位（4 层 atomic）。`AGENTS.md` §3.3
+> 已经把原则从「未确认的提议不得落库」放宽到「pending 可持久化，**只有 accept 才建真实结构**」——
+> 原始意图（禁止 AI 静默捏造、禁止幻觉写入、禁止非 accepted 状态自动建 row）完整保留。
 
 ### 14.3 输出 schema
 
@@ -647,18 +665,36 @@ LLM 的产物在返回给用户**之前**必须过一遍纯代码检查：
 
 ### 14.5 确认与落库（Step 6–7）
 
-界面在 Web 的 `/home/setup`（`StructureBuilder` → `ProposalFlow`）。
+**P1.3 之前**：界面在 Web 的 `/home/setup`（`StructureBuilder` → `ProposalFlow`），
+落库走**复用** P0.2 的结构写接口（`POST /homes/{id}/rooms`、`POST /rooms/{id}/storage-units` …），
+**每个节点一次请求**，失败可以单独重试，但也会出现"柜子建到一半"的半成品。
 
-- 确认界面**可编辑**：每一层都能勾选 / 改名 / 删除，`+ 加一格` 补上漏掉的格子。
-- 落库**复用 P0.2 的结构写接口**（`POST /homes/{id}/rooms`、`POST /rooms/{id}/storage-units` …），
-  **不新增"落库整个提议"的批量端点** —— 每个节点一次请求，失败可以单独重试，
-  也不会出现"柜子建到一半"的半成品。
-- **未被勾选的节点永远不到达数据库。** 这一条有测试兜底
-  （`tests/api/test_structure_proposal_api.py` 断言 `rooms` / `storage_units` /
-  `storage_sections` / `storage_slots` 的行数不增，且 `agent_traces` 恰好 +1），
-  不只靠 code review。
-- 同一页还有「手动搭建」模式（`ManualBuilder`）：房间 → 柜 → 层 → 格的级联表单，
-  调用的是同一批写接口。**AI 不可用时用户仍能建出 slot**，这是验收的兜底。
+**P1.3 之后**：提案已经作为 `structure_proposals` 一行落库（`pending`），用户有两个入口确认：
+
+| 入口 | 路径 | 行为 |
+| --- | --- | --- |
+| 即时确认 | `/home/setup` 的 `ProposalFlow` | 弹完提议直接点「接受并创建」→ `POST /proposals/{id}/accept` → 跳 `/home/storage` |
+| 稍后决定 | `/home/proposals` 的 `ProposalsList` | 看历史提议、接受 / 拒绝 / 写下理由；接受 → 跳 `/home/storage`，拒绝 → 标记 `status='rejected'` |
+
+`POST /proposals/{id}/accept` 是**单事务**的 `accept_proposal` service：按
+`proposal.proposal["rooms"]` 嵌套循环，把 `create_room` / `create_unit` /
+`create_section` / `create_slot` 串起来。任一 `IntegrityError` / `ConflictError`
+→ `db.rollback()` → 整批回滚，house 结构一行都不变。返回 `counts: {rooms, units,
+sections, slots}` 给前端展示「建了多少行」。
+
+**`pending` 提案永不创建真实结构** —— 这一条有测试兜底：
+`test_accept_creates_full_tree_atomically` 与 `test_accept_with_duplicate_slot_code_returns_409_nothing_created`
+断言 **accept 之前** 4 张表行数不变，**accept 失败之后** 4 张表行数仍然不变；
+只有 `accept` 完整跑完才有真实 row。**也没有 `template` 直通路径**：模板支路
+也写一行 pending、`POST /proposals/{id}/accept` 才能把它建成——零 LLM 也能用，
+但**不绕过 accept**。
+
+> **未做的权衡**：取消「`/home/setup` 可编辑节点」的客户端编辑能力 —— 改个名
+> 必须重新 propose + accept。如果用户强烈要求编辑单节点，跳 `/home/storage?edit=1`
+> （P1.2 的编辑器）单独改。**不做 bulk endpoint**：fan-out ≤ 6 rooms / 12 units
+> 一个一个 accept 用户能看清。**不做提案自动过期**：pending 一直留着，
+> 用户主动 reject 或 accept。**不做 PATCH proposal**：client draft 编辑后
+> **重新 propose** 即可（新的 `proposal_id`），老 proposal 留 `pending` 不动。
 
 ### 14.6 同一套链路的三种输入
 
@@ -766,4 +802,3 @@ leaf 用 `code`，会让 `full_path` 变成 `…/L1S1`）。
 - 批量推荐：`BatchRecommendPipeline`，多条物品共享一次 storage retrieval。
 - 主动收纳建议：用户无新物品时，根据季节 / 使用频率触发。
 - 候选生成可学习：基于历史 `accept/reject` 反馈调权重（offline 训练，不引入 ML 基础设施到 MVP）。
-- 结构提议的持久化：把待确认提议存成 `structure_proposals` 行，支持"先提议、稍后确认"（见 §14.2 的取舍）。

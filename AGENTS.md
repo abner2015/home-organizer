@@ -30,9 +30,12 @@
 
 1. `AIProvider` 必须抽象——业务代码不允许写死任何具体模型供应商。
 2. 所有 LLM 输出必须是结构化 JSON，并经 Pydantic Schema 验证。
-3. **AI 不能静默创建结构**。AI 可以提议新建房间、柜子、层、格子（这是"无需繁琐录入"的前提——让用户自己搭五层结构等于让他自己做收纳规划），但**必须经用户显式确认后才能写入数据库**，未确认的提议不得落库。推荐位置必须来自真实 `StorageSlot`，且 `Recommendation.candidates[*].slot_id` 必须 ∈ 推荐时由"候选生成 + 约束过滤"给出的白名单。
+3. **AI 不能静默创建结构**。AI 可以提议新建房间、柜子、层、格子（这是"无需繁琐录入"的前提——让用户自己搭五层结构等于让他自己做收纳规划）——提议作为 `pending` 草稿持久化到 `structure_proposals` 表（**不出现**在 `/homes/{id}/space-tree` 中、**不参与**推荐检索、**不会**自动建立 room/unit/section/slot 行），**用户显式 accept 后才创建真实结构**（`accepted` 状态由 `POST /structures/proposals/{id}/accept` 单事务原子写入）。拒绝路径走 `POST /structures/proposals/{id}/reject`，设置 `rejected` 状态和 `rejection_note`，不动其它行。推荐位置必须来自真实 `StorageSlot`，且 `Recommendation.candidates[*].slot_id` 必须 ∈ 推荐时由"候选生成 + 约束过滤"给出的白名单。
 
-   > 本条于 2026-09-21 由「AI 不允许创造数据库中不存在的房间、柜子、层、格子」修订而来。原始意图（禁止 AI 静默捏造结构、禁止幻觉写入）完整保留，改变的只是把"提议"与"创建"解耦：此前 AI 连提议都不允许，导致用户必须手工建模。
+   > 本条经两次修订：
+   > - 2026-09-21：先由「AI 不允许创造数据库中不存在的房间、柜子、层、格子」改为「未确认的提议不得落库」，解耦"提议"与"创建"，但当时提议只活在响应里（关掉页面就丢）。
+   > - 2026-09-28（P1.3）：再放宽为「pending 提议可持久化」。原始意图（禁止 AI 静默捏造结构、禁止幻觉写入、禁止 `accepted` 之外的任何路径实际创建 row）完整保留—— `pending` 提议对外不可见、不喂给推荐，不能触发任何真实结构变更；只有 `accept_proposal` 单事务里的 `accepted` 状态才把 row 真正落库（room/unit/section/slot）。
+   > - 提议持久化的副作用：用户可在 `/home/proposals` 看到历史提议，跨刷新保留。`accept` 单事务 → 全有或全无：4 个 `create_*` 任一失败 → 整批回滚，house 结构不变（用户改 draft 后重新 propose 即可）。
 4. 推荐必须经过 Verifier；Verifier 失败时允许 Retry，最多 2 次。
 5. **推荐 pipeline 必须分层**：Vision（LLM）→ Storage Retrieval（DB）→ Candidate Generation（确定性代码）→ Constraint Filtering（确定性代码）→ Ranking（确定性代码）→ LLM Decision（LLM）→ Verifier（确定性代码）→ Retry → Persist。LLM **只**做"对已筛候选打分 + 写理由"，不承担候选生成 / 约束过滤。
 6. 不要为了技术炫技引入复杂基础设施。第一版只用 PostgreSQL + Redis + MinIO。

@@ -26,7 +26,7 @@ OpenAPI 在 `http://localhost:8000/docs`。
 | `items.py` | 物品 CRUD（`POST/GET/PATCH /items[/{id}]`、`/items/{id}/placements`、`/items/{id}/candidates`、`/items/{id}/vision`、`/items/{id}/infer`、`/items/recognize`） |
 | `recommendations.py` | 推荐：`POST /recommendations/items/{id}/recommend`、`GET /recommendations/{id}`、`POST /recommendations/{id}/accept`、`/reject`（带 note）、`/revoke`（撤销排除，P0.6）、`PATCH /recommendations/{id}` |
 | `placements.py` | 直接摆放（不经 LLM）：`POST /placements`、`PATCH /placements/{id}`（改备注 / 换位置，P0.7）、`DELETE /placements/{id}`（软关闭） |
-| `structure.py` | 收纳结构 CRUD + 「结构提议」AI：`POST /structures/propose` + 7 个 CRUD 路由 |
+| `structure.py` | 收纳结构 CRUD + 「结构提议」AI：`POST /structures/propose`（落 `pending` 提议，P1.3）+ `GET /proposals`、`GET /proposals/{id}`、`POST /proposals/{id}/accept`（单事务原子建 4 层）、`POST /proposals/{id}/reject` + 7 个 CRUD 路由 + 3 个 `…/move`（跨父节点，P1.2）|
 | `search.py` | 收纳助手：`POST /search`（带 `conversation_id` 多轮记忆） |
 | `assets.py` / `uploads.py` / `files.py` | 上传（presign / 直传 / 直读） |
 
@@ -44,9 +44,10 @@ services/api/
 │   ├── models/          # SQLAlchemy ORM（asset / conversation / home / item /
 │   │                    #   placement / preference / recommendation / room /
 │   │                    #   rule / storage / trace / user）
-│   ├── services/        # 业务逻辑（auth / asset / conversation / membership /
-│   │                    #   recommendation / search / security / structure /
-│   │                    #   vision / item_inference / image_payload）
+│   ├── services/        # 业务逻辑（auth / asset / conversation / home / membership /
+│   │                    #   recommendation / search / security /
+│   │                    #   structure / structure_proposal / image_payload / _
+│   │                    #   vision / item_inference）
 │   ├── agents/          # 推荐 pipeline（pipeline / ranking / prompt_render /
 │   │                    #   placement_service / reason）+ NL 搜索编排
 │   │                    #   （agent / intent / answer / context / location /
@@ -64,7 +65,8 @@ services/api/
 │   └── repositories/    # 空包（占位）
 ├── alembic/versions/    # 0001_initial_schema / 0002_assets /
 │                        #   0003_update_recommendation_status /
-│                        #   0004_recommendation_revoked
+│                        #   0004_recommendation_revoked /
+│                        #   0005_structure_proposals
 ├── evaluation/dataset/  # 评测用例 + reports/
 ├── tests/{unit,api,db}/
 ├── var/storage/         # STORAGE_BACKEND=local 时的图片落点（git 忽略）
@@ -149,7 +151,7 @@ curl -X POST localhost:8000/api/v1/auth/login \
 ```bash
 python -m ruff check app/ tests/             # 基线 32
 python -m mypy app/                          # 基线 20
-python -m pytest tests/ --no-header -q       # 基线 797 passed / 1 skipped
+python -m pytest tests/ --no-header -q       # 基线 811 passed / 1 skipped
 ```
 
 跑特定子集：

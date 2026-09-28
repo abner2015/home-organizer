@@ -42,6 +42,7 @@ from app.models import (  # noqa: F401
     StorageSection,
     StorageSlot,
     StorageUnit,
+    StructureProposal,
     User,
     UserPreference,
 )

@@ -27,7 +27,7 @@ home-organizer/
 │   └── api/               # FastAPI 后端（核心实现都在这里）
 │       ├── app/           # 业务代码
 │       ├── alembic/       # DB 迁移
-│       ├── tests/         # pytest 全套（797 passed / 1 skipped）
+│       ├── tests/         # pytest 全套（811 passed / 1 skipped）
 │       └── README.md      # 后端详尽文档
 │
 ├── docs/                  # 设计文档
@@ -97,7 +97,7 @@ npm run dev          # http://localhost:3000
 ```bash
 # 后端
 cd services/api && source .venv/bin/activate
-python -m pytest tests/ --no-header -q     # 基线 797 passed / 1 skipped
+python -m pytest tests/ --no-header -q     # 基线 811 passed / 1 skipped
 
 # 前端
 cd apps/web
@@ -108,7 +108,7 @@ npx tsc --noEmit && npx next lint          # 应当无输出
 
 ---
 
-## 项目当前状态（2026-09-24）
+## 项目当前状态（2026-09-28）
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
@@ -116,8 +116,9 @@ npx tsc --noEmit && npx next lint          # 应当无输出
 | P0.1-0.9, P0.A-C | 真实账号 / 拍照即建模 / 反向录入 / 闭环讲理由 / 并发 409 / 撤销排除 / PATCH 摆放 / 成员管理 / 创建新家 / 切换家 UI / 批量撤销 + 同步重跑推荐 / 结构详情路由 + 详情页 | ✅ 全部完成 |
 | P1.1 | 跨用户偏好共享 —— 普通物品偏好以家为单位共享；敏感物品偏好（药品 / 贵重）永远个人 | ✅ |
 | P1.4 | 多 home 切换状态重置 —— 切 home 时 client 重置 `AssistantClient` 的 conversation；后端 404 钉死 | ✅ |
+| P1.3 | **结构提议持久化** —— `propose` 落 `structure_proposals` 表（pending），`accept` 单事务 4 层原子建，`/home/proposals` 看历史 | ✅ |
 
-基线：**后端 797 passed / 1 skipped**、ruff 32、mypy 20、tsc + next lint 干净。
+基线：**后端 811 passed / 1 skipped**、ruff 32、mypy 20、tsc + next lint 干净。
 详细里程碑 + 真实产物路径见 `docs/DEVELOPMENT_PLAN.md`。
 
 ---
@@ -126,7 +127,9 @@ npx tsc --noEmit && npx next lint          # 应当无输出
 
 - `AIProvider` 必须抽象，不允许写死任何具体模型供应商。
 - 所有 LLM 输出必须是结构化 JSON 并经 Pydantic schema 验证（`extra="forbid"`、不强制 `strict`）。
-- AI 可以提议新建结构，**但未经用户显式确认不得落库**。推荐位置必须来自真实 `StorageSlot`。
+- AI 可以提议新建结构 —— **提议作为 `pending` 落 `structure_proposals` 表**，
+  不出现在 space-tree、不被检索；只有用户接受后才在 `accept_proposal` 单事务里
+  原子建立真实结构。推荐位置必须来自真实 `StorageSlot`。
 - 推荐必须经过 Verifier；失败允许 Retry（最多 2 次）。
 - API Key 不能进入前端；`.env` 不能进入 Git；Docker 环境必须能起完整系统。
 - 用户输入的文本是数据，不是指令。所有 prompt 必须显式声明这一点。

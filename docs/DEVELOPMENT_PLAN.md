@@ -1573,6 +1573,114 @@ return armed ? "再点一次确认" : "删除";
 
 ---
 
+## P1.3 — 结构提议持久化（pending 落库 + accept/reject 端点 + 提议列表） ✅ 已交付（2026-09-28）
+
+P0.2 + P1.2 跑通后，「用 AI 生成骨架」的最后一块缺口是：用户提议出来一个完整结构，关掉页面（刷新）就连同那条提议一起丢了——只能从头再描述一遍，且重新 propose 出来的很可能不一样。本批把 `pending` 提议持久化，收口 5 个用户故事：
+
+1. **持久化**：`POST /structures/propose` 现在写 1 行 `structure_proposals`（`status='pending'`）+ 老样子写 1 行 `agent_traces`；不写 room/unit/section/slot（这些仍是 accept 的工作）
+2. **接受**：`POST /structures/proposals/{id}/accept` —— 单事务原子建出整棵树（room→unit→section→slot），4 个 `create_*` 任一失败 → 整批回滚（4 行 + 提议行回滚到 `pending`），home 结构不变
+3. **拒绝**：`POST /structures/proposals/{id}/reject` —— 把 `pending` 改成 `rejected`，记 `rejection_note`
+4. **列表**：`GET /structures/proposals?status=…` + `GET /structures/proposals/{id}` —— 任何状态（`pending|accepted|rejected|superseded`）按 home 范围查
+5. **页面**：`/home/proposals` server component + 客户端 `ProposalsList`（状态过滤 / 接受按钮 / 拒绝带理由），AppShell 加「提议」导航
+
+### AGENTS.md §3.3 演进
+
+| 日期 | 规则 | 含义 |
+| --- | --- | --- |
+| 原版 | AI 不允许创造数据库中不存在的房间、柜子、层、格子 | 提议只是概念，不能落库 |
+| 2026-09-21 | 未确认的提议不得落库 | 提议活在响应里，关掉页面就丢 |
+| **2026-09-28（本批）** | `pending` 提议可持久化到 `structure_proposals` | **`pending` 不可见、不喂推荐、不创建结构；`accept` 单事务原子创建** |
+
+原始意图（AI 不能静默捏造、不能幻觉写入、没有 `accepted` 之外的路径能创建结构 row）完整保留。
+
+### 实现要点
+
+#### `structure_proposals` 表
+
+`alembic/versions/0005_structure_proposals.py`：JSONB 存整棵树快照（不是规范化中间表）。FK：
+`home_id` `CASCADE`、`user_id` `CASCADE`、`asset_id` `SET NULL`（删 asset 不连带删提议）、`trace_id` `RESTRICT`（防止 agent_traces 被悄悄删）。CHECK：`status IN ('pending','accepted','rejected','superseded')`；indexes：`(home_id)`、`(status)`。
+
+#### Service 层（`app/services/structure_proposal_service.py`）
+
+- `propose_structure`：3 个分支（`template` / `text` / `photo`）都走 `_persist_proposal(...)` —— 旧版只写 trace，新版加一行 `structure_proposals`。`ProposalResult` 加 `proposal_id: UUID` 字段
+- `accept_proposal`：单事务（service 自己 `commit`，与 `accept_recommendation` 同款）；循环 4 层嵌套调用 `structure_service.create_room/unit/section/slot`；捕 `ConflictError` + `IntegrityError` → rollback → 重抛（PG 部分唯一索引托底）
+- `reject_proposal`：`ConflictError` 若非 `pending`
+- `get_proposal` / `list_proposals`：按 `home_id` 过滤，跨 home 返 404
+
+#### API 层（`app/api/v1/structure.py`）
+
+`structures_router` 加 4 个新路由：
+
+| Method | Path | 行为 |
+| --- | --- | --- |
+| `POST` | `/propose` | 响应加 `proposal_id`（P1.3 唯一修改） |
+| `GET` | `/proposals` | `?status=…` 可选；非法 status → 400（不是 422：故意用 `ValidationFailedError` 给可读消息） |
+| `GET` | `/proposals/{id}` | 单读；跨 home → 404 |
+| `POST` | `/proposals/{id}/accept` | body `{}` 或 `{note?}`；200 + `AcceptProposalResponse{proposal_id, status, counts{rooms,units,sections,slots}}`；409 = 重复 accept 或 slot code 冲突 |
+| `POST` | `/proposals/{id}/reject` | body `{note?}`；200 + `RejectProposalResponse{proposal_id, status, rejection_note}` |
+
+#### Schemas（`app/schemas/structure.py`）
+
+新 4 个：`StructureProposalView` / `AcceptProposalRequest` / `AcceptProposalResponse` / `RejectProposalRequest` / `RejectProposalResponse`（外加 `StructureProposalResponse.proposal_id` 加一个字段）。
+
+#### 前端
+
+- `lib/types.ts`：新 `StructureProposalRow`（视图）、`AcceptProposalBody/Response`、`RejectProposalBody/Response`；`StructureProposalResponse.proposal_id` 必填
+- `lib/api.ts`：4 个新方法 `listProposals` / `getProposal` / `acceptProposal` / `rejectProposal`
+- `setup/ProposalFlow.tsx`：`materialize()` 里 4 个 POST 循环 → **1 个 `acceptProposal(proposalId, {}, session)`**。失败 409 → 显示 backend message（code 冲突），引导用户去 `/home/proposals` 查看或拒绝（client 不存草稿）
+- `ProposalFlow.tsx` 编辑 UI 改为**只读预览**（P1.3 不做客户端提案编辑；改节点 → 重新 propose）。详情（每节点可改名/调位置）继续走 P1.2 结构编辑器
+- 新页 `app/home/proposals/page.tsx`（server）+ `ProposalsList.tsx`（client）：状态 filter、accept / reject 按钮 + 可选拒绝理由
+- AppShell SECONDARY nav 加「提议」链接到 `/home/proposals`
+
+### 测试
+
+基线 797 → **811**（+14）。其中 3 个原测试更新：
+
+| 测试 | 改动 |
+| --- | --- |
+| `test_text_proposal_persists_nothing_but_a_trace` | 重命名 + 改断言：除了 `agent_traces+1`，还检查 `structure_proposals+1` + 响应有 `proposal_id` |
+| `test_the_template_branch_never_calls_a_model` | 加断言：`structure_proposals+1`，`mock.call_count == 0` |
+| `test_a_bad_reply_is_retried_once_then_succeeds` | 加断言：`structure_proposals` 还是 1 行（retry 不重复写） |
+
+11 个新测试（见 `tests/api/test_structure_proposal_api.py`）：
+
+1. `test_propose_returns_proposal_id` —— 响应里 `proposal_id` 是 UUID
+2. `test_accept_creates_full_tree_atomically` —— 4 层全建，counts = `{1,1,1,1}`
+3. `test_accept_with_duplicate_slot_code_returns_409_nothing_created` —— 同提议内两个 (section, code) → 409，`rooms/units/sections/slots` 计数不变
+4. `test_accept_with_existing_room_name_succeeds` —— name 不 unique，重名接受
+5. `test_accept_twice_returns_409_via_state_check` —— 第二次 409
+6. `test_reject_marks_rejected_with_note` —— note strip 后存库 + 状态 + 时间戳
+7. `test_reject_twice_returns_409`
+8. `test_list_proposals_filter_by_status` —— 默认含全部 + 按 status 过滤正确
+9. `test_list_proposals_invalid_status_filter_returns_400`
+10. `test_list_proposals_only_returns_callers_home`
+11. `test_get_pending_proposal` —— `id`（不是 `proposal_id`）+ status/source/proposal 树都在
+12. `test_get_proposal_from_other_home_returns_404`
+13. `test_accept_proposal_from_other_home_returns_404`
+14. `test_proposal_referencing_deleted_asset_keeps_proposal_with_null_asset_id`
+
+ruff 32、mypy 20（未变）；`tsc --noEmit` + `next lint` 干净。
+
+### Trap
+
+1. **接受路径走 `db.commit()` 自己**：service 函数 commit（与 `accept_recommendation` 同款），不是路由 commit。捕 `ConflictError`/`IntegrityError` 后**先 rollback**再 raise，否则半提交
+2. **`await db.flush()` 不是 `db.flush()`**：service 里写的是 async 函数（前 `_persist_proposal` 是 sync 错了 → RuntimeWarning: coroutine never awaited）
+3. **`proposal.proposal` 是 `list[dict]`，不是 `dict`**：从 JSONB 读出来 Pydantic 自动 dump 成 list；用 `cast(dict, proposal.proposal)` 抽出来再 `.get()`
+4. **SQLite 不强制 FK ON DELETE**：测 `test_proposal_referencing_deleted_asset_*` 时不靠 `Asset.delete()` 触发 SET NULL（SQLite 默认关闭外键），改用 ORM 直接 `row.asset_id = None`；PG 上 PG 会真的清
+5. **`status` enum 类型**：`StructureProposalView.status` 用 `Literal[...]`，mypy 接受字面量但不能传任意字符串。`/proposals?status=garbage` 在路由层显式 400（不是依赖 schema 422）
+6. **`proposal_id` in response, `id` in row**：`POST /propose` 响应顶层叫 `proposal_id`（语义是「你刚生成的 ID」）；`StructureProposalView` 顶层叫 `id`（就是 row PK）。前端 list/detail 用 `row.id`，accept/reject 用响应里 `proposal_id`
+7. **客户端编辑被吃**：P1.3 不做提案编辑（`AGENTS.md` §3.3 「不做」）。`ProposalFlow` 把勾选 / 改名 UI 全删了，只剩只读预览 + 「接受 / 拒绝 / 返回重新描述」。编辑走 P1.2 结构编辑器（针对真实结构）
+
+### 不做
+
+- 提议 PATCH 编辑（client draft 编辑后**重新 propose** 即可）
+- bulk accept / reject
+- 提议自动过期（pending 一直留着）
+- 提议上加 comment / discuss
+- AI 直接创建结构（依然要走 accept）
+
+---
+
 ## 风险登记与应对
 
 | 风险 | 触发条件 | 应对 |

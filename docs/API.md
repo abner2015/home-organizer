@@ -2,7 +2,13 @@
 
 > FastAPI，OpenAPI 自动生成。所有路径以 `/api/v1` 开头。
 >
-> 最后更新：2026-09-24 —— **P1.1**：偏好**以家为单位共享** —— A 接受 / 拒绝
+> 最后更新：2026-09-28 —— **P1.3**：AI 结构**提议现在持久化** —— `POST /structures/propose`
+> 返回里多了 `proposal_id`，新增 `GET /proposals`、`GET /proposals/{id}`、
+> `POST /proposals/{id}/accept`（**单事务**原子建 4 层结构）、`POST /proposals/{id}/reject`
+> 四个端点（§5）；`accept_proposal` 是同一份 `create_room/unit/section/slot` 实现的
+> 全有或全无的批——4 个 `create_*` 任一失败即回滚，house 结构不变。提议不再只活在响应里，
+> 跨刷新保留，路径与实现见 `docs/DEVELOPMENT_PLAN.md` P1.3 与 `memory/p1.3-structure-proposals.md`。
+> 2026-09-24 —— **P1.1**：偏好**以家为单位共享** —— A 接受 / 拒绝
 > 某 slot 对全家都生效；**唯独敏感物品**（`is_sensitive=True`）的偏好
 > 只对本人生效（药品 / 贵重物品的容错率为 0）。详见 §7 的备注与 `docs/AGENT.md` §15.1。
 > 2026-09-22：**P0.4**：`ItemPlacementView` 加 `reason`
@@ -32,8 +38,9 @@
 | §5 存储 | `GET /homes/{id}/space-tree`、`GET /homes/{id}/slots` | ✅ 读 |
 | | **`POST`/`PATCH`/`DELETE` unit / section / slot** | ✅ 写（P0.2） |
 | | **`POST …/move`（跨父节点）** | ✅ 写（P1.2） |
+| | **结构提议：`GET /proposals`、`GET /proposals/{id}`、`POST /proposals/{id}/accept`、`POST /proposals/{id}/reject`** | ✅ 写（P1.3） |
 | §6 物品 | presign、assets、files、items（创建 / 查询 / 改 / placements / candidates）、recognize | ✅ |
-| §7 AI | vision、infer、recommend（POST + GET）、accept、reject、PATCH、search、**`POST /structures/propose`** | ✅ |
+| §7 AI | vision、infer、recommend（POST + GET）、accept、reject、PATCH、search、**`POST /structures/propose`（响应加 `proposal_id`）** | ✅ |
 | | ~~`/recommendations/{recId}/adjust`~~ | ❌ **已废弃**，见 §7 |
 | §8 摆放 | **`POST /placements`（直接落位，不经 LLM）、`DELETE /placements/{id}`（软关闭）** | ✅ 写（P0.3） |
 | §9 规则与偏好 | 规则 / 偏好的 CRUD | 📋 设计稿 |
@@ -511,6 +518,116 @@ slot 详情 + **当前 active 物品列表**（`ItemPlacement JOIN Item`，按 `
   ]
 }
 ```
+
+### 结构提议（P1.3，2026-09-28 落地）
+
+> `POST /structures/propose`（§7）现在**会落库** —— 每一次 propose 都在
+> `structure_proposals` 表里新增一行 `status='pending'` 的快照，跨刷新保留。
+> 用户在 `/home/proposals` 看到历史提议，可以接受让 AI 提议的整棵结构一次性成为
+> 真实 room / unit / section / slot，也可以写下理由拒绝。
+>
+> **`pending` 提议对外不可见** —— 不出现在 `/homes/{homeId}/space-tree`、
+> 不参与 `/recommendations` 的检索、不会自动建立 row。只有 `accept` 后才
+> 落真实结构；`AGENTS.md` §3.3 已经据此修订。
+
+### GET /api/v1/proposals ✅
+
+当前 home 的所有结构提议。
+
+| Query | 取值 | 默认 |
+| --- | --- | --- |
+| `status` | `pending` / `accepted` / `rejected` / `superseded` | 不传则全返回 |
+
+```json
+// response 200 — StructureProposalView[]
+[
+  {
+    "id": "uuid",
+    "home_id": "uuid",
+    "user_id": "uuid",
+    "source": "text",
+    "asset_id": null,
+    "description": "我家厨房有个三层吊柜",
+    "proposal": {
+      "rooms": [
+        { "name": "厨房", "room_type": "kitchen",
+          "units": [
+            { "name": "吊柜", "unit_type": "cabinet",
+              "sections": [
+                { "name": "第1层", "section_type": "layer",
+                  "slots": [
+                    { "code": "K1", "label": "左侧",
+                      "allowed_categories": ["餐具"],
+                      "capacity_hint": "medium" }
+                  ] }
+              ] }
+          ] }
+      ],
+      "rationale": "描述里提到厨房的三层吊柜",
+      "confidence": 0.8
+    },
+    "warnings": [],
+    "status": "pending",
+    "rejection_note": null,
+    "created_at": "2026-09-28T10:00:00Z",
+    "accepted_at": null,
+    "rejected_at": null
+  }
+]
+```
+
+- 仅返回当前 home 的提议，跨 home → 看不到，不存在 → **404**；无凭证 → 401。
+- `status` 传非法值 → **400** `validation_error`。
+- 按 `created_at DESC` 排序。
+
+### GET /api/v1/proposals/{proposalId} ✅
+
+读一条完整提议。跨 home / 未知 id → **404**。
+
+### POST /api/v1/proposals/{proposalId}/accept ✅
+
+接受一份 `pending` 提议，**单事务**调用 `create_room / create_unit /
+create_section / create_slot` 建出整棵结构。任何一步失败（409 slot code 冲突、
+FK 违反、命名解析错误等）→ **整批回滚**，house 结构一行都不改。
+
+```json
+// request（extra="forbid"；字段全部可选）
+{ "note": "可以接受本次尝试" }
+
+// response 200
+{
+  "proposal_id": "uuid",
+  "status": "accepted",
+  "counts": { "rooms": 1, "units": 1, "sections": 1, "slots": 3 }
+}
+```
+
+- 提议状态不是 `pending` → **409** `conflict`（消息带当前状态，便于诊断）。
+- slot code 与既有 slot 冲突 → **409** + rollback（与 `POST /sections/{id}/slots` 同款 message）。
+- 跨 home → **404**。
+- 提议里的 `room.name` / `unit.name` **不是 unique**（DB 列无唯一约束），
+  因此不会因为重名失败 —— 这是设计而非 bug：用户可能想再起一间主卧。
+- `agent_traces` 行数不变（这是**纯结构**写入，不调 LLM）。
+
+### POST /api/v1/proposals/{proposalId}/reject ✅
+
+写一条拒绝理由，置 `status = rejected` + `rejected_at = now()`。
+
+```json
+// request（extra="forbid"；note 可选，≤ 512）
+{ "note": "厨房已经有这个柜子了" }
+
+// response 200
+{
+  "proposal_id": "uuid",
+  "status": "rejected",
+  "rejection_note": "厨房已经有这个柜子了"
+}
+```
+
+- 提议状态不是 `pending` → **409**（消息带当前状态）。
+- 跨 home → **404**。
+- 拒绝只标记，不动其他行 —— 不删除、不级联，row 仍可读。
 
 ---
 
@@ -993,6 +1110,7 @@ PATCH 之后 `status` 仍是 `pending` —— 直到 accept 才落 `ItemPlacemen
 ```json
 // response 200
 {
+  "proposal_id": "uuid",
   "proposal": {
     "rooms": [
       { "name": "厨房", "room_type": "kitchen",
@@ -1012,9 +1130,14 @@ PATCH 之后 `status` 仍是 `pending` —— 直到 accept 才落 `ItemPlacemen
 }
 ```
 
-- **不落库。** 四张存储表（`rooms` / `storage_units` / `storage_sections` / `storage_slots`）
-  一行都不写；唯一副作用是一行 `AgentTrace`（`template` 支连这个也没有，`trace_id = null`）。
-  这条有测试断言四表行数 + `agent_traces` 恰好 +1（`tests/api/test_structure_proposal_api.py`）。
+- **P1.3 后会落库**：响应里多了一个 `proposal_id`，背后是 `structure_proposals` 表
+  一行 `status='pending'` 的快照。跨刷新保留，去 `/home/proposals` 可以看到
+  历史提议并接受 / 拒绝。**四张存储表（`rooms` / `storage_units` /
+  `storage_sections` / `storage_slots`）仍然一行都不写** —— 真实结构要等
+  `POST /proposals/{proposal_id}/accept`（§5）才原子建出来。`template` 支
+  （`-1`）也落一份 pending 提议，**完全跳过 LLM**。
+- `pending` 提议**不**参与检索：`GET /homes/{homeId}/space-tree` 看不到，
+  推荐 pipeline 的 RETRIEVE 也不喂它 —— 真实结构只能从「被接受的提议」里来。
 - **`warnings` 不是装饰。** Step 4（`app/agents/structure/validate.py`）会**静默改写**模型输出
   —— 超限截断、丢掉同分区内重复的 `code`、清掉不在用户词表里的 `allowed_categories`
   —— 不告诉用户，就等于让他确认一份和模型说的不一样的东西。`kind` 是封闭集合：
@@ -1035,8 +1158,8 @@ PATCH 之后 `status` 仍是 `pending` —— 直到 accept 才落 `ItemPlacemen
 - 只有**枚举违法**（比如 `room_type` 传中文）才值得重试：那是 `AIOutputParseError`，
   按 `vision_service` 的策略 parse ×2 / transport ×1；其余一律在这里修掉，不退回给 LLM。
 - **`asset_id` 属于别的家 → 404**（与 §6 的 vision 路径同口径）；provider 失败 → 503。
-- 路径用 `/structures/propose` 而非 `/structure-proposals`：后者暗示存在一张
-  `structure_proposals` 表，而这个设计**明确拒绝了持久化提议**（`docs/AGENT.md` §14.2）。
+- 路径用 `/structures/propose` 而非 `/structure-proposals`：**propose 触发的是「创建提议」**，不是「列提议」；
+  列 / 读 / 接受 / 拒绝在 `/proposals/{id}/...`（§5）。`docs/AGENT.md` §14.2 详述。
 
 ---
 

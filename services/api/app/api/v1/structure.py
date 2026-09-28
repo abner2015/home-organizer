@@ -24,17 +24,18 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.structure.validate import ProposalWarning
 from app.ai.factory import get_provider
-from app.ai.provider import AIProvider
+from app.ai.provider import AIProvider, StructureProposalOutput
 from app.api.deps import Actor, ensure_member, get_actor
-from app.core.exceptions import ForbiddenError, NotFoundError
+from app.core.exceptions import ForbiddenError, NotFoundError, ValidationFailedError
 from app.db.enums import HomeRole
 from app.db.session import get_db
-from app.models import HomeMembership
+from app.models import HomeMembership, StructureProposal
 from app.models.home import Home
 from app.schemas.home import (
     HomeView,
@@ -48,7 +49,11 @@ from app.schemas.home import (
     unit_view,
 )
 from app.schemas.structure import (
+    AcceptProposalRequest,
+    AcceptProposalResponse,
     HomeUpdateRequest,
+    RejectProposalRequest,
+    RejectProposalResponse,
     RoomCreateRequest,
     RoomUpdateRequest,
     SectionCreateRequest,
@@ -59,6 +64,7 @@ from app.schemas.structure import (
     SlotUpdateRequest,
     StructureProposalRequest,
     StructureProposalResponse,
+    StructureProposalView,
     UnitCreateRequest,
     UnitMoveRequest,
     UnitUpdateRequest,
@@ -518,10 +524,140 @@ async def propose_structure(
     )
     await db.commit()
     return StructureProposalResponse(
+        proposal_id=result.proposal_id,
         proposal=result.proposal,
         warnings=result.warnings,
         source=result.source,
         trace_id=result.trace_id,
+    )
+
+
+# ---------------------------------------------------- proposal CRUD (P1.3)
+
+
+@structures_router.get(
+    "/proposals",
+    response_model=list[StructureProposalView],
+    summary="List structure proposals for the caller's home",
+)
+async def list_proposals(
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    status_filter: Annotated[
+        str | None,
+        Query(
+            alias="status",
+            description="pending|accepted|rejected|superseded",
+        ),
+    ] = None,
+) -> list[StructureProposalView]:
+    """Newest first. ``status`` defaults to ``None`` (every state); the UI
+    passes ``status=pending`` to show only the actionable set."""
+    if status_filter is not None and status_filter not in {
+        "pending",
+        "accepted",
+        "rejected",
+        "superseded",
+    }:
+        # Pydantic on ``StructureProposalView.status`` would 422, but a
+        # query-string typo deserves a 400 with a useful message here.
+        raise ValidationFailedError(
+            f"unsupported status filter: {status_filter!r}",
+            details={"allowed": ["pending", "accepted", "rejected", "superseded"]},
+        )
+    rows = await structure_proposal_service.list_proposals(
+        db, home_id=actor.home_id, status=status_filter
+    )
+    return [_proposal_view(r) for r in rows]
+
+
+@structures_router.get(
+    "/proposals/{proposal_id}",
+    response_model=StructureProposalView,
+    summary="Get one structure proposal",
+)
+async def get_proposal(
+    proposal_id: uuid.UUID,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StructureProposalView:
+    row = await structure_proposal_service.get_proposal(
+        db, proposal_id=proposal_id, home_id=actor.home_id
+    )
+    return _proposal_view(row)
+
+
+@structures_router.post(
+    "/proposals/{proposal_id}/accept",
+    response_model=AcceptProposalResponse,
+    summary="Apply a pending proposal — atomic create of rooms/units/sections/slots",
+)
+async def accept_proposal(
+    proposal_id: uuid.UUID,
+    payload: AcceptProposalRequest,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AcceptProposalResponse:
+    """All-or-nothing. A duplicate (section_id, code) — whether the existing
+    tree already has it, or two slots in the same proposal share one —
+    rolls the whole batch back and returns 409."""
+    outcome = await structure_proposal_service.accept_proposal(
+        db,
+        proposal_id=proposal_id,
+        home_id=actor.home_id,
+        user_id=actor.user_id,
+    )
+    return AcceptProposalResponse(
+        proposal_id=outcome.proposal.id,
+        status="accepted",
+        counts=outcome.counts,
+    )
+
+
+@structures_router.post(
+    "/proposals/{proposal_id}/reject",
+    response_model=RejectProposalResponse,
+    summary="Mark a pending proposal rejected",
+)
+async def reject_proposal(
+    proposal_id: uuid.UUID,
+    payload: RejectProposalRequest,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RejectProposalResponse:
+    row = await structure_proposal_service.reject_proposal(
+        db,
+        proposal_id=proposal_id,
+        home_id=actor.home_id,
+        note=payload.note,
+    )
+    return RejectProposalResponse(
+        proposal_id=row.id,
+        status="rejected",
+        rejection_note=row.rejection_note,
+    )
+
+
+def _proposal_view(row: StructureProposal) -> StructureProposalView:
+    """Translate a ``StructureProposal`` ORM row into its API view shape.
+
+    The DB stores ``proposal`` and ``warnings`` as JSON; the view wants
+    strongly-typed Pydantic models so the OpenAPI schema is honest.
+    """
+    return StructureProposalView(
+        id=row.id,
+        home_id=row.home_id,
+        user_id=row.user_id,
+        source=row.source,
+        asset_id=row.asset_id,
+        description=row.description,
+        proposal=StructureProposalOutput.model_validate(row.proposal),
+        warnings=[ProposalWarning.model_validate(w) for w in (row.warnings or [])],
+        status=row.status,
+        rejection_note=row.rejection_note,
+        created_at=row.created_at,
+        accepted_at=row.accepted_at,
+        rejected_at=row.rejected_at,
     )
 
 

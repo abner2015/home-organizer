@@ -10,6 +10,8 @@
 // another's request on the server.
 
 import type {
+  AcceptProposalBody,
+  AcceptProposalResponse,
   AcceptRequest,
   AcceptResponse,
   AssetRecognizeResponse,
@@ -41,6 +43,8 @@ import type {
   PresignResponse,
   ProposeStructureBody,
   RecommendResponse,
+  RejectProposalBody,
+  RejectProposalResponse,
   RejectRequest,
   RejectResponse,
   RevokeResponse,
@@ -62,6 +66,7 @@ import type {
   StorageSlot,
   StorageUnit,
   StructureProposalResponse,
+  StructureProposalRow,
   TokenResponse,
   UnitCreateBody,
   UnitMoveBody,
@@ -497,8 +502,9 @@ export const api = {
 
   // Ask for a structure. An empty body selects the server-side template: no
   // model is called and nothing is written except (for the other two branches)
-  // an AgentTrace. The proposal is not persisted anywhere — the user's ticks in
-  // the confirm step are what drive `createRoom`/`createUnit`/… below.
+  // an AgentTrace. P1.3: the returned proposal is also persisted as a
+  // ``structure_proposals`` row (status=pending) so the user can accept or
+  // reject it later from ``/home/proposals``.
   async proposeStructure(
     body: ProposeStructureBody,
     session: ApiSession,
@@ -508,6 +514,58 @@ export const api = {
       session,
       body: JSON.stringify(body),
     });
+  },
+
+  // P1.3 — list pending (or any-status) proposals for the caller's home.
+  // ``statusFilter`` is optional; omitting it returns every state, newest first.
+  async listProposals(
+    session: ApiSession,
+    statusFilter?: string,
+  ): Promise<StructureProposalRow[]> {
+    const qs = statusFilter
+      ? `?status=${encodeURIComponent(statusFilter)}`
+      : "";
+    return request<StructureProposalRow[]>(
+      `/api/v1/structures/proposals${qs}`,
+      { method: "GET", session },
+    );
+  },
+
+  // P1.3 — single-row read for the proposal detail. Cross-home → 404.
+  async getProposal(
+    proposalId: UUID,
+    session: ApiSession,
+  ): Promise<StructureProposalRow> {
+    return request<StructureProposalRow>(
+      `/api/v1/structures/proposals/${proposalId}`,
+      { method: "GET", session },
+    );
+  },
+
+  // P1.3 — atomic accept. Single round-trip materialises the full tree
+  // (room → unit → section → slot) inside one transaction; 409 means nothing
+  // was created (e.g. duplicate (section_id, code)).
+  async acceptProposal(
+    proposalId: UUID,
+    body: AcceptProposalBody,
+    session: ApiSession,
+  ): Promise<AcceptProposalResponse> {
+    return request<AcceptProposalResponse>(
+      `/api/v1/structures/proposals/${proposalId}/accept`,
+      { method: "POST", session, body: JSON.stringify(body) },
+    );
+  },
+
+  // P1.3 — flip a pending proposal to ``rejected`` and record an optional note.
+  async rejectProposal(
+    proposalId: UUID,
+    body: RejectProposalBody,
+    session: ApiSession,
+  ): Promise<RejectProposalResponse> {
+    return request<RejectProposalResponse>(
+      `/api/v1/structures/proposals/${proposalId}/reject`,
+      { method: "POST", session, body: JSON.stringify(body) },
+    );
   },
 
   // ------------------------------------------------------------- items

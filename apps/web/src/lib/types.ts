@@ -320,6 +320,55 @@ export interface StructureProposalResponse {
   source: ProposalSource;
   // null for the template branch: no model ran, so there is nothing to trace.
   trace_id: UUID | null;
+  // P1.3 — the row's UUID. ``null`` only on a future schema; today every
+  // branch (photo / text / template) returns one.
+  proposal_id: UUID;
+}
+
+// P1.3 — the persisted proposal row, exactly as it sits in
+// ``structure_proposals``. The proposal *tree* is identical to
+// ``StructureProposal.proposal`` above; the wrapper adds the row-level fields
+// the user can act on (status, timestamps, asset_id).
+export type StructureProposalStatus =
+  | "pending"
+  | "accepted"
+  | "rejected"
+  | "superseded";
+
+export interface StructureProposalRow {
+  id: UUID;
+  home_id: UUID;
+  user_id: UUID;
+  source: ProposalSource;
+  asset_id: UUID | null;
+  description: string | null;
+  proposal: StructureProposal;
+  warnings: ProposalWarning[];
+  status: StructureProposalStatus;
+  rejection_note: string | null;
+  created_at: string;
+  accepted_at: string | null;
+  rejected_at: string | null;
+}
+
+export interface AcceptProposalBody {
+  note?: string | null;
+}
+
+export interface AcceptProposalResponse {
+  proposal_id: UUID;
+  status: "accepted";
+  counts: { rooms: number; units: number; sections: number; slots: number };
+}
+
+export interface RejectProposalBody {
+  note?: string | null;
+}
+
+export interface RejectProposalResponse {
+  proposal_id: UUID;
+  status: "rejected";
+  rejection_note: string | null;
 }
 
 // ------------------------------------------------------------- items

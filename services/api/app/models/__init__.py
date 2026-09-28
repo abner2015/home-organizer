@@ -13,6 +13,7 @@ from app.models.recommendation import Recommendation
 from app.models.room import Room
 from app.models.rule import HomeRule
 from app.models.storage import StorageSection, StorageSlot, StorageUnit
+from app.models.structure_proposal import StructureProposal
 from app.models.trace import AgentTrace
 from app.models.user import User
 
@@ -32,6 +33,7 @@ __all__ = [
     "StorageSection",
     "StorageSlot",
     "StorageUnit",
+    "StructureProposal",
     "User",
     "UserPreference",
 ]

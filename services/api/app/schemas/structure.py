@@ -16,6 +16,7 @@ Two deliberate choices:
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Annotated, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
@@ -204,18 +205,88 @@ class StructureProposalResponse(BaseModel):
     (trimming, dropping duplicate codes, clearing ungrounded categories), and
     a user who is not told about that would be confirming something the model
     never proposed.
+
+    As of P1.3 the proposal is **persisted**; ``proposal_id`` is the row's
+    UUID and lets the client ``accept`` / ``reject`` later from
+    ``/home/proposals``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    proposal_id: uuid.UUID
     proposal: StructureProposalOutput
     warnings: list[ProposalWarning] = Field(default_factory=list)
     source: Literal["photo", "text", "template"]
     trace_id: uuid.UUID | None = None
 
 
+class StructureProposalView(BaseModel):
+    """A persisted proposal row, view-shaped for the API.
+
+    Returned by the list / detail / accept / reject endpoints. The
+    ``proposal`` field re-emits the recursive tree; clients that only need
+    metadata can ignore it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    home_id: uuid.UUID
+    user_id: uuid.UUID
+    source: Literal["photo", "text", "template"]
+    asset_id: uuid.UUID | None = None
+    description: str | None = None
+    proposal: StructureProposalOutput
+    warnings: list[ProposalWarning] = Field(default_factory=list)
+    status: Literal["pending", "accepted", "rejected", "superseded"]
+    rejection_note: str | None = None
+    created_at: datetime
+    accepted_at: datetime | None = None
+    rejected_at: datetime | None = None
+
+
+class AcceptProposalRequest(BaseModel):
+    """Body for ``POST /structures/proposals/{id}/accept``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note: str | None = Field(default=None, max_length=512)
+
+
+class AcceptProposalResponse(BaseModel):
+    """Body for the accept endpoint — what was created + the new row state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: uuid.UUID
+    status: Literal["accepted"]
+    counts: dict[Literal["rooms", "units", "sections", "slots"], int]
+
+
+class RejectProposalRequest(BaseModel):
+    """Body for ``POST /structures/proposals/{id}/reject``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note: str | None = Field(default=None, max_length=512)
+
+
+class RejectProposalResponse(BaseModel):
+    """Body for the reject endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: uuid.UUID
+    status: Literal["rejected"]
+    rejection_note: str | None = None
+
+
 __all__ = [
+    "AcceptProposalRequest",
+    "AcceptProposalResponse",
     "HomeUpdateRequest",
+    "RejectProposalRequest",
+    "RejectProposalResponse",
     "RoomCreateRequest",
     "RoomUpdateRequest",
     "SectionCreateRequest",
@@ -226,6 +297,7 @@ __all__ = [
     "SlotUpdateRequest",
     "StructureProposalRequest",
     "StructureProposalResponse",
+    "StructureProposalView",
     "UnitCreateRequest",
     "UnitMoveRequest",
     "UnitUpdateRequest",

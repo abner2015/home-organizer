@@ -35,33 +35,29 @@ const WARNING_LABEL: Record<string, string> = {
 
 // ------------------------------------------------------------------- draft
 
-// The proposal as the user is editing it. Every node carries its own `keep`
-// flag: an unticked node is never sent anywhere.
+// The proposal as the user sees it on the confirm step. The fields below are
+// **preview only** under P1.3 — accepting calls the server-side `acceptProposal`
+// with the original persisted proposal, so edits here would not reach the DB.
+// Users who want to change the structure re-propose from step 1.
 type DraftSlot = {
   key: number;
-  keep: boolean;
   code: string;
   label: string;
-  capacity_hint: string;
-  allowed_categories: string[];
 };
 type DraftSection = {
   key: number;
-  keep: boolean;
   name: string;
   section_type: SectionType;
   slots: DraftSlot[];
 };
 type DraftUnit = {
   key: number;
-  keep: boolean;
   name: string;
   unit_type: UnitType;
   sections: DraftSection[];
 };
 type DraftRoom = {
   key: number;
-  keep: boolean;
   name: string;
   room_type: RoomType;
   units: DraftUnit[];
@@ -73,49 +69,24 @@ const key = () => nextKey++;
 function toDraft(proposal: StructureProposal): DraftRoom[] {
   return proposal.rooms.map((room) => ({
     key: key(),
-    keep: true,
     name: room.name,
     room_type: room.room_type,
     units: room.units.map((unit) => ({
       key: key(),
-      keep: true,
       name: unit.name,
       unit_type: unit.unit_type,
       sections: unit.sections.map((section) => ({
         key: key(),
-        keep: true,
         name: section.name,
         section_type: section.section_type,
         slots: section.slots.map((slot) => ({
           key: key(),
-          keep: true,
           code: slot.code,
           label: slot.label ?? "",
-          capacity_hint: slot.capacity_hint ?? "",
-          allowed_categories: slot.allowed_categories ?? [],
         })),
       })),
     })),
   }));
-}
-
-/** How many ticked nodes a run will create — the denominator of the progress. */
-function countKept(rooms: DraftRoom[]): number {
-  let total = 0;
-  for (const room of rooms) {
-    if (!room.keep) continue;
-    total += 1;
-    for (const unit of room.units) {
-      if (!unit.keep) continue;
-      total += 1;
-      for (const section of unit.sections) {
-        if (!section.keep) continue;
-        total += 1;
-        total += section.slots.filter((slot) => slot.keep).length;
-      }
-    }
-  }
-  return total;
 }
 
 // ------------------------------------------------------------------ component
@@ -136,9 +107,10 @@ export function ProposalFlow({ session }: { session: ApiSession }) {
   const [rationale, setRationale] = useState("");
   const [warnings, setWarnings] = useState<ProposalWarning[]>([]);
   const [draft, setDraft] = useState<DraftRoom[]>([]);
+  const [proposalId, setProposalId] = useState<string | null>(null);
 
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [rejectNote, setRejectNote] = useState("");
 
   async function propose(body: { asset_id?: string; description?: string }) {
     setBusy(true);
@@ -149,7 +121,9 @@ export function ProposalFlow({ session }: { session: ApiSession }) {
       setRationale(res.proposal.rationale);
       setWarnings(res.warnings);
       setDraft(toDraft(res.proposal));
+      setProposalId(res.proposal_id);
       setFailure(null);
+      setRejectNote("");
       setStep("confirm");
     } catch (err) {
       setError(err instanceof APIError ? err.message : "生成提议失败，请重试。");
@@ -166,7 +140,10 @@ export function ProposalFlow({ session }: { session: ApiSession }) {
       // The bytes go through the API (`/assets/upload`) rather than a presigned
       // PUT: this works with every storage backend, including the local one.
       const uploaded = await api.uploadAsset(file, session);
-      await propose({ asset_id: uploaded.asset_id, description: description.trim() || undefined });
+      await propose({
+        asset_id: uploaded.asset_id,
+        description: description.trim() || undefined,
+      });
     } catch (err) {
       setError(err instanceof APIError ? err.message : "上传照片失败，请重试。");
       setBusy(false);
@@ -174,70 +151,42 @@ export function ProposalFlow({ session }: { session: ApiSession }) {
   }
 
   /**
-   * Create the ticked nodes, parents first.
+   * Accept the persisted proposal in one round-trip.
    *
-   * One POST per node, in order, rather than a batch endpoint: a failure names
-   * the exact node, and whatever was already created stays — the user retries
-   * the rest instead of losing a half-built home.
+   * P1.3: the previous per-node POST loop is gone. The server walks the
+   * stored JSONB tree and creates room → unit → section → slot under a
+   * single transaction. A 409 (duplicate slot code, etc.) leaves the home
+   * untouched, so the user can re-propose with a different description.
    */
-  async function materialize() {
-    const kept = countKept(draft);
-    if (kept === 0) {
-      setFailure("请至少勾选一个要创建的节点。");
-      return;
-    }
+  async function accept() {
+    if (!proposalId) return;
     setBusy(true);
     setFailure(null);
-    setProgress({ done: 0, total: kept });
-    let done = 0;
     try {
-      for (const room of draft) {
-        if (!room.keep) continue;
-        const createdRoom = await api.createRoom(
-          { name: room.name, room_type: room.room_type },
-          session,
-        );
-        setProgress({ done: ++done, total: kept });
-        for (const unit of room.units) {
-          if (!unit.keep) continue;
-          const createdUnit = await api.createUnit(
-            createdRoom.id,
-            { name: unit.name, unit_type: unit.unit_type },
-            session,
-          );
-          setProgress({ done: ++done, total: kept });
-          for (const section of unit.sections) {
-            if (!section.keep) continue;
-            const createdSection = await api.createSection(
-              createdUnit.id,
-              { name: section.name, section_type: section.section_type },
-              session,
-            );
-            setProgress({ done: ++done, total: kept });
-            for (const slot of section.slots) {
-              if (!slot.keep) continue;
-              await api.createSlot(
-                createdSection.id,
-                {
-                  code: slot.code,
-                  label: slot.label.trim() || null,
-                  capacity_hint: slot.capacity_hint.trim() || null,
-                  allowed_categories: slot.allowed_categories,
-                },
-                session,
-              );
-              setProgress({ done: ++done, total: kept });
-            }
-          }
-        }
-      }
+      await api.acceptProposal(proposalId, {}, session);
       router.refresh();
       router.push("/home/storage");
     } catch (err) {
       setFailure(
         err instanceof APIError
-          ? `${err.message}（已创建 ${done} 项，剩下的可以再点一次创建）`
-          : "创建过程中出错，已建成的部分会保留。",
+          ? `${err.message}（提议不会创建任何结构，可在 /home/proposals 中查看或拒绝）`
+          : "接受提议失败，请稍后再试。",
+      );
+      setBusy(false);
+    }
+  }
+
+  async function reject() {
+    if (!proposalId) return;
+    setBusy(true);
+    setFailure(null);
+    try {
+      await api.rejectProposal(proposalId, { note: rejectNote.trim() || null }, session);
+      router.refresh();
+      router.push("/home/proposals");
+    } catch (err) {
+      setFailure(
+        err instanceof APIError ? err.message : "拒绝提议失败，请稍后再试。",
       );
       setBusy(false);
     }
@@ -320,7 +269,9 @@ export function ProposalFlow({ session }: { session: ApiSession }) {
       <div className="card space-y-3 p-5">
         <div className="flex flex-wrap items-center gap-2">
           <span className="badge-brand">{SOURCE_LABEL[source]}</span>
-          <span className="text-sm text-ink-600">勾选要创建的部分，可以改名或删掉</span>
+          <span className="text-sm text-ink-600">
+            这是提议的预览。接受后整个结构会一次性建好；想改节点请返回上一步重新描述。
+          </span>
         </div>
         {rationale ? <p className="text-sm text-ink-600">{rationale}</p> : null}
         {warnings.length > 0 ? (
@@ -339,319 +290,143 @@ export function ProposalFlow({ session }: { session: ApiSession }) {
 
       <div className="space-y-3">
         {draft.map((room) => (
-          <RoomCard
-            key={room.key}
-            room={room}
-            onChange={(next) => setDraft(draft.map((r) => (r.key === next.key ? next : r)))}
-            onRemove={() => setDraft(draft.filter((r) => r.key !== room.key))}
-          />
+          <RoomPreview key={room.key} room={room} />
         ))}
       </div>
 
       {failure ? <p className="text-sm text-red-600">{failure}</p> : null}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          className="btn-primary"
-          disabled={busy}
-          onClick={() => void materialize()}
-        >
-          {busy ? <Spinner className="h-4 w-4" /> : null}
-          确认搭建
-        </button>
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled={busy}
-          onClick={() => setStep("input")}
-        >
-          返回
-        </button>
-        {progress ? (
-          <span className="text-sm text-ink-500">
-            正在创建 {progress.done} / {progress.total}…
-          </span>
-        ) : null}
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={busy}
+            onClick={() => void accept()}
+          >
+            {busy ? <Spinner className="h-4 w-4" /> : null}
+            接受并创建
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={busy}
+            onClick={() => setStep("input")}
+          >
+            返回重新描述
+          </button>
+          <a
+            href="/home/proposals"
+            className="text-sm text-brand-600 hover:text-brand-700"
+          >
+            去提议列表
+          </a>
+        </div>
+
+        <details className="rounded-xl border border-ink-100 bg-white p-3 text-sm">
+          <summary className="cursor-pointer text-ink-700">不需要？（写下理由后拒绝）</summary>
+          <div className="mt-2 space-y-2">
+            <input
+              className="input w-full"
+              placeholder="可选：为什么这个提议不合适"
+              value={rejectNote}
+              onChange={(e) => setRejectNote(e.target.value)}
+              maxLength={512}
+            />
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={busy}
+              onClick={() => void reject()}
+            >
+              {busy ? <Spinner className="h-4 w-4" /> : null}
+              拒绝此提议
+            </button>
+          </div>
+        </details>
       </div>
     </div>
   );
 }
 
-// --------------------------------------------------------------------- tree
+// ----------------------------------------------------------- read-only preview
+//
+// P1.3: accept applies the *server-side* stored proposal in one transaction,
+// so anything the user typed into this draft would not reach the DB. We
+// deliberately do not let them edit here — see the banner on the confirm
+// step. The tree is still shown so a user can sanity-check what accepting
+// will create.
 
-function KeepBox({
-  checked,
-  onChange,
-  children,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="flex items-center gap-2 text-sm">
-      <input
-        type="checkbox"
-        className="h-4 w-4 rounded border-ink-300"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-      />
-      {children}
-    </label>
-  );
+function labelOf<T extends { value: string; label: string }>(
+  options: readonly T[],
+  value: string,
+): string {
+  return options.find((o) => o.value === value)?.label ?? value;
 }
 
-function RemoveButton({ label, onClick }: { label: string; onClick: () => void }) {
+function RoomPreview({ room }: { room: DraftRoom }) {
   return (
-    <button
-      type="button"
-      className="ml-auto text-xs text-ink-400 hover:text-red-600"
-      onClick={onClick}
-      aria-label={label}
-      title={label}
-    >
-      × 删除
-    </button>
-  );
-}
-
-function RoomCard({
-  room,
-  onChange,
-  onRemove,
-}: {
-  room: DraftRoom;
-  onChange: (room: DraftRoom) => void;
-  onRemove: () => void;
-}) {
-  function update(patch: Partial<DraftRoom>) {
-    onChange({ ...room, ...patch });
-  }
-  return (
-    <div className={clsx("card p-4", !room.keep && "opacity-50")}>
-      <div className="flex flex-wrap items-center gap-2">
-        <KeepBox checked={room.keep} onChange={(keep) => update({ keep })}>
-          <span className="text-xs text-ink-500">房间</span>
-        </KeepBox>
-        <input
-          className="input max-w-48"
-          value={room.name}
-          onChange={(e) => update({ name: e.target.value })}
-          aria-label="房间名称"
-        />
-        <select
-          className="input max-w-32"
-          value={room.room_type}
-          onChange={(e) => update({ room_type: e.target.value as RoomType })}
-          aria-label="房间类型"
-        >
-          {ROOM_TYPE_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-        <RemoveButton label={`删除房间 ${room.name}`} onClick={onRemove} />
+    <div className="card p-4">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="text-xs text-ink-500">房间</span>
+        <span className="text-base font-semibold text-ink-900">{room.name}</span>
+        <span className="text-xs text-ink-500">
+          （{labelOf(ROOM_TYPE_OPTIONS, room.room_type)}）
+        </span>
       </div>
 
       <div className="mt-3 space-y-2 pl-4">
         {room.units.map((unit) => (
-          <UnitCard
-            key={unit.key}
-            unit={unit}
-            onChange={(next) =>
-              update({ units: room.units.map((u) => (u.key === next.key ? next : u)) })
-            }
-            onRemove={() => update({ units: room.units.filter((u) => u.key !== unit.key) })}
-          />
+          <UnitPreview key={unit.key} unit={unit} />
         ))}
       </div>
     </div>
   );
 }
 
-function UnitCard({
-  unit,
-  onChange,
-  onRemove,
-}: {
-  unit: DraftUnit;
-  onChange: (unit: DraftUnit) => void;
-  onRemove: () => void;
-}) {
-  function update(patch: Partial<DraftUnit>) {
-    onChange({ ...unit, ...patch });
-  }
+function UnitPreview({ unit }: { unit: DraftUnit }) {
   return (
-    <div
-      className={clsx(
-        "rounded-xl border border-ink-100 bg-ink-50/40 p-3",
-        !unit.keep && "opacity-50",
-      )}
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <KeepBox checked={unit.keep} onChange={(keep) => update({ keep })}>
-          <span className="text-xs text-ink-500">柜子</span>
-        </KeepBox>
-        <input
-          className="input max-w-44"
-          value={unit.name}
-          onChange={(e) => update({ name: e.target.value })}
-          aria-label="柜子名称"
-        />
-        <select
-          className="input max-w-32"
-          value={unit.unit_type}
-          onChange={(e) => update({ unit_type: e.target.value as UnitType })}
-          aria-label="柜子类型"
-        >
-          {UNIT_TYPE_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-        <RemoveButton label={`删除柜子 ${unit.name}`} onClick={onRemove} />
+    <div className="rounded-xl border border-ink-100 bg-ink-50/40 p-3">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="text-xs text-ink-500">柜子</span>
+        <span className="text-sm font-medium text-ink-900">{unit.name}</span>
+        <span className="text-xs text-ink-500">
+          （{labelOf(UNIT_TYPE_OPTIONS, unit.unit_type)}）
+        </span>
       </div>
 
       <div className="mt-2 space-y-2 pl-4">
         {unit.sections.map((section) => (
-          <SectionCard
-            key={section.key}
-            section={section}
-            onChange={(next) =>
-              update({ sections: unit.sections.map((s) => (s.key === next.key ? next : s)) })
-            }
-            onRemove={() =>
-              update({ sections: unit.sections.filter((s) => s.key !== section.key) })
-            }
-          />
+          <SectionPreview key={section.key} section={section} />
         ))}
       </div>
     </div>
   );
 }
 
-function SectionCard({
-  section,
-  onChange,
-  onRemove,
-}: {
-  section: DraftSection;
-  onChange: (section: DraftSection) => void;
-  onRemove: () => void;
-}) {
-  function update(patch: Partial<DraftSection>) {
-    onChange({ ...section, ...patch });
-  }
+function SectionPreview({ section }: { section: DraftSection }) {
   return (
-    <div className={clsx("rounded-lg bg-white p-2.5", !section.keep && "opacity-50")}>
-      <div className="flex flex-wrap items-center gap-2">
-        <KeepBox checked={section.keep} onChange={(keep) => update({ keep })}>
-          <span className="text-xs text-ink-500">层</span>
-        </KeepBox>
-        <input
-          className="input max-w-40"
-          value={section.name}
-          onChange={(e) => update({ name: e.target.value })}
-          aria-label="层名称"
-        />
-        <select
-          className="input max-w-28"
-          value={section.section_type}
-          onChange={(e) => update({ section_type: e.target.value as SectionType })}
-          aria-label="层类型"
-        >
-          {SECTION_TYPE_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-        <RemoveButton label={`删除层 ${section.name}`} onClick={onRemove} />
+    <div className="rounded-lg bg-white p-2.5">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="text-xs text-ink-500">层</span>
+        <span className="text-sm text-ink-900">{section.name}</span>
+        <span className="text-xs text-ink-500">
+          （{labelOf(SECTION_TYPE_OPTIONS, section.section_type)}）
+        </span>
       </div>
 
-      <div className="mt-2 flex flex-wrap items-center gap-2 pl-6">
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-6">
         {section.slots.map((slot) => (
           <span
             key={slot.key}
-            className={clsx(
-              "inline-flex items-center gap-1 rounded-lg border border-ink-100 px-2 py-1",
-              !slot.keep && "opacity-50",
-            )}
+            className="inline-flex items-center gap-1 rounded-lg border border-ink-100 px-2 py-0.5"
           >
-            <input
-              type="checkbox"
-              className="h-3.5 w-3.5 rounded border-ink-300"
-              checked={slot.keep}
-              onChange={(e) =>
-                update({
-                  slots: section.slots.map((s) =>
-                    s.key === slot.key ? { ...s, keep: e.target.checked } : s,
-                  ),
-                })
-              }
-              aria-label={`保留 ${slot.code}`}
-            />
-            <input
-              className="w-16 rounded border-0 bg-transparent p-0 font-mono text-xs text-ink-800 focus:outline-none"
-              value={slot.code}
-              onChange={(e) =>
-                update({
-                  slots: section.slots.map((s) =>
-                    s.key === slot.key ? { ...s, code: e.target.value } : s,
-                  ),
-                })
-              }
-              aria-label="格子编号"
-            />
-            <input
-              className="w-20 rounded border-0 bg-transparent p-0 text-xs text-ink-600 focus:outline-none"
-              placeholder="备注"
-              value={slot.label}
-              onChange={(e) =>
-                update({
-                  slots: section.slots.map((s) =>
-                    s.key === slot.key ? { ...s, label: e.target.value } : s,
-                  ),
-                })
-              }
-              aria-label="格子备注"
-            />
-            <button
-              type="button"
-              className="text-xs text-ink-400 hover:text-red-600"
-              onClick={() =>
-                update({ slots: section.slots.filter((s) => s.key !== slot.key) })
-              }
-              aria-label={`删除 ${slot.code}`}
-            >
-              ×
-            </button>
+            <span className="font-mono text-xs text-ink-800">{slot.code}</span>
+            {slot.label ? (
+              <span className="text-xs text-ink-500">· {slot.label}</span>
+            ) : null}
           </span>
         ))}
-        <button
-          type="button"
-          className="text-xs text-brand-600 hover:text-brand-700"
-          onClick={() =>
-            update({
-              slots: [
-                ...section.slots,
-                {
-                  key: key(),
-                  keep: true,
-                  code: `S${section.slots.length + 1}`,
-                  label: "",
-                  capacity_hint: "",
-                  allowed_categories: [],
-                },
-              ],
-            })
-          }
-        >
-          + 加一格
-        </button>
       </div>
     </div>
   );
