@@ -516,3 +516,281 @@ async def test_deleting_a_parent_does_not_cascade(api_client, seeded_actor, db_e
         assert (
             await session.execute(select(func.count()).select_from(StorageSlot))
         ).scalar_one() == 1
+
+
+# ----------------------------------------------------------------------- moves
+#
+# P1.2 — the editor on /home/storage drops nodes onto new parents. These
+# tests pin the three move endpoints against the same hazards the create /
+# update endpoints cover: cross-home → 404, missing → 404, code conflict → 409,
+# extra field → 422.
+
+
+async def test_move_unit_to_another_room_in_same_home(
+    api_client, seeded_actor
+) -> None:
+    """A unit reparented to a different room in the caller's home."""
+    room_a = _create_room(api_client, seeded_actor, name="A").json()
+    room_b = _create_room(api_client, seeded_actor, name="B").json()
+    unit = api_client.post(
+        f"/api/v1/rooms/{room_a['id']}/storage-units",
+        json={"name": "书柜", "unit_type": "cabinet"},
+        headers=seeded_actor.headers(),
+    ).json()
+
+    resp = api_client.post(
+        f"/api/v1/storage-units/{unit['id']}/move",
+        json={"room_id": room_b["id"]},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["room_id"] == room_b["id"]
+
+
+async def test_move_unit_to_same_room_is_noop(api_client, seeded_actor) -> None:
+    """Dropping onto the current room is a 200 no-op, not an error."""
+    ids = await _full_chain(api_client, seeded_actor)
+    before_unit = api_client.get(
+        f"/api/v1/storage-units/{ids['unit_id']}",
+        headers=seeded_actor.headers(),
+    ).json()
+
+    resp = api_client.post(
+        f"/api/v1/storage-units/{ids['unit_id']}/move",
+        json={"room_id": before_unit["room_id"]},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == before_unit["id"]
+    assert resp.json()["room_id"] == before_unit["room_id"]
+
+
+async def test_move_unit_to_room_in_another_home_is_404(
+    api_client, seeded_actor, db_engine
+) -> None:
+    """A room in someone else's home is indistinguishable from no room."""
+    ids = await _full_chain(api_client, seeded_actor)
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        other_home = Home(id=uuid.uuid4(), name="别人的家", owner_id=uuid.uuid4())
+        other_room = Room(
+            home_id=other_home.id, name="X", room_type="other", sort_order=0
+        )
+        session.add_all([other_home, other_room])
+        await session.commit()
+        foreign_room_id = other_room.id
+
+    resp = api_client.post(
+        f"/api/v1/storage-units/{ids['unit_id']}/move",
+        json={"room_id": str(foreign_room_id)},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_move_unknown_unit_is_404(api_client, seeded_actor) -> None:
+    """An unknown unit id is a 404, never a 403."""
+    _create_room(api_client, seeded_actor)  # need a room in the same home
+    resp = api_client.post(
+        f"/api/v1/storage-units/{uuid.uuid4()}/move",
+        json={"room_id": str(uuid.uuid4())},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_move_section_to_another_unit_in_same_home(
+    api_client, seeded_actor
+) -> None:
+    """A section reparented to a different unit in the same home."""
+    room = _create_room(api_client, seeded_actor).json()
+    unit_a = api_client.post(
+        f"/api/v1/rooms/{room['id']}/storage-units",
+        json={"name": "A柜", "unit_type": "cabinet"},
+        headers=seeded_actor.headers(),
+    ).json()
+    unit_b = api_client.post(
+        f"/api/v1/rooms/{room['id']}/storage-units",
+        json={"name": "B柜", "unit_type": "cabinet"},
+        headers=seeded_actor.headers(),
+    ).json()
+    section = api_client.post(
+        f"/api/v1/storage-units/{unit_a['id']}/sections",
+        json={"name": "第1层", "section_type": "layer"},
+        headers=seeded_actor.headers(),
+    ).json()
+
+    resp = api_client.post(
+        f"/api/v1/sections/{section['id']}/move",
+        json={"unit_id": unit_b["id"]},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["unit_id"] == unit_b["id"]
+
+
+async def test_move_section_to_unit_in_another_home_is_404(
+    api_client, seeded_actor, db_engine
+) -> None:
+    ids = await _full_chain(api_client, seeded_actor)
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        other_home = Home(id=uuid.uuid4(), name="别人的家", owner_id=uuid.uuid4())
+        other_room = Room(name="X", room_type="other", sort_order=0)
+        other_unit = StorageUnit(name="X", unit_type="other", sort_order=0)
+        # Wire FKs via the ORM relationship so SQLAlchemy resolves the order
+        # at flush time — passing `home_id=other_home.id` here would store
+        # ``None`` because other_home.id is not assigned until flush.
+        other_room.home = other_home
+        other_unit.room = other_room
+        session.add_all([other_home, other_room, other_unit])
+        await session.commit()
+        foreign_unit_id = other_unit.id
+
+    resp = api_client.post(
+        f"/api/v1/sections/{ids['section_id']}/move",
+        json={"unit_id": str(foreign_unit_id)},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_move_slot_to_another_section_with_fresh_code(
+    api_client, seeded_actor
+) -> None:
+    """Slot reparented to another section with a non-conflicting code."""
+    room = _create_room(api_client, seeded_actor).json()
+    unit = api_client.post(
+        f"/api/v1/rooms/{room['id']}/storage-units",
+        json={"name": "柜", "unit_type": "cabinet"},
+        headers=seeded_actor.headers(),
+    ).json()
+    sec_a = api_client.post(
+        f"/api/v1/storage-units/{unit['id']}/sections",
+        json={"name": "A层", "section_type": "layer"},
+        headers=seeded_actor.headers(),
+    ).json()
+    sec_b = api_client.post(
+        f"/api/v1/storage-units/{unit['id']}/sections",
+        json={"name": "B层", "section_type": "layer"},
+        headers=seeded_actor.headers(),
+    ).json()
+    slot = api_client.post(
+        f"/api/v1/sections/{sec_a['id']}/slots",
+        json={"code": "A1"},
+        headers=seeded_actor.headers(),
+    ).json()
+
+    resp = api_client.post(
+        f"/api/v1/slots/{slot['id']}/move",
+        json={"section_id": sec_b["id"], "code": "B1"},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["section_id"] == sec_b["id"]
+    assert resp.json()["code"] == "B1"
+
+
+async def test_move_slot_to_another_section_with_conflicting_code_is_409(
+    api_client, seeded_actor
+) -> None:
+    """The destination section already has a slot with that code → 409."""
+    room = _create_room(api_client, seeded_actor).json()
+    unit = api_client.post(
+        f"/api/v1/rooms/{room['id']}/storage-units",
+        json={"name": "柜", "unit_type": "cabinet"},
+        headers=seeded_actor.headers(),
+    ).json()
+    sec_a = api_client.post(
+        f"/api/v1/storage-units/{unit['id']}/sections",
+        json={"name": "A层", "section_type": "layer"},
+        headers=seeded_actor.headers(),
+    ).json()
+    sec_b = api_client.post(
+        f"/api/v1/storage-units/{unit['id']}/sections",
+        json={"name": "B层", "section_type": "layer"},
+        headers=seeded_actor.headers(),
+    ).json()
+    # sec_a has K1, sec_b has K1 — moving K1 from sec_a to sec_b collides.
+    slot_a = api_client.post(
+        f"/api/v1/sections/{sec_a['id']}/slots",
+        json={"code": "K1"},
+        headers=seeded_actor.headers(),
+    ).json()
+    api_client.post(
+        f"/api/v1/sections/{sec_b['id']}/slots",
+        json={"code": "K1"},
+        headers=seeded_actor.headers(),
+    )
+
+    resp = api_client.post(
+        f"/api/v1/slots/{slot_a['id']}/move",
+        json={"section_id": sec_b["id"], "code": "K1"},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 409, resp.text
+    assert "K1" in resp.json()["error"]["message"]
+
+
+async def test_move_slot_with_code_change_within_same_section_409_on_conflict(
+    api_client, seeded_actor
+) -> None:
+    """Renaming code inside the same section hits the same uniqueness check."""
+    sec_id = (
+        await _full_chain(api_client, seeded_actor)
+    )["section_id"]
+    a = api_client.post(
+        f"/api/v1/sections/{sec_id}/slots",
+        json={"code": "X1"},
+        headers=seeded_actor.headers(),
+    ).json()
+    b = api_client.post(
+        f"/api/v1/sections/{sec_id}/slots",
+        json={"code": "X2"},
+        headers=seeded_actor.headers(),
+    ).json()
+
+    resp = api_client.post(
+        f"/api/v1/slots/{b['id']}/move",
+        json={"section_id": sec_id, "code": "X1"},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 409, resp.text
+    assert a["code"] == "X1"  # unchanged
+
+
+async def test_move_cross_home_slot_is_404(
+    api_client, seeded_actor, db_engine
+) -> None:
+    ids = await _full_chain(api_client, seeded_actor)
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        other_home = Home(id=uuid.uuid4(), name="别人的家", owner_id=uuid.uuid4())
+        other_room = Room(name="X", room_type="other", sort_order=0)
+        other_unit = StorageUnit(name="X", unit_type="other", sort_order=0)
+        other_section = StorageSection(name="X", section_type="other", sort_order=0)
+        # Wire FKs via the ORM relationship (see sibling section test).
+        other_room.home = other_home
+        other_unit.room = other_room
+        other_section.unit = other_unit
+        session.add_all([other_home, other_room, other_unit, other_section])
+        await session.commit()
+        foreign_section_id = other_section.id
+
+    resp = api_client.post(
+        f"/api/v1/slots/{ids['slot_id']}/move",
+        json={"section_id": str(foreign_section_id), "code": "Y1"},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_move_unit_unknown_field_is_422(api_client, seeded_actor) -> None:
+    """``extra="forbid"`` regression — payloads with surprise fields 422."""
+    ids = await _full_chain(api_client, seeded_actor)
+    resp = api_client.post(
+        f"/api/v1/storage-units/{ids['unit_id']}/move",
+        json={"room_id": ids["room_id"], "force": True},
+        headers=seeded_actor.headers(),
+    )
+    assert resp.status_code == 422, resp.text

@@ -208,6 +208,53 @@ export interface SlotCreateBody {
   sort_order?: number;
 }
 
+// Sparse PATCH bodies — mirror `app/schemas/structure.py`'s `*UpdateRequest`.
+// Sending `null` for a NOT NULL field is a 400; nullable fields accept null to
+// mean "clear it". The server treats omitted keys as "leave untouched".
+export interface RoomUpdateBody {
+  name?: string;
+  room_type?: RoomType;
+  sort_order?: number;
+}
+
+export interface UnitUpdateBody {
+  name?: string;
+  unit_type?: UnitType;
+  description?: string | null;
+  sort_order?: number;
+}
+
+export interface SectionUpdateBody {
+  name?: string;
+  section_type?: SectionType;
+  sort_order?: number;
+}
+
+export interface SlotUpdateBody {
+  code?: string;
+  label?: string | null;
+  capacity_hint?: string | null;
+  allowed_categories?: string[];
+  sort_order?: number;
+}
+
+// Move bodies — `POST /storage-units/{id}/move` etc. Room has no move (its
+// home is its identity). Slot's body is intentionally atomic over
+// (section_id, code) so the server cannot end up with a transient conflict
+// during a "change parent then change code" sequence.
+export interface UnitMoveBody {
+  room_id: UUID;
+}
+
+export interface SectionMoveBody {
+  unit_id: UUID;
+}
+
+export interface SlotMoveBody {
+  section_id: UUID;
+  code: string;
+}
+
 // ------------------------------------------------------------- structure proposal
 // Mirrors `app/ai/provider.py`'s StructureProposalOutput. Nothing here is
 // persisted — it is the model's (or the template's) answer, shown to the user

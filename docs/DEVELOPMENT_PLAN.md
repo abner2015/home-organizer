@@ -1411,6 +1411,168 @@ entry = {
 
 ---
 
+## P1.2 — 结构编辑器（inline 改 + 拖拽 + 多选） ✅ 已交付（2026-09-28）
+
+**为什么**：P0.2 已经把 4 层结构（Room → Unit → Section → Slot）的后端 CRUD 做完了，
+但前端只有 `ManualBuilder`（建）和详情页（读）—— **改名 / 增删 / 调位置**全靠 wizard
+「先删再加」，改个 `主卧 → 主人房` 要走 6 步。P1.2 收口：在 `/home/storage` 加一个
+**编辑模式**（`?edit=1`），让用户**就地**改、就地加、就地拖、批量操作。
+
+### 行为变化
+
+| | P1.2 之前 | P1.2 |
+| --- | --- | --- |
+| 改名字 | 详情页点编辑 → 跳回 wizard → 6 步 | 在树上点文字 → 输入 → Enter |
+| 改类型 | 同上 | `<select>` 直接换，onChange PATCH |
+| 增删子节点 | 详情页 → wizard | 节点上 `+ 新增子节点` / `删除` 按钮 |
+| 调位置 | 删 + 重建 | **拖拽**到同 parent（reorder）或跨 parent（move） |
+| 多选 + 批量 | 只能一个个 | 顶部工具条：「批量删除 N 项」/「移到 → 房间」 |
+| 删除确认 | modal | 两步点击（3 秒自动复位，无 modal） |
+
+### 关键设计点
+
+#### 后端：3 个 move endpoint
+
+| Route | Body | 行为 |
+|---|---|---|
+| `POST /storage-units/{id}/move` | `{room_id}` | 改 unit.room_id；同 room 幂等 |
+| `POST /sections/{id}/move` | `{unit_id}` | 改 section.unit_id |
+| `POST /slots/{id}/move` | `{section_id, code}` | **必须同发 code** —— `(section_id, code)` 原子 |
+
+**为什么 slot 强制同发 code**：`(section_id, code)` 是事务内原子动作 —— 不能「先换 section 再改 code」
+拆两步（中途撞 code 半成品）。想保持 code 不变？发当前 code 即可。
+
+**跨 home**：所有 move 都靠**双 `load_*` 校验**（`load_unit(new_room_id, home_id=...)`），跨 home → 404。
+**Slot code 冲突**：复用 `_ensure_code_available`，与 create_slot 同款 409 + 中文 message。
+**Sort order**：move 不改；想放第 N 位 → 再 `PATCH sort_order`（前端 reorder 循环发）。
+
+#### 前端：`/home/storage?edit=1`
+
+- `page.tsx` 是 server component，`searchParams.edit === "1"` 分支渲染 `<StorageEditor>`（client）；
+  否则渲染 `ReadOnlyTree`。
+- URL 持久化：刷新保留编辑模式；点 `← 返回只读` 回到 `/home/storage`。
+- 状态完全本地：`tree` 是 canonical mirror，`treeOps.ts` 的纯函数生成下一棵树，
+  React 走引用比较触发重渲染。**不**走 Redux / Zustand。
+
+#### 乐观更新 + 回滚（统一模式）
+
+```ts
+async function performMutation(prev, optimistic, apiCall) {
+  setTree(optimistic);          // 立即改
+  try {
+    await apiCall();            // 服务端校准
+  } catch (err) {
+    setTree(prev);              // 失败回滚 + 顶部红条
+    setError(APIError.message);
+  }
+}
+```
+
+#### 拖拽（@dnd-kit）
+
+- 每个 `<SortableContext>` 包裹一个 parent 的 children（按 level 分）
+- 每个 parent 又被 `<DroppableParent>` 包成 `useDroppable`（`parent:<kind>:<id>`）
+- `onDragEnd` 看 `active.data.kind === over.data.kind && same parent` → 同层 reorder
+  → N 个 PATCH `sort_order`；否则 → 跨 parent move
+- `<KeyboardSensor>` 自带 Tab + Space + 方向键 a11y，**不写一行键盘代码**
+
+#### 多选 + 批量
+
+- 每行 checkbox 在 edit mode 显示；`BulkActionBar` 显示在 PageHeader 下方
+- 顶部 `已选 N 项` + `×` 清空 + `批量删除 N 项`（同款 ConfirmDelete）+ `移到 → {target}`
+- 移动目标 `<select>` 按 kind 拼选项：unit 选 room、section 选 unit、slot 选 section
+- 单次 batch 只能移到同一个 target（API 语义决定）
+- `Promise.allSettled` —— 一个失败不让其他中断；bar 显示成功数 + 失败数
+
+#### 两步删除（无 modal）
+
+```tsx
+const [armed, setArmed] = useState(false);
+useEffect(() => {
+  if (!armed) return;
+  const t = setTimeout(() => setArmed(false), 3000);
+  return () => clearTimeout(t);
+}, [armed]);
+return armed ? "再点一次确认" : "删除";
+```
+
+#### Home switch 状态重置（P1.4 风格）
+
+`StorageEditor` 接 `initialTree` prop —— 用 `useRef<SpaceTree>(initialTree)` 跟踪上一次值，
+`useEffect([initialTree])` 检测到 ref !== current 就 reset：`setTree` + `setBusyIds(new Set())` +
+`setSelection(...)` + `setError(null)`。SSR 友好（server 取 tree，client 拿 prop）。
+
+### 不做的（项目惯例）
+
+- **不**做 bulk endpoint：N DELETE / N PATCH 循环 + `Promise.allSettled` 已经够（树的 fan-out ≤ 10）
+- **不**做 inline edit history / undo（Esc 取消本次未保存）
+- **不**做 keyboard shortcuts（Cmd+Z 等）
+- **不**做拖拽到非直接 parent（unit → unit 不可；只能拖到 room）
+- **不**写 Web 测试（项目无 e2e 框架；P0.2/P0.8/P0.A/B/C 全部跳过）
+- **不**做 room move endpoint（room 是顶层，没父节点）
+
+### 接口 / 数据
+
+#### 后端新增
+
+- `app/schemas/structure.py` —— `UnitMoveRequest` / `SectionMoveRequest` / `SlotMoveRequest`（`extra="forbid"`）
+- `app/services/structure_service.py` —— `move_unit` / `move_section` / `move_slot`（双 `load_*` 校验）
+- `app/api/v1/structure.py` —— 3 个 route handler（挂在既有 router 上）
+- `tests/api/test_structure_api.py` —— **+11 测试**
+
+#### 前端新增（9 文件，全在 `apps/web/src/app/home/storage/editor/`）
+
+- `StorageEditor.tsx`（顶层容器）
+- `EditorTree.tsx`（递归渲染）
+- `DraggableNode.tsx`（单行）
+- `EditableName.tsx` / `EditableType.tsx`（inline edit）
+- `ConfirmDelete.tsx`（两步确认）
+- `CreateChildForm.tsx`（内联表单）
+- `BulkActionBar.tsx`（多选工具条）
+- `treeOps.ts`（纯函数库）
+
+#### 前端修改
+
+- `apps/web/src/app/home/storage/page.tsx` —— 接 `searchParams.edit`，分支渲染
+- `apps/web/src/lib/api.ts` —— `updateRoom/Unit/Section/Slot` + `delete*` + `move*`
+- `apps/web/src/lib/types.ts` —— `*UpdateBody` / `*MoveBody`
+- `apps/web/package.json` —— `@dnd-kit/core` + `@dnd-kit/sortable` + `@dnd-kit/utilities`
+
+### 验收
+
+- [x] 后端：`python -m pytest tests/ --no-header -q` —— 基线 786 → **797** passed / 1 skipped（+11）
+- [x] 后端：`python -m ruff check app/ tests/` —— 32 不变
+- [x] 后端：`python -m mypy app/` —— 20 不变
+- [x] 前端：`npx tsc --noEmit` —— clean
+- [x] 前端：`npx next lint` —— clean
+
+### 端到端行为
+
+1. 登录 → `/home/storage` → 点 `编辑模式` → URL 变 `?edit=1`，树变可编辑
+2. 点 `书房` 改名 → 输入 `主卧书房` → Enter → PATCH 成功 → 刷新持久
+3. `+ 新增子节点` 在 `厨房` 加 `抽屉柜` → POST 成功
+4. 拖 `书柜` 从 `书房` 跨 parent 到 `厨房` → move 接口成功
+5. 选中 3 个 unit → `批量删除` → 两步确认 → 全删
+6. 选中 2 个 section → `移到 → 主卧书柜` → 全部移到
+7. 切 home → editor 自动重置 tree / busyIds / selection / error（P1.4 风格）
+8. 在 edit 模式下按 Esc → 不退出 edit 模式（仅取消当前 inline edit）
+
+### Trap
+
+1. **Slot move 必带 code**：`moveSlot(id, {section_id, code})`，`code` 想保持原值 → 发当前 code
+2. **`@dnd-kit` SSR**：`DraggableNode` 整体 `"use client"`，SSR 不渲染拖拽内容
+3. **`useCallback` 闭包陷阱**：`onDragEnd` 用 `useRef + useEffect` 模式（而非 `useCallback`），
+   避免 `applyReorder` 还没声明就被 `onDragEnd` 引用的 lint 错误
+4. **跨 home move**：service 用双 `load_*` 校验（`load_unit` + `load_room`），不靠 ORM 关系
+5. **`active_count` 重渲染**：slot 操作成功后用 `applyField(cur, change)` 二次校准，因为 server
+   response 包含最新 `active_count`
+6. **拖到 parent 而不是 sibling**：`<DroppableParent>` 的 `data.isParent=true` 让 `onDragEnd` 区分
+   "drop on parent empty area"（cross-parent move）vs "drop on sibling"（reorder）
+7. **`sort_order` no-op 循环**：如果 reorder 后 N 个 PATCH 顺序错，前端会闪烁；
+   用 `for` 循环 + `await`，最后一个 error 用 `try/catch` 一次性 rollback
+
+---
+
 ## 风险登记与应对
 
 | 风险 | 触发条件 | 应对 |

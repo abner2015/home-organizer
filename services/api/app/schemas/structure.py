@@ -138,6 +138,51 @@ class SlotUpdateRequest(_SparseUpdate):
     sort_order: int | None = Field(default=None, ge=0)
 
 
+class UnitMoveRequest(BaseModel):
+    """Move a storage unit to a (different) room in the same home.
+
+    Same-home only. Cross-home moves are refused by the service layer
+    (the new ``room_id`` is loaded with the same ``home_id`` filter as the
+    unit itself, so a foreign room raises ``NotFoundError`` → 404).
+
+    ``room_id`` equal to the unit's current room is a no-op.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    room_id: uuid.UUID
+
+
+class SectionMoveRequest(BaseModel):
+    """Move a section to a (different) unit in the same home.
+
+    Same-home / no-op rules mirror ``UnitMoveRequest``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    unit_id: uuid.UUID
+
+
+class SlotMoveRequest(BaseModel):
+    """Move a slot to a (different) section in the same home.
+
+    The client must always send ``code`` even when it does not change: the
+    move is a single atomic rewrite of ``(section_id, code)`` so we cannot
+    split "change parent" and "change code" across two requests without
+    risking a transient conflict. Sending the current value is the explicit
+    "keep code" signal.
+
+    New ``code`` must be unique within the new section; otherwise the service
+    raises ``ConflictError`` → 409 with a Chinese message that names the code.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    section_id: uuid.UUID
+    code: Code
+
+
 class StructureProposalRequest(BaseModel):
     """Ask the AI (or the template) for a structure.
 
@@ -174,11 +219,14 @@ __all__ = [
     "RoomCreateRequest",
     "RoomUpdateRequest",
     "SectionCreateRequest",
+    "SectionMoveRequest",
     "SectionUpdateRequest",
     "SlotCreateRequest",
+    "SlotMoveRequest",
     "SlotUpdateRequest",
     "StructureProposalRequest",
     "StructureProposalResponse",
     "UnitCreateRequest",
+    "UnitMoveRequest",
     "UnitUpdateRequest",
 ]

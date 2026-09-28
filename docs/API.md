@@ -31,6 +31,7 @@
 | | **`POST /homes/{id}/rooms`、`PATCH`/`DELETE /rooms/{id}`** | ✅ 写（P0.2） |
 | §5 存储 | `GET /homes/{id}/space-tree`、`GET /homes/{id}/slots` | ✅ 读 |
 | | **`POST`/`PATCH`/`DELETE` unit / section / slot** | ✅ 写（P0.2） |
+| | **`POST …/move`（跨父节点）** | ✅ 写（P1.2） |
 | §6 物品 | presign、assets、files、items（创建 / 查询 / 改 / placements / candidates）、recognize | ✅ |
 | §7 AI | vision、infer、recommend（POST + GET）、accept、reject、PATCH、search、**`POST /structures/propose`** | ✅ |
 | | ~~`/recommendations/{recId}/adjust`~~ | ❌ **已废弃**，见 §7 |
@@ -337,6 +338,18 @@ GET /api/v1/items?page=1&page_size=20
 
 成功 **204**；**unit 下还有 section → 409**（`details.section_count`）。
 
+### POST /api/v1/storage-units/{unitId}/move ✅
+
+跨父节点：把 unit 挪到另一个 room。请求：
+
+```json
+{ "room_id": "uuid" }
+```
+
+- 跨 home：404（`new room_id` 不属于当前 home）
+- 同 room：200，row 不动（幂等 no-op）
+- 响应 200 + `StorageUnitView`（含真实 `sections`），与 `GET /storage-units/{unitId}` 同 shape
+
 ### POST /api/v1/storage-units/{unitId}/sections ✅
 
 ```json
@@ -371,6 +384,18 @@ GET /api/v1/items?page=1&page_size=20
 ### DELETE /api/v1/sections/{sectionId} ✅
 
 成功 **204**；**section 下还有 slot → 409**（`details.slot_count`）。
+
+### POST /api/v1/sections/{sectionId}/move ✅
+
+跨父节点：把 section 挪到另一个 unit。请求：
+
+```json
+{ "unit_id": "uuid" }
+```
+
+- 跨 home：404
+- 同 unit：200，幂等 no-op
+- 响应 200 + `StorageSectionView`（含真实 `slots`）
 
 ### POST /api/v1/sections/{sectionId}/slots ✅
 
@@ -440,6 +465,24 @@ slot 详情 + **当前 active 物品列表**（`ItemPlacement JOIN Item`，按 `
 （`app/models/placement.py`），数据库约束不管那条 placement 后来是否 removed。
 只数 active 的话应用层检查会通过、`DELETE` 再抛 `IntegrityError` → **500**。
 历史也是一种保留位置的理由，所以两个数目分开给，UI 才能说清「该位置有 2 条历史记录」。
+
+### POST /api/v1/slots/{slotId}/move ✅
+
+跨父节点 + 改 code 必须原子完成 —— **client 必须同时发 `section_id` 和 `code`**：
+
+```json
+{ "section_id": "uuid", "code": "A2-03" }
+```
+
+- `code` 想保持不变 → 发当前 code 即可
+- 跨 home：404
+- 新 `(section_id, code)` 已被另一 slot 占 → **409**
+  （message 与 `POST /sections/{id}/slots` 同款：「编号 X 已被使用」）
+- 响应 200 + `StorageSlotView`
+
+**为什么强制两个字段同发**：`(section_id, code)` 是事务内的原子动作，
+不能「先换 section 再改 code」拆两步（中途撞 code 半成品）。
+如果将来要做「只改 code 不换 section」，用 `PATCH /api/v1/slots/{slotId}`。
 
 ### GET /api/v1/homes/{homeId}/space-tree
 

@@ -52,12 +52,15 @@ from app.schemas.structure import (
     RoomCreateRequest,
     RoomUpdateRequest,
     SectionCreateRequest,
+    SectionMoveRequest,
     SectionUpdateRequest,
     SlotCreateRequest,
+    SlotMoveRequest,
     SlotUpdateRequest,
     StructureProposalRequest,
     StructureProposalResponse,
     UnitCreateRequest,
+    UnitMoveRequest,
     UnitUpdateRequest,
 )
 from app.services import structure_proposal_service, structure_service
@@ -267,6 +270,31 @@ async def delete_unit(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@units_router.post(
+    "/{unit_id}/move",
+    response_model=StorageUnitView,
+    summary="Move a storage unit to a different room (same home)",
+)
+async def move_unit_endpoint(
+    unit_id: uuid.UUID,
+    payload: UnitMoveRequest,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StorageUnitView:
+    """Change a unit's parent room.
+
+    Cross-home ``room_id`` → 404 (the room loader refuses). Same-room moves
+    return the unchanged row, keeping the drag-and-drop UX honest about
+    "dropped it where it already was".
+    """
+    unit = await structure_service.move_unit(
+        db, unit_id=unit_id, new_room_id=payload.room_id, home_id=actor.home_id
+    )
+    await db.commit()
+    await db.refresh(unit)
+    return await unit_view_with_sections(db, home_id=actor.home_id, unit=unit)
+
+
 # --------------------------------------------------------------------- sections
 
 
@@ -329,6 +357,34 @@ async def delete_section(
     )
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@sections_router.post(
+    "/{section_id}/move",
+    response_model=StorageSectionView,
+    summary="Move a section to a different unit (same home)",
+)
+async def move_section_endpoint(
+    section_id: uuid.UUID,
+    payload: SectionMoveRequest,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StorageSectionView:
+    """Change a section's parent unit.
+
+    Same rules as ``move_unit_endpoint``: cross-home → 404, same-unit → no-op.
+    """
+    section = await structure_service.move_section(
+        db,
+        section_id=section_id,
+        new_unit_id=payload.unit_id,
+        home_id=actor.home_id,
+    )
+    await db.commit()
+    await db.refresh(section)
+    return await section_view_with_slots(
+        db, home_id=actor.home_id, section=section
+    )
 
 
 # ------------------------------------------------------------------------ slots
@@ -395,6 +451,36 @@ async def delete_slot(
     )
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@slots_router.post(
+    "/{slot_id}/move",
+    response_model=StorageSlotView,
+    summary="Move a slot to a different section (same home)",
+)
+async def move_slot_endpoint(
+    slot_id: uuid.UUID,
+    payload: SlotMoveRequest,
+    actor: Annotated[Actor, Depends(get_actor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StorageSlotView:
+    """Change a slot's parent section, optionally with a new ``code``.
+
+    The client always sends ``code`` (even when it is unchanged) so the
+    rewrite of ``(section_id, code)`` is one atomic check, not two requests.
+    A code that already exists in the destination section raises
+    ``ConflictError`` → 409.
+    """
+    slot = await structure_service.move_slot(
+        db,
+        slot_id=slot_id,
+        new_section_id=payload.section_id,
+        new_code=payload.code,
+        home_id=actor.home_id,
+    )
+    await db.commit()
+    await db.refresh(slot)
+    return await slot_view_with_enrichment(db, home_id=actor.home_id, slot=slot)
 
 
 # ------------------------------------------------------------------ proposals

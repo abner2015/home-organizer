@@ -317,6 +317,90 @@ async def update_slot(
     return slot
 
 
+# ----------------------------------------------------------------------- moves
+#
+# A "move" is a single-field rewrite of the parent FK. The same home check is
+# done twice — once on the moving row, once on the destination — so a unit
+# cannot be sent into another household's tree. There is no Room move because
+# a room's home is its identity; moving it would be "moving it out of the home
+# it belongs to", which is not a concept we expose.
+
+
+async def move_unit(
+    db: AsyncSession,
+    *,
+    unit_id: uuid.UUID,
+    new_room_id: uuid.UUID,
+    home_id: uuid.UUID,
+) -> StorageUnit:
+    """Move a storage unit to ``new_room_id`` within ``home_id``.
+
+    Same-room moves are no-ops and return the row untouched, which keeps the
+    drag-drop UX honest ("I dropped it where it already was" → 200, not an
+    error). ``sort_order`` is preserved across the move: the destination room's
+    own ``_next_sort_order`` would clash with it, so callers that want a
+    specific position follow up with a ``PATCH sort_order``.
+    """
+    unit = await load_unit(db, unit_id=unit_id, home_id=home_id)
+    new_room = await load_room(db, room_id=new_room_id, home_id=home_id)
+    if unit.room_id != new_room.id:
+        unit.room_id = new_room.id
+    await db.flush()
+    return unit
+
+
+async def move_section(
+    db: AsyncSession,
+    *,
+    section_id: uuid.UUID,
+    new_unit_id: uuid.UUID,
+    home_id: uuid.UUID,
+) -> StorageSection:
+    """Move a section to ``new_unit_id`` within ``home_id``.
+
+    Same rules as ``move_unit``: cross-home is a 404, same-unit is a no-op,
+    ``sort_order`` is preserved.
+    """
+    section = await load_section(db, section_id=section_id, home_id=home_id)
+    new_unit = await load_unit(db, unit_id=new_unit_id, home_id=home_id)
+    if section.unit_id != new_unit.id:
+        section.unit_id = new_unit.id
+    await db.flush()
+    return section
+
+
+async def move_slot(
+    db: AsyncSession,
+    *,
+    slot_id: uuid.UUID,
+    new_section_id: uuid.UUID,
+    new_code: str,
+    home_id: uuid.UUID,
+) -> StorageSlot:
+    """Move a slot to ``new_section_id`` with ``new_code``.
+
+    The ``(section_id, code)`` rewrite is atomic: even when only one of the
+    two values changes, the new pair is checked for collisions before any
+    field is written. A clash raises ``ConflictError`` → 409 with a Chinese
+    message naming the code, matching ``create_slot`` and ``update_slot``.
+    """
+    slot = await load_slot(db, slot_id=slot_id, home_id=home_id)
+    new_section = await load_section(
+        db, section_id=new_section_id, home_id=home_id
+    )
+    if slot.section_id != new_section.id or slot.code != new_code:
+        await _ensure_code_available(
+            db,
+            section_id=new_section.id,
+            code=new_code,
+            exclude_slot_id=slot.id,
+        )
+        slot.section_id = new_section.id
+        slot.code = new_code
+    await db.flush()
+    return slot
+
+
 # -------------------------------------------------------------------- deleters
 #
 # Every level refuses to delete while it still has children, in that level's
@@ -416,6 +500,9 @@ __all__ = [
     "load_section",
     "load_slot",
     "load_unit",
+    "move_section",
+    "move_slot",
+    "move_unit",
     "update_room",
     "update_section",
     "update_slot",

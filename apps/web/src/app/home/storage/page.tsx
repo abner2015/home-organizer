@@ -4,10 +4,15 @@ import { requireSession } from "@/lib/session.server";
 import { PageHeader } from "@/components/PageHeader";
 import { EmptyState, ErrorState } from "@/components/States";
 import type { SpaceTree } from "@/lib/types";
+import { StorageEditor } from "./editor/StorageEditor";
 
 export const dynamic = "force-dynamic";
 
-export default async function StoragePage() {
+export default async function StoragePage({
+  searchParams,
+}: {
+  searchParams: { edit?: string };
+}) {
   const session = await requireSession();
   let tree: SpaceTree | null = null;
   try {
@@ -35,11 +40,25 @@ export default async function StoragePage() {
       ),
     0,
   );
+  const isEdit = searchParams.edit === "1";
   return (
     <div className="space-y-6">
       <PageHeader
         title="收纳空间"
         description="柜子 → 层 → 格 的完整结构"
+        actions={
+          totalSlots > 0 ? (
+            isEdit ? (
+              <Link href="/home/storage" className="btn-ghost">
+                ← 返回只读
+              </Link>
+            ) : (
+              <Link href="/home/storage?edit=1" className="btn-secondary">
+                编辑模式
+              </Link>
+            )
+          ) : undefined
+        }
       />
       {totalSlots === 0 ? (
         <EmptyState
@@ -51,62 +70,74 @@ export default async function StoragePage() {
             </Link>
           }
         />
+      ) : isEdit ? (
+        <StorageEditor session={session} initialTree={tree} />
       ) : (
-        <div className="space-y-4">
-          {tree.rooms.map((room) => (
-            <div key={room.id} className="card p-4">
-              <Link
-                href={`/home/rooms/${room.id}`}
-                className="text-base font-semibold text-ink-900 transition-colors hover:text-brand-600"
-              >
-                {room.name}
-              </Link>
-              <div className="mt-3 space-y-3">
-                {(room.units ?? []).map((unit) => (
-                  <div
-                    key={unit.id}
-                    className="rounded-xl border border-ink-100 bg-ink-50/40 p-3"
-                  >
-                    <Link
-                      href={`/home/storage/units/${unit.id}`}
-                      className="flex items-center justify-between"
-                    >
-                      <p className="text-sm font-semibold text-ink-800 transition-colors hover:text-brand-600">
-                        {unit.name}
-                      </p>
-                      <span className="text-xs text-ink-500">{unit.unit_type}</span>
-                    </Link>
-                    <div className="mt-2 space-y-2 pl-3">
-                      {(unit.sections ?? []).map((sec) => (
-                        <Link
-                          key={sec.id}
-                          href={`/home/storage/sections/${sec.id}`}
-                          className="block rounded-lg bg-white p-2.5 transition-colors hover:bg-brand-50"
-                        >
-                          <p className="text-sm text-ink-700">{sec.name}</p>
-                          <div className="mt-1.5 flex flex-wrap gap-1.5">
-                            {(sec.slots ?? []).map((slot) => (
-                              <Link
-                                key={slot.id}
-                                href={`/home/storage/slots/${slot.id}`}
-                                className="badge font-mono text-[11px] transition-colors hover:bg-brand-100"
-                                title={slot.label ?? ""}
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                {slot.code}
-                              </Link>
-                            ))}
-                          </div>
-                        </Link>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
+        <ReadOnlyTree tree={tree} />
       )}
+    </div>
+  );
+}
+
+// Render the home's storage structure as a tree of links to each detail page.
+// Kept server-rendered for the read-only path so initial paint is fast and the
+// `<Link>` elements behave like navigation rather than buttons; the edit mode
+// below replaces this whole tree with a client-side editor.
+function ReadOnlyTree({ tree }: { tree: SpaceTree }) {
+  return (
+    <div className="space-y-4">
+      {tree.rooms.map((room) => (
+        <div key={room.id} className="card p-4">
+          <Link
+            href={`/home/rooms/${room.id}`}
+            className="text-base font-semibold text-ink-900 transition-colors hover:text-brand-600"
+          >
+            {room.name}
+          </Link>
+          <div className="mt-3 space-y-3">
+            {(room.units ?? []).map((unit) => (
+              <div
+                key={unit.id}
+                className="rounded-xl border border-ink-100 bg-ink-50/40 p-3"
+              >
+                <Link
+                  href={`/home/storage/units/${unit.id}`}
+                  className="flex items-center justify-between"
+                >
+                  <p className="text-sm font-semibold text-ink-800 transition-colors hover:text-brand-600">
+                    {unit.name}
+                  </p>
+                  <span className="text-xs text-ink-500">{unit.unit_type}</span>
+                </Link>
+                <div className="mt-2 space-y-2 pl-3">
+                  {(unit.sections ?? []).map((sec) => (
+                    <Link
+                      key={sec.id}
+                      href={`/home/storage/sections/${sec.id}`}
+                      className="block rounded-lg bg-white p-2.5 transition-colors hover:bg-brand-50"
+                    >
+                      <p className="text-sm text-ink-700">{sec.name}</p>
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {(sec.slots ?? []).map((slot) => (
+                          <Link
+                            key={slot.id}
+                            href={`/home/storage/slots/${slot.id}`}
+                            className="badge font-mono text-[11px] transition-colors hover:bg-brand-100"
+                            title={slot.label ?? ""}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {slot.code}
+                          </Link>
+                        ))}
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

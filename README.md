@@ -27,7 +27,7 @@ home-organizer/
 │   └── api/               # FastAPI 后端（核心实现都在这里）
 │       ├── app/           # 业务代码
 │       ├── alembic/       # DB 迁移
-│       ├── tests/         # pytest 全套（784 passed / 1 skipped）
+│       ├── tests/         # pytest 全套（797 passed / 1 skipped）
 │       └── README.md      # 后端详尽文档
 │
 ├── docs/                  # 设计文档
@@ -97,7 +97,7 @@ npm run dev          # http://localhost:3000
 ```bash
 # 后端
 cd services/api && source .venv/bin/activate
-python -m pytest tests/ --no-header -q     # 基线 784 passed / 1 skipped
+python -m pytest tests/ --no-header -q     # 基线 797 passed / 1 skipped
 
 # 前端
 cd apps/web
@@ -117,7 +117,7 @@ npx tsc --noEmit && npx next lint          # 应当无输出
 | P1.1 | 跨用户偏好共享 —— 普通物品偏好以家为单位共享；敏感物品偏好（药品 / 贵重）永远个人 | ✅ |
 | P1.4 | 多 home 切换状态重置 —— 切 home 时 client 重置 `AssistantClient` 的 conversation；后端 404 钉死 | ✅ |
 
-基线：**后端 786 passed / 1 skipped**、ruff 32、mypy 20、tsc + next lint 干净。
+基线：**后端 797 passed / 1 skipped**、ruff 32、mypy 20、tsc + next lint 干净。
 详细里程碑 + 真实产物路径见 `docs/DEVELOPMENT_PLAN.md`。
 
 ---

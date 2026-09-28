@@ -46,12 +46,17 @@ import type {
   RevokeResponse,
   Room,
   RoomCreateBody,
+  RoomUpdateBody,
   SearchRequestBody,
   SearchResponseBody,
   SectionCreateBody,
+  SectionMoveBody,
+  SectionUpdateBody,
   SignupBody,
   SlotCreateBody,
   SlotDetail,
+  SlotMoveBody,
+  SlotUpdateBody,
   SpaceTree,
   StorageSection,
   StorageSlot,
@@ -59,6 +64,8 @@ import type {
   StructureProposalResponse,
   TokenResponse,
   UnitCreateBody,
+  UnitMoveBody,
+  UnitUpdateBody,
   User,
   UUID,
 } from "./types";
@@ -364,6 +371,122 @@ export const api = {
     session: ApiSession,
   ): Promise<StorageSlot> {
     return request<StorageSlot>(`/api/v1/sections/${sectionId}/slots`, {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  // ------------------------------------------------------------- structure edits
+
+  async updateRoom(
+    roomId: UUID,
+    body: RoomUpdateBody,
+    session: ApiSession,
+  ): Promise<Room> {
+    return request<Room>(`/api/v1/rooms/${roomId}`, {
+      method: "PATCH",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  async updateUnit(
+    unitId: UUID,
+    body: UnitUpdateBody,
+    session: ApiSession,
+  ): Promise<StorageUnit> {
+    return request<StorageUnit>(`/api/v1/storage-units/${unitId}`, {
+      method: "PATCH",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  async updateSection(
+    sectionId: UUID,
+    body: SectionUpdateBody,
+    session: ApiSession,
+  ): Promise<StorageSection> {
+    return request<StorageSection>(`/api/v1/sections/${sectionId}`, {
+      method: "PATCH",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  async updateSlot(
+    slotId: UUID,
+    body: SlotUpdateBody,
+    session: ApiSession,
+  ): Promise<StorageSlot> {
+    return request<StorageSlot>(`/api/v1/slots/${slotId}`, {
+      method: "PATCH",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  async deleteRoom(roomId: UUID, session: ApiSession): Promise<void> {
+    await request<void>(`/api/v1/rooms/${roomId}`, {
+      method: "DELETE",
+      session,
+    });
+  },
+
+  async deleteUnit(unitId: UUID, session: ApiSession): Promise<void> {
+    await request<void>(`/api/v1/storage-units/${unitId}`, {
+      method: "DELETE",
+      session,
+    });
+  },
+
+  async deleteSection(sectionId: UUID, session: ApiSession): Promise<void> {
+    await request<void>(`/api/v1/sections/${sectionId}`, {
+      method: "DELETE",
+      session,
+    });
+  },
+
+  async deleteSlot(slotId: UUID, session: ApiSession): Promise<void> {
+    await request<void>(`/api/v1/slots/${slotId}`, {
+      method: "DELETE",
+      session,
+    });
+  },
+
+  // ------------------------------------------------------------- structure moves
+
+  async moveUnit(
+    unitId: UUID,
+    body: UnitMoveBody,
+    session: ApiSession,
+  ): Promise<StorageUnit> {
+    return request<StorageUnit>(`/api/v1/storage-units/${unitId}/move`, {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  async moveSection(
+    sectionId: UUID,
+    body: SectionMoveBody,
+    session: ApiSession,
+  ): Promise<StorageSection> {
+    return request<StorageSection>(`/api/v1/sections/${sectionId}/move`, {
+      method: "POST",
+      session,
+      body: JSON.stringify(body),
+    });
+  },
+
+  async moveSlot(
+    slotId: UUID,
+    body: SlotMoveBody,
+    session: ApiSession,
+  ): Promise<StorageSlot> {
+    return request<StorageSlot>(`/api/v1/slots/${slotId}/move`, {
       method: "POST",
       session,
       body: JSON.stringify(body),
