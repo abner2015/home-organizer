@@ -149,7 +149,7 @@ curl -X POST localhost:8000/api/v1/auth/login \
 ```bash
 python -m ruff check app/ tests/             # 基线 32
 python -m mypy app/                          # 基线 20
-python -m pytest tests/ --no-header -q       # 基线 784 passed / 1 skipped
+python -m pytest tests/ --no-header -q       # 基线 786 passed / 1 skipped
 ```
 
 跑特定子集：

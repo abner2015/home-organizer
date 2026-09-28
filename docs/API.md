@@ -851,6 +851,13 @@ MinIO 部署请继续使用 presigned GET。
 - 该 intent 无候选位置时 `state = not_found`、`suggested_slot = null`（仍 200）；
   名与类别都空时 `state = needs_clarification`。
 - 传给 LLM 的 prompt 会用调用者**真实的**位置与类别做接地（见 `docs/AI.md`）。
+- **多轮记忆（可选 `conversation_id`）**：请求体可带 `"conversation_id": "uuid"`，
+  服务端回放最近 8 轮让模型理解「那它放哪儿好？」中的「它」。响应里
+  `conversation_id` 永远回写。
+  **`conversation_id` 与 home 绑定 —— 跨 home 复用 → 404**（P1.4）：
+  `Conversation` 表唯一键是 `(id, home_id, user_id)`，`begin_turn` 按三元组查。
+  前端 `AssistantClient` 在 `session.homeId` 变化时重置 `conversationId` + `turns`，
+  不会带旧 home 的 id 调 `/search`；这是客户端防泄漏，后端 404 是硬护栏。
 
 ### POST /api/v1/recommendations/{recId}/accept
 

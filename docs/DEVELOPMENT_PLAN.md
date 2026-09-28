@@ -6,8 +6,10 @@
 >   真实产物路径、真实验收结论、真实基线。已完成的部分不再有「任务」，只有事实。
 > - **下篇 · P0 路线图**（P0.0–P0.4）：唯一还在推进的计划。每个 P0.x 都带交付物与验收标准。
 >
-> 最后更新：2026-09-24 —— P0 全部 11 批次 + P1.1 跨用户偏好共享交付；基线 765 → **776 → 784**。
-> （2026-09-24 补：**P0.C 结构详情路由 + 详情页** 交付，**+P1.1 跨用户偏好共享**，基线 776 → 784。）
+> 最后更新：2026-09-24 —— P0 全部 11 批次 + P1.1 跨用户偏好共享 + **P1.4 多 home 切换状态重置** 交付；
+> 基线 765 → **776 → 784 → 786**。
+> （2026-09-24 补：**P0.C 结构详情路由 + 详情页** 交付，**+P1.1 跨用户偏好共享**，基线 776 → 784；
+> 再补：**P1.4 多 home 切换状态重置**，基线 784 → 786。）
 >
 > 背景：本文件原稿写于**开工前**。开工后实际走出来的顺序与原稿并不一致，于是原稿里出现了
 > Phase 9、Phase 10 各两份（旧副本与新副本交织），路径也停留在 `apps/api/`。本次一并归位。
@@ -51,7 +53,7 @@
 
 **当前基线**（任何改动都不得使其上升/下降）：
 
-- `services/api`：**784 passed / 1 skipped**
+- `services/api`：**786 passed / 1 skipped**
 - `ruff check app/ tests/`：**32**（历史遗留，不得上升）
 - `mypy app/`：**20**（历史遗留，不得上升）
 - `apps/web`：`npx tsc --noEmit` 与 `npx next lint` **干净**
@@ -1278,6 +1280,134 @@ entry = {
 - **legacy 数据**: 老 `value` 没有 `is_personal`，按 shared 走 —— 用户视角下「别人之前同意的事」= 共享 = 没毛病
 - **不动 FILTER**: `get_rejected_slot_ids` 本来就 `home_id` 过滤，home-scoped；不要顺手改
 - **`actor_user_id` 类型**: `_preference_dict` 把 `user_id` 序列化成 `str` —— helper 用 `str(...)` 两边对齐
+
+---
+
+## P1.4 — 多 home 切换状态重置 ✅ 已交付（2026-09-24）
+
+**为什么**：P0.1 + P0.9 + P0.A 已经把"用户在多个家之间切换"做成了产品级功能 —— JWT
+只签 `sub=user_id`（不绑 home）、`get_actor` 每个请求重验 `HomeMembership`（`X-Home-Id`
+是 selector，不是 credential）、后端每条读路径都按 `(home_id, ...)` 过滤（跨 home 访问
+404）、`Conversation` 的唯一键是 `(id, home_id, user_id)`、`UserPreference` 按 home
+隔离（P1.1）、拒绝派生集本来按 home 共享。
+
+**所有后端数据路径都没有跨 home 串味**。但还有一个**客户端状态泄漏**：
+`AssistantClient`（apps/web）是 client component，用 `useRef` 持有
+`conversationId`、用 `useState` 持有 `turns`（聊天记录）。
+
+当用户在 `/assistant` 页面**正在对话中**切了家：
+
+1. `HomeSwitcher` 改 cookie → `router.refresh()` 让 server component 用新 `X-Home-Id` 重渲染
+2. `AssistantClient` 拿到新的 `session` prop，**但内部的 `turns` 和 `conversationId` 都不会重置**
+3. 用户看到的还是 home A 的对话
+4. 下一次 POST `/api/v1/search` 带上 home A 的 `conversationId` → 后端 404「对话不存在」
+5. 用户体验：看到的是 home A 的答案，但问新问题时突然报 404
+
+**不算数据泄漏**（后端 404 正确保护），但是用户视角的"串味"。本批修这一个客户端洞 +
+加一个 API 测试把后端 404 行为钉死，防止后续重构意外放宽 lookup。
+
+### 行为变化
+
+| | P0.A | P1.4 |
+| --- | --- | --- |
+| 在 `/assistant` 对话中切 home，新问题 | 后端 404「对话不存在」 | Client 检测到 home 切换，**重置 turns + conversationId** |
+| 切 home 后看到的对话内容 | 旧 home 的 turns（直到下一次失败才刷新） | 立刻只剩欢迎语 |
+| `conversation_id` 跨 home 调 `/search` | 已 404 | 不变（已对），加测试钉死 |
+| 其他 client 页面切 home | server component 重渲染，无 client 状态问题 | 不变 |
+
+### 不动的设计
+
+- **JWT 不带 `home_id`**。`X-Home-Id` 仍然是 selector，切 home 不需要换 token。
+- **`Conversation` 表 schema 不变**。`(id, home_id, user_id)` 三元组唯一性已经是正确的硬护栏。
+- **后端 `begin_turn` 行为不变**。跨 home `conversation_id` 继续 404。
+- **其他 client component 不变**。它们的 state 是 form / 一次性，切 home 后用户会重新进入页面。
+
+### 关键设计点
+
+1. **欢迎语提到模块顶层常量 `WELCOME_TURN`**
+   - 避免 `useState([{ ... }])` 每次渲染都新建数组 → React 不知道它是常量
+   - 约定「这个对象不能改」，防止未来 `turns.map(t => t === WELCOME ? mutate(t) : t)` 污染
+
+2. **`useEffect` 监听 `session.homeId`**（`AssistantClient.tsx`）
+   - 触发时 `conversationId.current = undefined` + `setTurns([WELCOME_TURN])`
+   - 首次挂载 effect 也会 fire，但 state 已是 welcome、ref 已是 undefined → no-op
+   - 不需要 `useRef(true)` / `mounted` 标志位
+
+3. **`useRef` 不触发 re-render** —— `conversationId` 必须**显式**改 ref + 改 state
+   - state 触发刷新（用户看到欢迎语）
+   - ref 同步给下一次 `send` 调用（新请求不带旧 `conversation_id`）
+
+### 接口 / 数据
+
+#### 不变的接口
+- `POST /api/v1/search` —— 响应不变
+- `Conversation` / `Message` 表 schema —— 不变
+- `app/services/conversation_service.py:begin_turn` —— 行为不变（已正确按三元组查）
+
+#### 后端新增测试
+- `tests/api/test_search_api.py::test_conversation_from_other_home_returns_404`
+  - home A 起对话 → 拿 `conversation_id`
+  - `POST /api/v1/homes {name: "老家"}` 建 home B（Bearer-only）
+  - 把 `X-Home-Id` 换成 home B，带 home A 的 `conversation_id` 调 `/search`
+  - 断言 **404 not_found**
+
+代码改动量为 0 —— 这是回归保险，钉死后端 404 不会因为未来重构而放宽。
+
+### 验收
+
+- [x] `tests/api/test_search_api.py` 新增 1 测试 passed
+- [x] `python -m pytest tests/ --no-header -q` —— 基线 784 → **786** passed / 1 skipped, **不 regress**
+- [x] `python -m ruff check app/ tests/` —— 32 不变
+- [x] `python -m mypy app/` —— 20 不变
+- [x] `apps/web`: `npx tsc --noEmit` + `npx next lint` 干净
+
+### 端到端行为
+
+- A 用户在 home A 起对话 → 切到 home B → 立刻看到欢迎语（无 home A turns）
+- A 用户在 home B 提问 → 后端开新 conversation（无 404）
+- A 用户直接用 home A 的 `conversation_id` 在 home B 调 `/search` → **404**（已被旧行为保证，新测试钉死）
+- 不在 home B 里的用户 → `/search` 仍 401/404（`get_actor` 守门，不动）
+- 切换 home 后，**新 home 同样能跑 pipeline**（推荐 / 候选 / 接受，后端不受影响）
+
+### 落地位置
+
+**修改**
+- `apps/web/src/app/assistant/AssistantClient.tsx` —— welcome 提常量 + homeId effect
+
+**新增（测试）**
+- `services/api/tests/api/test_search_api.py` —— `test_conversation_from_other_home_returns_404`
+
+**不动**
+- `services/api/app/services/conversation_service.py`（`begin_turn` 已有正确行为）
+- `services/api/app/api/v1/search.py`（路由不变）
+- `apps/web/src/components/HomeSwitcher.tsx`（cookie + refresh 不变）
+- `services/api/app/services/security.py`（JWT 不带 `home_id`）
+
+### 本批不做
+
+- **不**做"切 home 时自动开新对话"的 UI toast（简单刷新 + 欢迎语已经够）
+- **不**把 `conversationId` 持久化到 `localStorage` / `sessionStorage`（项目用 cookie，跨页面不持久化）
+- **不**做后端 schema 改动（`(id, home_id, user_id)` 已经是正确的三元组）
+- **不**做"切 home 前先弹确认对话框"（失去连续性，反而打断用户）
+- **不**做跨 home 的测试矩阵（本批用户明确选了"修客户端 + 锁测试"，不做大矩阵）
+- **不**做"在 Assistant 里显示当前 home 是哪个"（标题已经是当前 home；有需要的化再加）
+
+### Trap
+
+1. **`useRef` 不触发 re-render**：`conversationId` 是 ref，effect 必须**显式**改 ref + 改 state。
+2. **`ChatTurn` 不能 mutate**：把欢迎语提到模块常量 `WELCOME_TURN`，约定不可变。
+3. **测试的 header shape**：`POST /api/v1/homes` 是 Bearer-only（不需 `X-Home-Id`），与业务路由不同。
+   新测试**创建 home B** 用 `seeded_actor.headers()["Authorization"]`，**调 `/search` with home B**
+   用 `{**seeded_actor.headers(), "X-Home-Id": str(home_b_id)}` —— 两个 header shape 不要混。
+4. **首次挂载 effect 会 fire**：但此时 `turns === [WELCOME_TURN]` 且 `conversationId.current === undefined`，
+   reset 是 no-op。不需要 `useRef(true)` / `mounted` 标志位。
+5. **P0.A 已知行为保留**：`HomeSwitcher` 的 `setSession({...current, homeId})` + `router.refresh()`
+   这条路径**保留**；本批只是在 client component 加 effect，不碰切换流程本身。
+6. **新 home 的同名 item / slot 不串**：P0.C 已经验证 `GET /items/{id}` 等读路径都按 `home_id` 过滤。
+   切 home 后 server component 重渲染 → 新 home 的 `getSpaceTree` / `listItems` 各跑一次。
+   **本批不动 server component**。
+7. **`pytest-asyncio` 与 `TestClient` 混用**：已有测试用 `api_client.post(...)` 同步写法
+   （TestClient 内部跑事件循环）。新测试沿用同步，不要突然混 `await` —— 会被 fixture 拒收。
 
 ---
 

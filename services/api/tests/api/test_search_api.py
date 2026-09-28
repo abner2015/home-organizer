@@ -713,6 +713,62 @@ async def test_unknown_conversation_id_is_404(
     assert response.status_code == 404, response.text
 
 
+async def test_conversation_from_other_home_returns_404(
+    seeded_actor: SeededActor,
+    db_engine,
+    storage_hierarchy: StorageHierarchy,
+    api_client: TestClient,
+) -> None:
+    """A ``conversation_id`` from another home is 404, not silently resumed.
+
+    P1.4 closes the client-side state leak in ``AssistantClient``: when a user
+    switches active home mid-conversation, the chat resets so the new request
+    never carries the old home's ``conversation_id``. The backend hardens the
+    same invariant by scoping ``Conversation`` rows on ``(id, home_id, user_id)``
+    in ``conversation_service.begin_turn``; this test pins that behavior so a
+    future refactor can't accidentally widen the lookup.
+    """
+    # 1. Start a conversation in home A; capture its id.
+    _override_provider(
+        MockAIProvider(
+            structured_output_responses=[
+                _intent_payload(SearchIntentKind.FIND_ITEM, query="马克杯")
+            ]
+        )
+    )
+    first = api_client.post(
+        "/api/v1/search",
+        json={"query": "我的马克杯在哪里？"},
+        headers=_auth_headers(seeded_actor),
+    )
+    assert first.status_code == 200, first.text
+    conversation_id = first.json()["conversation_id"]
+    assert conversation_id
+
+    # 2. Create home B via the bearer-only ``POST /api/v1/homes`` endpoint —
+    #    no ``X-Home-Id`` because there is no home yet to put in the header.
+    token = seeded_actor.headers()["Authorization"]
+    create = api_client.post(
+        "/api/v1/homes",
+        headers={"Authorization": token},
+        json={"name": "老家"},
+    )
+    assert create.status_code == 201, create.text
+    home_b_id = create.json()["id"]
+
+    # 3. Reuse home A's conversation_id under home B's ``X-Home-Id`` →
+    #    ``begin_turn`` raises ``NotFoundError`` (cross-home leak guard),
+    #    surfaced as 404 by the project's no-existence-leak convention.
+    headers_b = {**seeded_actor.headers(), "X-Home-Id": home_b_id}
+    cross = api_client.post(
+        "/api/v1/search",
+        json={"query": "接着问", "conversation_id": conversation_id},
+        headers=headers_b,
+    )
+    assert cross.status_code == 404, cross.text
+    assert cross.json()["error"]["code"] == "not_found"
+
+
 async def test_composed_answer_text_is_what_the_user_sees(
     seeded_actor: SeededActor,
     db_engine,

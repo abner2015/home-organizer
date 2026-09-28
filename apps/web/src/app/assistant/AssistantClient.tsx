@@ -16,6 +16,16 @@ interface ChatTurn {
   error?: string;
 }
 
+// Module-scope constant: `useState([WELCOME_TURN])` builds a fresh array each
+// mount, but the turn *object* is shared. Keeping it frozen-by-convention
+// prevents future `turns.map(t => t === WELCOME ? mutate(t) : t)` from
+// silently corrupting every reset (P1.4).
+const WELCOME_TURN: ChatTurn = {
+  id: "welcome",
+  role: "assistant",
+  text: "你好！我是你的家庭收纳助手，能记住我们聊过的内容，你可以接着追问。\n试试问我：\n• 「我的数据线在哪里？」\n• 「客厅有哪些东西？」\n• 「我家还有没有电池？」",
+};
+
 const STATE_TONE: Record<SearchResponseBody["state"], string> = {
   answer: "bg-emerald-50 text-emerald-700",
   needs_clarification: "bg-amber-50 text-amber-700",
@@ -49,13 +59,7 @@ export function AssistantClient({
   suggestions: string[];
   session: ApiSession;
 }) {
-  const [turns, setTurns] = useState<ChatTurn[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      text: "你好！我是你的家庭收纳助手，能记住我们聊过的内容，你可以接着追问。\n试试问我：\n• 「我的数据线在哪里？」\n• 「客厅有哪些东西？」\n• 「我家还有没有电池？」",
-    },
-  ]);
+  const [turns, setTurns] = useState<ChatTurn[]>([WELCOME_TURN]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   // The backend remembers a conversation for us: it replays the recent turns
@@ -67,6 +71,18 @@ export function AssistantClient({
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns]);
+
+  // Reset the chat when the user switches active home (P1.4). The previous
+  // `conversationId` belongs to the previous home — `begin_turn` scopes by
+  // (id, home_id, user_id), so reusing it across homes would 404 — and the
+  // rendered `turns` reference items / slots from the previous home, which
+  // would be wrong on top of the new X-Home-Id. The effect also fires on
+  // mount, where `conversationId` is already undefined and `turns` is
+  // already [WELCOME_TURN] — a harmless no-op.
+  useEffect(() => {
+    conversationId.current = undefined;
+    setTurns([WELCOME_TURN]);
+  }, [session.homeId]);
 
   async function send(text: string) {
     const trimmed = text.trim();
