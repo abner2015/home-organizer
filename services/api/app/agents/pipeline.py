@@ -18,6 +18,7 @@ The orchestrator records one :class:`AgentStepResult` per transition in
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid as uuid_mod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from app.agents.context import AgentContext
 from app.agents.ranking import rank_slots
 from app.agents.reason import build_reason, is_acceptable_llm_reason
 from app.agents.state import AgentStepResult, RecommendationState
+from app.ai.observability import hash_prompt
 from app.ai.provider import AIProvider, RankingOutput
 from app.tools.recommendation_tools import get_rejected_slot_ids
 from app.tools.registry import ToolRegistry
@@ -37,6 +39,53 @@ from app.verification.context import VerificationContext
 from app.verification.verifier import run_verifier
 
 MAX_RETRIES_DEFAULT = 2
+
+
+def _fingerprint_rank_call(
+    *,
+    item: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    rules: list[dict[str, Any]],
+    preferences: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    last_failure: str | None,
+) -> str:
+    """Stable SHA-256 fingerprint of the DECIDE step's inputs.
+
+    The provider builds the rank prompt internally (docs/AI.md §2 — the
+    Protocol's ``rank_candidates`` has no prompt parameter). To produce a
+    correlation key without changing the Protocol, we hash a canonical JSON
+    dump of the inputs. Same inputs (after the deterministic ranker has
+    produced the same candidate list) ⇒ same hash. (P2.1)
+
+    Candidate slots are reduced to ``(id, det_score, score_terms)`` — those
+    are the only inputs that flow into the prompt — and ``item`` is reduced
+    to its identifying fields.
+    """
+    fingerprint = {
+        "item": {
+            "name": item.get("name"),
+            "category": item.get("category"),
+            "subcategory": item.get("subcategory"),
+            "estimated_size": item.get("estimated_size"),
+            "is_sensitive": bool(item.get("is_sensitive", False)),
+            "needs_lock": bool(item.get("needs_lock", False)),
+        },
+        "candidates": [
+            {
+                "id": str(c.get("id")),
+                "det_score": c.get("det_score"),
+                "score_terms": c.get("score_terms") or {},
+            }
+            for c in candidates
+        ],
+        "rule_names": sorted(str(r.get("name")) for r in rules),
+        "preference_count": len(preferences),
+        "history_count": len(history),
+        "last_failure": last_failure,
+    }
+    canonical = json.dumps(fingerprint, sort_keys=True, ensure_ascii=False, default=str)
+    return hash_prompt(canonical)
 
 
 @dataclass(slots=True)
@@ -52,24 +101,25 @@ class AgentRunResult:
     retries_used: int
     steps: list[AgentStepResult] = field(default_factory=list)
     error: str | None = None
+    # Observability fields — propagated to AgentTrace.steps and surfaced in
+    # the eval harness so failed runs are diagnosable without re-running.
+    # (P2.1) ``pre_filter_count`` / ``post_filter_count`` are also available
+    # via ``_step_rank`` payloads; the fields below let callers read them
+    # without walking the step list.
+    pre_filter_count: int = 0
+    post_filter_count: int = 0
+    # Per-candidate ``score_terms`` (ranker output), in rank order. Empty when
+    # the candidate set is empty.
+    score_breakdown: list[dict[str, int]] = field(default_factory=list)
+    # SHA-256 fingerprint of the DECIDE call's inputs (item + ranked candidates
+    # + rules + preferences + history). Same inputs → same hash → easy to
+    # correlate runs that produced the same LLM call. ``None`` when DECIDE
+    # never ran (e.g. candidate set empty).
+    prompt_hash: str | None = None
 
     @property
     def ok(self) -> bool:
         return self.state == RecommendationState.ANSWER and self.chosen_slot_id is not None
-
-    @property
-    def pre_filter_count(self) -> int:
-        for step in self.steps:
-            if step.state == RecommendationState.CANDIDATE_GENERATION:
-                return int(step.payload.get("count", 0))
-        return 0
-
-    @property
-    def post_filter_count(self) -> int:
-        for step in self.steps:
-            if step.state == RecommendationState.FILTER:
-                return int(step.payload.get("count", 0))
-        return 0
 
 
 class RecommendationAgent:
@@ -137,10 +187,13 @@ class RecommendationAgent:
                 retries_used=0,
                 steps=steps,
                 error=error,
+                pre_filter_count=ctx.pre_filter_count,
+                post_filter_count=ctx.post_filter_count,
             )
 
         # 6) RANK (deterministic)
-        steps.append(await self._step_rank(ctx))
+        rank_step = await self._step_rank(ctx)
+        steps.append(rank_step)
 
         # 7+8) DECIDE + VERIFY (with retries)
         while True:
@@ -157,6 +210,10 @@ class RecommendationAgent:
                     candidates=ctx.ranked_candidates,
                     retries_used=ctx.retries_used,
                     steps=steps,
+                    pre_filter_count=ctx.pre_filter_count,
+                    post_filter_count=ctx.post_filter_count,
+                    score_breakdown=list(rank_step.payload.get("score_breakdown") or []),
+                    prompt_hash=decide_step.payload.get("prompt_hash"),
                 )
 
             if ctx.retries_used >= ctx.max_retries:
@@ -167,6 +224,10 @@ class RecommendationAgent:
                     retries_used=ctx.retries_used,
                     steps=steps,
                     error=ctx.last_failure or "verification failed",
+                    pre_filter_count=ctx.pre_filter_count,
+                    post_filter_count=ctx.post_filter_count,
+                    score_breakdown=list(rank_step.payload.get("score_breakdown") or []),
+                    prompt_hash=decide_step.payload.get("prompt_hash"),
                 )
 
             ctx.retries_used += 1
@@ -293,18 +354,39 @@ class RecommendationAgent:
             limit=20,
         )
         ctx.ranked_candidates = ranked
+        # ``score_terms`` is the ranker's per-candidate weighted breakdown (7
+        # keys: category/room/path/capacity/preference/history/soft_rule).
+        # Surface it on the step payload so the AgentTrace (and the eval
+        # runner) can show why each candidate ranked where it did — without
+        # re-running the ranker. (P2.1)
+        score_breakdown = [c.get("score_terms") or {} for c in ranked]
         return AgentStepResult(
             state=RecommendationState.RANK,
             started_at=start,
             ended_at=self._now(),
-            payload={"count": len(ranked), "top_score": ranked[0]["det_score"] if ranked else 0},
+            payload={
+                "count": len(ranked),
+                "top_score": ranked[0]["det_score"] if ranked else 0,
+                "score_breakdown": score_breakdown,
+            },
         )
 
     async def _step_decide(self, ctx: AgentContext) -> AgentStepResult:
         start = self._now()
         item = ctx.item or {}
         # The provider builds the Rank prompt itself (docs/AI.md §2 — the
-        # Protocol's rank_candidates takes no prompt parameter).
+        # Protocol's rank_candidates takes no prompt parameter), so we hash a
+        # stable fingerprint of the inputs as a correlation key. Same inputs
+        # → same hash, so traces with identical LLM calls group together.
+        # (P2.1)
+        prompt_hash = _fingerprint_rank_call(
+            item=item,
+            candidates=ctx.ranked_candidates,
+            rules=ctx.rules,
+            preferences=ctx.preferences,
+            history=ctx.history,
+            last_failure=ctx.last_failure,
+        )
         chosen: dict[str, Any] | None = None
         try:
             output: RankingOutput = await self.ai.rank_candidates(
@@ -357,6 +439,7 @@ class RecommendationAgent:
                 "reasons_by_slot": dict(ctx.llm_reasons),
                 "last_failure_was": ctx.last_failure,
                 "raw_pick": chosen,
+                "prompt_hash": prompt_hash,
             },
         )
 

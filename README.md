@@ -117,8 +117,9 @@ npx tsc --noEmit && npx next lint          # 应当无输出
 | P1.1 | 跨用户偏好共享 —— 普通物品偏好以家为单位共享；敏感物品偏好（药品 / 贵重）永远个人 | ✅ |
 | P1.4 | 多 home 切换状态重置 —— 切 home 时 client 重置 `AssistantClient` 的 conversation；后端 404 钉死 | ✅ |
 | P1.3 | **结构提议持久化** —— `propose` 落 `structure_proposals` 表（pending），`accept` 单事务 4 层原子建，`/home/proposals` 看历史 | ✅ |
+| P2.1 | 评估 harness 排序质量指标 —— `AgentRunResult` + `CaseResult` 加 `score_breakdown` / `prompt_hash` / pre/post_filter_count；3 个新指标 MRR / Top-1 / Pre-filter Top-1；Mock 实测 MRR 66.22% / Top-1 59.02% / Pre-filter Top-1 59.02% | ✅ |
 
-基线：**后端 811 passed / 1 skipped**、ruff 32、mypy 20、tsc + next lint 干净。
+基线：**后端 825 passed / 1 skipped**、ruff 32、mypy 20、tsc + next lint 干净。
 详细里程碑 + 真实产物路径见 `docs/DEVELOPMENT_PLAN.md`。
 
 ---

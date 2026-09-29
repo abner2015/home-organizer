@@ -38,7 +38,7 @@ class EvalCase:
     reason: str = ""
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "EvalCase":
+    def from_dict(cls, payload: dict[str, Any]) -> EvalCase:
         return cls(
             id=str(payload["id"]),
             category=str(payload.get("category", "")),
@@ -68,4 +68,4 @@ def load_dataset(dataset_dir: Path | str | None = None) -> list[EvalCase]:
     return cases
 
 
-__all__ = ["EvalCase", "load_dataset", "DEFAULT_DATASET_DIR"]
+__all__ = ["DEFAULT_DATASET_DIR", "EvalCase", "load_dataset"]

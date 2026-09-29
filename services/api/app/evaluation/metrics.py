@@ -32,8 +32,8 @@ Metrics (per spec):
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 
 from app.evaluation.runner import CaseResult
 
@@ -51,9 +51,15 @@ class MetricReport:
     verifier_catch_rate: float | None
     retry_success_rate: float
     hallucinated_slot_rate: float
-    per_category: dict[str, "CategoryMetric"] = field(default_factory=dict)
+    per_category: dict[str, CategoryMetric] = field(default_factory=dict)
     passed_cases: int = 0
     failed_cases: int = 0
+    # P2.1 — three new ranking-quality diagnostics. ``pre_filter_top1`` is
+    # ``None`` when no case had a non-empty post-filter candidate set
+    # (defensive — see ``pre_filter_top1``).
+    mrr: float = 0.0
+    top1_accuracy: float = 0.0
+    pre_filter_top1: float | None = None
 
 
 @dataclass(slots=True)
@@ -76,6 +82,74 @@ def _pct(num: float) -> float:
     return round(num * 100, 2)
 
 
+# P2.1 — three ranking-quality metrics. See docs/EVALUATION.md §3.4 / §3.5.
+
+
+def mrr_score(results: list[CaseResult]) -> float:
+    """Mean Reciprocal Rank — quality of the ranker's ordering.
+
+    For each case we find the rank (1-indexed) of the first ``top_slot_tag``
+    that appears in ``expected_slots``; that case's reciprocal rank is
+    ``1/rank``. Cases whose top-N lists never contain an expected tag
+    contribute 0. We then take the mean across all cases.
+
+    Note: this scores the *ranker's* ordering (the deterministic step before
+    the LLM picks), not the LLM's chosen slot. It is intentionally
+    decoupled from Recommendation Accuracy so we can see whether the
+    ordering is the bottleneck or the LLM pick is.
+    """
+    if not results:
+        return 0.0
+    rr_sum = 0.0
+    for r in results:
+        rr = 0.0
+        for idx, tag in enumerate(r.top_slot_tags, start=1):
+            if tag in r.expected_slots:
+                rr = 1.0 / idx
+                break
+        rr_sum += rr
+    return _pct(rr_sum / len(results))
+
+
+def top1_accuracy(results: list[CaseResult]) -> float:
+    """% of cases where the ranker's lead (``top_slot_tags[0]``) is in
+    ``expected_slots``.
+
+    Like MRR, this measures the ranker in isolation — not what the LLM
+    eventually picked. It is the strictest ranking metric: did the ranker
+    put a correct slot first?
+    """
+    if not results:
+        return 0.0
+    hits = sum(
+        1
+        for r in results
+        if r.top_slot_tags and r.top_slot_tags[0] in r.expected_slots
+    )
+    return _pct(hits / len(results))
+
+
+def pre_filter_top1(results: list[CaseResult]) -> float | None:
+    """% of "the filter left us something" cases where the ranker's lead
+    is in ``expected_slots``.
+
+    Denominator is cases with ``pre_filter_count > 0`` — these are the
+    cases the filter didn't kill. Cases with ``pre_filter_count == 0`` are
+    excluded because the filter is a separate concern (covered by the
+    1.64% Hard Violation rate in §3.2). Returns ``None`` when no case had
+    a non-empty pre-filter set (the metric is undefined in that case).
+    """
+    eligible = [r for r in results if r.pre_filter_count > 0]
+    if not eligible:
+        return None
+    hits = sum(
+        1
+        for r in eligible
+        if r.top_slot_tags and r.top_slot_tags[0] in r.expected_slots
+    )
+    return _pct(hits / len(eligible))
+
+
 # ----------------------------------------------------------------- compute
 
 
@@ -91,6 +165,9 @@ def compute_metrics(results: list[CaseResult]) -> MetricReport:
             verifier_catch_rate=None,
             retry_success_rate=0.0,
             hallucinated_slot_rate=0.0,
+            mrr=0.0,
+            top1_accuracy=0.0,
+            pre_filter_top1=None,
         )
 
     total = len(results)
@@ -182,6 +259,9 @@ def compute_metrics(results: list[CaseResult]) -> MetricReport:
         per_category=per_category,
         passed_cases=passed,
         failed_cases=total - passed,
+        mrr=mrr_score(results),
+        top1_accuracy=top1_accuracy(results),
+        pre_filter_top1=pre_filter_top1(results),
     )
 
 
@@ -190,4 +270,12 @@ def category_counts(results: Iterable[CaseResult]) -> dict[str, int]:
     return dict(Counter(r.category for r in results))
 
 
-__all__ = ["MetricReport", "CategoryMetric", "compute_metrics", "category_counts"]
+__all__ = [
+    "CategoryMetric",
+    "MetricReport",
+    "category_counts",
+    "compute_metrics",
+    "mrr_score",
+    "pre_filter_top1",
+    "top1_accuracy",
+]

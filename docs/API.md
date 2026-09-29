@@ -2,7 +2,11 @@
 
 > FastAPI，OpenAPI 自动生成。所有路径以 `/api/v1` 开头。
 >
-> 最后更新：2026-09-28 —— **P1.3**：AI 结构**提议现在持久化** —— `POST /structures/propose`
+> 最后更新：2026-09-29 —— **P2.1**：离线评估 harness 加 3 个排序质量指标
+> （`MRR` / `Top-1 Accuracy` / `Pre-filter Top-1`）；`AgentTrace.steps[*]` 的 RANK payload
+> 含 `score_breakdown`，DECIDE payload 含 `prompt_hash`（输入指纹 SHA-256），
+> 隔离可观测：能区分「filter 太狠」与「ranker 排序差」两类问题。**不**改 API 接口。
+> 此前 2026-09-28 —— **P1.3**：AI 结构**提议现在持久化** —— `POST /structures/propose`
 > 返回里多了 `proposal_id`，新增 `GET /proposals`、`GET /proposals/{id}`、
 > `POST /proposals/{id}/accept`（**单事务**原子建 4 层结构）、`POST /proposals/{id}/reject`
 > 四个端点（§5）；`accept_proposal` 是同一份 `create_room/unit/section/slot` 实现的

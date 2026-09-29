@@ -4,7 +4,8 @@
 >
 > 状态图例：✅ 已落地可跑 · ⏳ 已排期 · 📋 设计稿（还没代码）
 >
-> 最后更新：2026-09-22 —— §3.3 新增「P0.4 之后数字为何未动」：ranker 重构
+> 最后更新：2026-09-29 —— §3.4 三个排序质量指标（MRR / Top-1 / Pre-filter Top-1）落地为代码 + 单元测试 + Mock 实测；§3.5 「Pipeline 分步命中率」部分实现。
+> 此前 2026-09-22 —— §3.3 新增「P0.4 之后数字为何未动」：ranker 重构
 > （`score_terms`）保证权重逐项相同，评测集无偏好行故 `preference` 恒为 0。
 > 此前 2026-09-21 订正：`adjusted` 状态已不存在；评估脚本的真实位置是
 > `services/api/app/evaluation/`（不是 `apps/api/scripts/eval/`）；补上 §3 的**真实实测数字**。
@@ -74,6 +75,9 @@
 | 6 | Verifier Catch Rate | 拦截率。**当前恒为 N/A**（评测集里没有构造违例用例） |
 | 7 | Retry Success Rate | 触发过 Retry 的用例最终通过的比例 |
 | 8 | **Hallucinated Slot Rate** | 选中了不存在的 slot 的比例。**必须 ≈ 0，非零即重大安全 bug** |
+| 10 | **MRR** (P2.1) | Mean Reciprocal Rank —— ranker 的最佳预期正确位的倒数均值 |
+| 11 | **Top-1 Accuracy** (P2.1) | ranker 排第一的 slot ∈ expected 的比例 |
+| 12 | **Pre-filter Top-1** (P2.1) | filter 没杀光的 case 里，ranker Top-1 ∈ expected 的比例 |
 
 另有 `per_category` 分类拆分与 `passed/failed` 计数。**`passed` 的精确口径是
 `state == "answer" and verifier_passed`** —— 即 pipeline 走完了、没被 Verifier 拦下，
@@ -136,19 +140,52 @@ P0.4 改了 ranking 的内部结构（§15.1 的类别偏好、§15.3 的理由�
 > 这条正是「重构 ranker 必须先证明数字不动」的价值所在 —— 数字一动，
 > 第一嫌疑就是加权和没搬对。
 
-### 3.4 目标（📋 第一版设计值，尚无用户数据支撑）
+### 3.4 目标（✅ 2026-09-29：三个排序质量指标已实现并跑通）
 
 - Top-3 准确率 ≥ 80%、Top-1 准确率 ≥ 55%、MRR ≥ 0.65。
 - **Pre-filter Top-1 命中率 ≥ 70%（强制）** —— 若低于此值，说明 Candidate Generation 有问题，
   该优先优化它，而不是去调 LLM。
-- ⚠️ MRR、Top-1 准确率、Pre-filter Top-1 命中率**当前 harness 都还没实现**，
-  只实现了 §3.1 那 8 个。要加指标就加在 `app/evaluation/metrics.py`。
 
-### 3.5 Pipeline 分步命中率（📋 未实现）
+#### 三个新指标的实现与实测（Mock AI / 2026-09-29 / 61 条）
 
-思路正确且仍然值得做：把 Step 4 Candidate Generation / Step 5 Filter / Step 7 DECIDE 的
-Top-1 命中率分别算出来，定位瓶颈在确定性的前段还是 LLM。目前只能从
-`pre_filter_count` / `post_filter_count` 两列间接观察。
+| 指标 | 公式 | Mock 实测 | 目标 |
+| --- | --- | --- | --- |
+| **MRR** | mean(1 / rank_of_first_expected_in_top_slot_tags) | **66.22%** | ≥ 65% ✅ |
+| **Top-1 Accuracy** | mean(top_slot_tags[0] ∈ expected_slots) | **59.02%** | ≥ 55% ✅ |
+| **Pre-filter Top-1** | mean(pre_filter_count > 0 ∧ top_slot_tags[0] ∈ expected_slots) | **59.02%** | ≥ 70% ❌ |
+
+实现位置：
+- `app/evaluation/metrics.py:mrr_score` / `top1_accuracy` / `pre_filter_top1`
+- `app/evaluation/metrics.py:MetricReport.mrr` / `top1_accuracy` / `pre_filter_top1`
+- Markdown 报告新增 3 行（表头 10/11/12）。
+- 单测：`tests/unit/test_eval_metrics.py`（14 条）。
+
+口径要点：
+- **打分的是确定性 ranker，不是 LLM**：Top-1 Accuracy 与 MRR 看 `top_slot_tags`
+  （Step 6 RANK 输出），与 DECIDE 选谁无关。所以「ranker 排第 5 但 LLM 跳过去选了第 1」
+  这种事，**这两个指标看不见** —— 它们是给 ranker 单独照的镜子。
+- **Pre-filter Top-1 把 filter-killed 案例剔除分母**：`pre_filter_count == 0`
+  表示 Step 5 把所有候选都过滤掉了，那是 filter 的问题（被 §3.1 #3 Hard Constraint Violation Rate
+  覆盖），不归这个指标管。所有 pre_filter_count > 0 的 case 算分母，全 0 时返回 `None`。
+- 与 §3.1 #4 Recommendation Accuracy **不一致时** = LLM 决策有偏差（ranker 对、LLM 错），
+  这正是 §3.3 kids/toys 7 条的现状：**ranker Top-1 = 主卧**，LLM 跟着选 → 选错；
+  P2.3 的 ranker 修复应该让两者同步上升。
+
+> 📌 数字解读：`MRR = 66.22%` 而 `Top-1 = 59.02%` —— 差值（≈7pp）就是「正确候选虽然不在
+> Top-1，但在 Top-2 / Top-3 的命中率」。改 ranker 时盯 MRR + Top-1 一起看，比只看 Top-3
+> Recall（旧指标 §3.1 #5）颗粒度更细。
+
+### 3.5 Pipeline 分步命中率（📋 部分实现）
+
+- ✅ **Pre-filter / Post-filter 计数已上**：`AgentTrace.steps[].payload.count` + `CaseResult.pre_filter_count`
+  / `post_filter_count`（P2.1）。从此能在报告里直接看到每个 case 的过滤损失。
+- ✅ **Ranker Top-1 已上**：§3.4 的 Top-1 Accuracy。
+- ⏳ **Step 4 Candidate Generation 独立命中率**还没拆出来（与 Pre-filter Top-1 重叠，
+  暂未单独算 —— 当前 CaseResult 只有 `post_filter_count`，没有 `candidate_gen_count`）。
+- ⏳ **DECIDE 步的命中率**与 Recommendation Accuracy 重合，按现状没有新信息。
+
+P2.1 的「能定位瓶颈」目标已经基本达成：能区分「filter 太狠」和「ranker 排序差」两类问题。
+Step 4 独立命中率为后续需要时再加。
 
 ### 3.6 冷启动指标（📋 未实现）
 
@@ -193,7 +230,7 @@ P50/P95 是最容易先补上的；HTTP 层的耗时没有中间件记录。
 
 | 来源 | 内容 | 状态 |
 | --- | --- | --- |
-| `agent_traces.steps` | 每次推荐 / 搜索 / vision 的分步 payload | ✅ 但 payload 只记数量与标识，**没有 score_breakdown / prompt_hash / token** |
+| `agent_traces.steps` | 每次推荐 / 搜索 / vision 的分步 payload | ✅ RANK step 含 `score_breakdown`；DECIDE step 含 `prompt_hash`（P2.1）；**尚未**含 token / cost |
 | `agent_traces.total_duration_ms` | 端到端耗时 | ✅ |
 | `recommendations` | 用户反馈（status） | ✅ |
 | `item_placements` | 最终落点 + `source` | ✅ |
@@ -207,7 +244,7 @@ P50/P95 是最容易先补上的；HTTP 层的耗时没有中间件记录。
 | `__main__.py` | CLI：`--use-real-ai` / `--report-dir` / `--max-retries` / `--quiet` |
 | `dataset.py` | 加载 `evaluation/dataset/*.json` |
 | `runner.py` | 逐条跑 agent；`CandidateAwareMockProvider` 是 Mock 的 DECIDE 替身（只从拿到的候选里挑，遵循 ranker 顺序，重试时换掉上一次的领先者） |
-| `metrics.py` | §3.1 的 8 项指标 + 分类拆分 |
+| `metrics.py` | §3.1 的 8 项指标 + 分类拆分 + §3.4 的 3 个排序质量指标（MRR / Top-1 / Pre-filter Top-1） |
 | `reporters.py` | 写 `report.json` / `report.csv` / `report.md` |
 
 单元测试：`tests/unit/test_eval_mock_provider.py`（8 条）。

@@ -16,15 +16,15 @@ Run via ``python -m app.evaluation`` (defaults to Mock AI; opt into Real AI
 with ``EVAL_USE_REAL_AI=1``).
 """
 from app.evaluation.dataset import EvalCase, load_dataset
-from app.evaluation.runner import CaseResult, EvalRunner, EvalRunnerConfig
 from app.evaluation.metrics import MetricReport, compute_metrics
+from app.evaluation.runner import CaseResult, EvalRunner, EvalRunnerConfig
 
 __all__ = [
-    "EvalCase",
-    "load_dataset",
     "CaseResult",
+    "EvalCase",
     "EvalRunner",
     "EvalRunnerConfig",
     "MetricReport",
     "compute_metrics",
+    "load_dataset",
 ]

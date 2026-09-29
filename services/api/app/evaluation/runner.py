@@ -438,6 +438,17 @@ class CaseResult:
     error: str | None
     duration_ms: int
     reason: str = ""
+    # P2.1 — diagnostic fields propagated from AgentRunResult. All nullable
+    # because the runner may be invoked with a stripped-down agent.
+    pre_filter_count: int = 0
+    post_filter_count: int = 0
+    score_breakdown: list[dict[str, int]] = field(default_factory=list)
+    prompt_hash: str | None = None
+    # P2.2 — token/cost placeholders. Mock provider does not currently
+    # surface CallMetrics, so these stay None until P2.2 wires it through.
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    cost_usd: float | None = None
 
 
 class EvalRunner:
@@ -546,6 +557,12 @@ class EvalRunner:
                     error=run.error,
                     duration_ms=int((time.perf_counter() - started) * 1000),
                     reason=case.reason,
+                    # P2.1 — diagnostic fields the ranker already computed
+                    # and the pipeline now exposes on AgentRunResult.
+                    pre_filter_count=run.pre_filter_count,
+                    post_filter_count=run.post_filter_count,
+                    score_breakdown=list(run.score_breakdown),
+                    prompt_hash=run.prompt_hash,
                 )
         finally:
             await engine.dispose()

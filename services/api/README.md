@@ -151,7 +151,7 @@ curl -X POST localhost:8000/api/v1/auth/login \
 ```bash
 python -m ruff check app/ tests/             # 基线 32
 python -m mypy app/                          # 基线 20
-python -m pytest tests/ --no-header -q       # 基线 811 passed / 1 skipped
+python -m pytest tests/ --no-header -q       # 基线 825 passed / 1 skipped
 ```
 
 跑特定子集：
@@ -174,6 +174,7 @@ RUN_REAL_AI_TESTS=1 pytest tests/api/test_recognition_real_api.py
 python -m app.evaluation                       # Mock AI（基线 61/61 passed）
 EVAL_USE_REAL_AI=1 python -m app.evaluation --use-real-ai
 # 报告 → evaluation/reports/{report.json,report.csv,report.md}
+# P2.1 起报告新增 MRR / Top-1 / Pre-filter Top-1 三个排序质量指标
 ```
 
 ## Docker

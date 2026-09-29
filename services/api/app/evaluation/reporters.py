@@ -16,7 +16,6 @@ from typing import Any
 from app.evaluation.metrics import MetricReport
 from app.evaluation.runner import CaseResult
 
-
 # ----------------------------------------------------------------- JSON
 
 
@@ -45,6 +44,12 @@ def render_json(
                 "error": r.error,
                 "duration_ms": r.duration_ms,
                 "reason": r.reason,
+                # P2.1 — diagnostic fields (None when the underlying data is
+                # missing; pre_filter_top1 case-level is always 0 / n/a).
+                "pre_filter_count": r.pre_filter_count,
+                "post_filter_count": r.post_filter_count,
+                "score_breakdown": r.score_breakdown,
+                "prompt_hash": r.prompt_hash,
             }
             for r in results
         ],
@@ -154,6 +159,9 @@ def render_markdown(
     lines.append(f"| 6. Verifier Catch Rate | {_fmt(metrics.verifier_catch_rate)} |")
     lines.append(f"| 7. Retry Success Rate | {_fmt(metrics.retry_success_rate)} |")
     lines.append(f"| 8. Hallucinated Slot Rate | {_fmt(metrics.hallucinated_slot_rate)} |")
+    lines.append(f"| 10. MRR (ranker quality) | {_fmt(metrics.mrr)} |")
+    lines.append(f"| 11. Top-1 Accuracy (ranker lead) | {_fmt(metrics.top1_accuracy)} |")
+    lines.append(f"| 12. Pre-filter Top-1 | {_fmt(metrics.pre_filter_top1)} |")
     lines.append("")
     lines.append("> **Hallucinated Slot Rate must be ≈ 0.** Any non-zero value indicates the agent is choosing slots that don't exist in the home — a critical safety bug.")
     lines.append("")
@@ -206,10 +214,10 @@ def write_markdown(
 
 __all__ = [
     "CSV_COLUMNS",
-    "render_json",
     "render_csv",
+    "render_json",
     "render_markdown",
-    "write_json",
     "write_csv",
+    "write_json",
     "write_markdown",
 ]
